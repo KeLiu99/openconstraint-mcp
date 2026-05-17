@@ -8,20 +8,39 @@ Instructions for AI coding agents (Codex CLI, Claude Code, Cursor, etc.) working
 
 The repo is the open-source on-ramp for a commercial CP consulting/product business. The bar for v0 is "easy install, reliable solving, clear errors", not feature breadth.
 
+## Working Principles
+
+### 1. Think Before Coding
+
+State assumptions explicitly. Present multiple interpretations when the request is ambiguous instead of silently picking one. Push back when a simpler approach exists. Stop and name what's unclear rather than guessing.
+
+### 2. Simplicity First
+
+Write the minimum code that solves the stated problem. No speculative features, no abstractions for single-use code, no configurability that wasn't requested, no error handling for impossible scenarios. If 200 lines could be 50, rewrite it. Test: would a senior engineer call this overcomplicated?
+
+### 3. Surgical Changes
+
+Touch only what the task requires. Don't "improve" adjacent code, comments, or formatting. Match existing style even if you'd do it differently. Flag unrelated dead code — don't delete it. Remove imports/variables/functions that *your* changes orphaned; leave pre-existing dead code alone. Every changed line should trace to the user's request.
+
+### 4. Goal-Driven Execution
+
+Define success criteria before starting; loop until verified.
+
+| Instead of...    | Transform to...                                       |
+| ---------------- | ----------------------------------------------------- |
+| "Add validation" | "Write tests for invalid inputs, then make them pass" |
+| "Fix the bug"    | "Write a test that reproduces it, then make it pass"  |
+| "Refactor X"     | "Ensure tests pass before and after"                  |
+
+For multistep tasks, state a brief plan with a verification check per step.
+
 ## Architecture (v0)
 
 ```
-cli  ─► server  ─► minizinc  ─► runtime  ─► schemas
-                          ╲────────────────►  schemas
+cli  ──►  server  ──►  minizinc  ──►  runtime  ──►  schemas
 ```
 
-Modules (all under `src/openconstraint_mcp/`):
-
-- `cli.py` — Typer entry point; user-facing commands (`stdio`, `install-runtime`, `check-runtime`, `list-solvers`).
-- `server.py` — FastMCP app factory + stdio entry; the MCP tools live here.
-- `minizinc.py` — subprocess wrapper around the managed `minizinc` binary.
-- `runtime.py` — locates the managed runtime, reports status, owns `RuntimeMissingError`.
-- `schemas.py` — Pydantic v2 result models.
+A module may import any module to its right. Imports never flow leftward or between same-layer modules.
 
 ## Before You Run Commands
 
@@ -29,62 +48,45 @@ Modules (all under `src/openconstraint_mcp/`):
 
 If `just` is unavailable in your environment, fall back to the underlying `uv run ...` commands the justfile uses. Do **not** invoke raw `python` or `pip` — this project is `uv`-managed end-to-end.
 
-Common recipes:
-
-| Recipe              | What it does                                            |
-| ------------------- | ------------------------------------------------------- |
-| `just` / `just list`| List all recipes.                                       |
-| `just sync`         | Install/sync dependencies (incl. dev group).            |
-| `just check`        | Lint + typecheck + tests. Run before declaring done.    |
-| `just test`         | `pytest` only.                                          |
-| `just lint`         | `ruff check .`                                          |
-| `just format`       | `ruff format .` (writes changes).                       |
-| `just typecheck`    | `mypy src`                                              |
-| `just run`          | Start the MCP server on stdio.                          |
-| `just cli <args>`   | Pass-through to the `openconstraint-mcp` CLI.           |
-| `just clean`        | Remove caches and build artefacts.                      |
-
 ## Privacy & Network
 
-- **Telemetry is disabled by default and is not implemented yet.** Do not add it. Any future telemetry must be opt-in, off by default, and clearly documented.
-- **Nothing leaves the user's machine unless they explicitly opt in.** No background calls, no version checks, no analytics, no remote logging.
-- **Runtime download is explicit and user-controlled.** `install-runtime` must only fetch when the user runs it; never on import, never on first `stdio` boot, never as a "convenience" auto-install.
+- **Telemetry is not implemented.** Do not add it. Any future telemetry must be opt-in and documented.
+- **Nothing leaves the user's machine without explicit opt-in** — no background calls, version checks, analytics, or remote logging.
+- **Runtime download is user-invoked only.** `install-runtime` fetches when the user runs it — never on import, on first `stdio` boot, or as a "convenience" auto-install.
 
 ## Code Style
 
-- **Python 3.12+ compatible.** Development happens on Python 3.14, but the source must run on 3.12. Avoid 3.13+/3.14-only syntax and stdlib.
+- **Target Python 3.12** (development happens on 3.14). Avoid 3.13+ syntax and stdlib.
 - **Type hints everywhere.** Public functions get full annotations. `mypy src` must pass.
 - **Pydantic v2 models** for any structured input or output (MCP tool results, CLI structured output, config). Plain dicts are for ephemeral internal use only.
 - **`pathlib.Path`** for filesystem work; do not pass raw strings around as paths.
-- **Small, focused modules.** One responsibility per file; files that change together live together. Split by responsibility, not by technical layer.
-- **No hidden network calls.** Network-using code is concentrated in `install-runtime` and any explicit user-invoked diagnostic upload.
-- **Keep functions testable.** Inject dependencies (paths, subprocess runners, clocks) where doing so makes a function meaningfully easier to mock. Avoid global state.
+- **One responsibility per file.** Files that change together live; split by responsibility, not by technical layer.
+- **Keep functions testable.** Inject dependencies (paths, subprocess runners, clocks) where it makes a function meaningfully easier to mock. Avoid global state.
 
 ## v0 Scope Guards
 
 - **No Choco solver in v0.** Java/JAR friction; deferred (likely cloud-first).
 - **No `solve` / `optimize` MCP tool in v0.** The skeleton ships `check_runtime` + `list_solvers` only.
-- **No telemetry in v0.** See above.
 - **No managed-runtime download in v0.** `install-runtime` is a placeholder that prints "not yet implemented".
 
 ## Testing
 
 - **Framework: `pytest`** (with `pytest-asyncio` available but only used when needed).
 - **Unit tests must not require a real MiniZinc runtime.** Use the `OPENCONSTRAINT_MCP_RUNTIME_DIR` env var + `tmp_path` pattern (see `tests/conftest.py`) to point the runtime layer at an empty directory.
-- **Mock all network and subprocess in unit tests.** If a test genuinely needs to exercise a real binary, mark it `@pytest.mark.integration` and exclude it from the default `just check` until we wire an integration recipe.
-- **One behaviour per test.** Long setup is fine; multi-assert telescopes are not.
+- **Mock all network and subprocess in unit tests.** Real-binary tests get `@pytest.mark.integration` and stay out of the default `just check`.
+- **One behavior per test.** Long setup is fine; multi-assert telescopes are not.
 
 ## Documentation
 
 - **Update `README.md`** when user-facing behaviour changes — new CLI command, new MCP tool, new flag, install steps.
 - **Document managed-runtime behaviour:** where the MiniZinc bundle lives, how to override it (`OPENCONSTRAINT_MCP_RUNTIME_DIR`), and what version it pins.
-- **Surface third-party licenses** for anything bundled (MiniZinc, OR-Tools, Chuffed) in a `LICENSES/` directory or an equivalent README section. Open-source compliance is non-negotiable.
+- **Surface third-party licenses** for anything bundled (MiniZinc, OR-Tools, Chuffed) in a `LICENSES/` directory or an equivalent README section.
 
 ## Definition of Done
 
 A change is done when:
 
 1. `just check` is green.
-2. New behaviour has unit tests; non-trivial behaviour has at least one CLI- or MCP-level smoke test.
+2. New behavior has unit tests; non-trivial behavior has at least one CLI- or MCP-level smoke test.
 3. User-facing changes are reflected in `README.md`.
 4. No new telemetry, no new hidden network calls, no new global mutable state.
