@@ -1,0 +1,3 @@
+[mcp_servers.openconstraint]
+command = "uv"
+args = ["run", "openconstraint-mcp", "stdio"]

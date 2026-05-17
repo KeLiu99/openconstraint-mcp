@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from typing import Any
+
 from mcp.server.fastmcp import FastMCP
 
 from .minizinc import MiniZincExecutionError, list_solvers
@@ -8,7 +10,7 @@ from .schemas import RuntimeStatus, SolverList
 
 
 def create_server() -> FastMCP:
-    mcp = FastMCP("openconstraint-mcp")
+    mcp: FastMCP[Any] = FastMCP("openconstraint-mcp")
 
     @mcp.tool(description="Report whether the managed MiniZinc runtime is installed.")
     def check_runtime() -> RuntimeStatus:

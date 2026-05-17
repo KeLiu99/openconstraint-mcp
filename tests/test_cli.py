@@ -46,9 +46,7 @@ def test_list_solvers_handles_execution_failure_cleanly(
             "Try `openconstraint-mcp install-runtime`."
         )
 
-    monkeypatch.setattr(
-        "openconstraint_mcp.cli.list_solvers", _raise_execution_error
-    )
+    monkeypatch.setattr("openconstraint_mcp.cli.list_solvers", _raise_execution_error)
 
     result = runner.invoke(app, ["list-solvers"])
     assert result.exit_code == 1
