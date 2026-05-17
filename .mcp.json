@@ -1,0 +1,13 @@
+{
+  "mcpServers": {
+    "openconstraint": {
+      "type": "stdio",
+      "command": "uv",
+      "args": [
+        "run",
+        "openconstraint-mcp",
+        "stdio"
+      ]
+    }
+  }
+}

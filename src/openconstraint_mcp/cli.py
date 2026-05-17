@@ -37,13 +37,9 @@ def check_runtime() -> None:
     """Report whether the managed MiniZinc runtime is installed."""
     status = get_runtime_status()
     if status.installed:
-        _console.print(
-            f"[green]Runtime installed[/green] at {status.minizinc_binary}"
-        )
+        _console.print(f"[green]Runtime installed[/green] at {status.minizinc_binary}")
         return
-    _console.print(
-        f"[red]Runtime not installed.[/red] Expected at {status.runtime_dir}"
-    )
+    _console.print(f"[red]Runtime not installed.[/red] Expected at {status.runtime_dir}")
     raise typer.Exit(code=1)
 
 
