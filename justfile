@@ -24,6 +24,10 @@ cli *args:
 test:
     @uv run pytest -ra || [ "$?" = "5" ]
 
+# Run pytest with arbitrary args, e.g. `just pytest tests/test_cli.py::test_help_lists_all_commands -v`.
+pytest *args:
+    uv run pytest {{args}}
+
 # Lint the source tree with ruff.
 lint:
     uv run ruff check .

@@ -4,7 +4,7 @@ import typer
 from rich.console import Console
 from rich.table import Table
 
-from .minizinc import list_solvers
+from .minizinc import MiniZincExecutionError, list_solvers
 from .runtime import RuntimeMissingError, get_runtime_status
 from .server import run_stdio
 
@@ -52,7 +52,7 @@ def list_solvers_cmd() -> None:
     """List solvers available in the managed MiniZinc runtime."""
     try:
         result = list_solvers()
-    except RuntimeMissingError as exc:
+    except (RuntimeMissingError, MiniZincExecutionError) as exc:
         _console.print(f"[red]{exc}[/red]")
         raise typer.Exit(code=1) from exc
 

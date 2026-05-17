@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-import stat
-import sys
 from pathlib import Path
 
 from openconstraint_mcp.runtime import (
@@ -30,15 +28,8 @@ def test_runtime_not_installed_when_binary_missing(fake_runtime_dir: Path) -> No
     assert status.runtime_dir == str(fake_runtime_dir)
 
 
-def test_runtime_installed_when_executable_present(fake_runtime_dir: Path) -> None:
-    bin_dir = fake_runtime_dir / "bin"
-    bin_dir.mkdir()
-    binary_name = "minizinc.exe" if sys.platform == "win32" else "minizinc"
-    binary = bin_dir / binary_name
-    binary.write_text("")
-    binary.chmod(binary.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
-
+def test_runtime_installed_when_executable_present(fake_minizinc_binary: Path) -> None:
     assert is_runtime_installed() is True
     status = get_runtime_status()
     assert status.installed is True
-    assert status.minizinc_binary == str(binary)
+    assert status.minizinc_binary == str(fake_minizinc_binary)
