@@ -39,6 +39,22 @@ typecheck:
 # Full local gate: lint + typecheck + test.
 check: lint typecheck test
 
+# Stage explicit files, commit, and push the current branch.
+# Usage: just push "commit message" path/one path/two ...
+# Safer default — only the listed files end up staged.
+push msg +files:
+    git add {{files}}
+    git commit -m {{quote(msg)}}
+    git push -u origin HEAD
+
+# Stage *all* changes (incl. untracked), commit, and push the current branch.
+# Usage: just push-all "commit message"
+# Convenience for fully-trusted working trees — risks staging .env/secrets.
+push-all msg:
+    git add -A
+    git commit -m {{quote(msg)}}
+    git push -u origin HEAD
+
 # Remove caches and build artefacts.
 clean:
     rm -rf .pytest_cache .ruff_cache .mypy_cache build dist .coverage
