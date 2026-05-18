@@ -34,6 +34,22 @@ Define success criteria before starting; loop until verified.
 
 For multistep tasks, state a brief plan with a verification check per step.
 
+### 5. Planning Documents Are Not Code Dumps
+
+Plans under `docs/plans/` must be concise, behavior-first execution guides. Do **not** embed full implementation code blocks for whole files, functions, or tests. They waste context, go stale quickly, and encourage agents to copy bugs mechanically.
+
+A good plan includes:
+
+- Goal and non-goals.
+- Explicit assumptions and decisions.
+- A task list with files to touch, behavior to implement, tests to add, and verification commands.
+- Acceptance criteria and known risks.
+- Small snippets only when they clarify an interface, command, schema, or tricky invariant.
+
+If code is necessary in a plan, keep it to function signatures, short pseudocode, or command examples. Do not include step-by-step commit commands unless the user explicitly asks for commits.
+
+Plans must preserve explicit user requirements. If a plan intentionally deviates from a user requirement, stop and ask for approval instead of burying the deviation in a note.
+
 ## Architecture (v0)
 
 ```
@@ -53,6 +69,7 @@ If `just` is unavailable in your environment, fall back to the underlying `uv ru
 - **Telemetry is not implemented.** Do not add it. Any future telemetry must be opt-in and documented.
 - **Nothing leaves the user's machine without explicit opt-in** — no background calls, version checks, analytics, or remote logging.
 - **Runtime download is user-invoked only.** `install-runtime` fetches when the user runs it — never on import, on first `stdio` boot, or as a "convenience" auto-install.
+- **Installer location is user-controllable.** Any managed-runtime installer must support an explicit install directory, a sensible per-user default, and non-interactive operation for CI/client-driven flows.
 
 ## Code Style
 
@@ -67,7 +84,7 @@ If `just` is unavailable in your environment, fall back to the underlying `uv ru
 
 - **No Choco solver in v0.** Java/JAR friction; deferred (likely cloud-first).
 - **No `solve` / `optimize` MCP tool in v0.** The skeleton ships `check_runtime` + `list_solvers` only.
-- **No managed-runtime download in v0.** `install-runtime` is a placeholder that prints "not yet implemented".
+- **Managed-runtime download is installer-only in v0.** `install-runtime` may download a pinned MiniZinc bundle when the user invokes it explicitly. No import, MCP server boot, `check-runtime`, or `list-solvers` path may download anything.
 
 ## Testing
 
