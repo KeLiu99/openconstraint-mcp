@@ -27,10 +27,33 @@ The package exposes four commands:
 
 - **`openconstraint-mcp stdio`** — run the MCP server over stdio. This is the entry
   point an MCP client (e.g. Claude Desktop, Claude Code) launches.
-- **`openconstraint-mcp install-runtime`** — *placeholder in v0.* Will fetch and
-  unpack a managed MiniZinc bundle in a later release. Currently prints a
-  "not yet implemented" message and exits with code 1. See **v0 limitations**
-  below for how to work around this in the meantime.
+- **`openconstraint-mcp install-runtime`** — fetch and install the managed
+  MiniZinc bundle (Linux x86_64 only in v0). Streams the pinned upstream archive
+  from the MiniZinc GitHub release, verifies its SHA256, extracts it into the
+  chosen target, smoke-checks the resulting `bin/minizinc`, and remembers the
+  install location so `check-runtime` and `list-solvers` find it without further
+  configuration. This is the **only** command in the package that touches the
+  network.
+
+  Flags:
+
+  - `--runtime-dir <path>` — explicit install location. Overrides
+    `OPENCONSTRAINT_MCP_RUNTIME_DIR`, the persisted install config, and the
+    platformdirs default, and suppresses the interactive path prompt. Recommended
+    when you want to be certain where the install lands.
+  - `--yes` / `-y` — non-interactive: skip the path prompt **and** skip the
+    overwrite-confirmation prompt **only for a prior managed install**. `--yes`
+    is required for non-TTY (CI / scripted) runs.
+
+    `--yes` does **not** force overwrite of an unmanaged non-empty directory.
+    Pointing `--runtime-dir` at `$HOME`, `/tmp`, a project checkout, or any
+    directory the installer did not previously write to is refused regardless of
+    `--yes`. The marker file `.openconstraint-runtime.json` written into the
+    runtime root is what makes a directory eligible for overwrite — `--yes`
+    only authorises replacing the installer's own prior output.
+
+  When stdin is a TTY and neither `--runtime-dir` nor `--yes` is given, the
+  command prompts for the install location (Enter accepts the default).
 - **`openconstraint-mcp check-runtime`** — report whether the managed MiniZinc
   runtime is installed. Prints the expected runtime path and exits 0 when present,
   exits 1 otherwise.
@@ -86,21 +109,73 @@ Setting `OPENCONSTRAINT_MCP_RUNTIME_DIR=/path/to/minizinc` directly (pointing at
 the binary) will **not** work — the layer will look for `…/minizinc/bin/minizinc`
 underneath it.
 
+### Installing the managed runtime
+
+`openconstraint-mcp install-runtime` is the supported way to put a managed
+MiniZinc bundle on disk. The first invocation:
+
+1. Resolves the install location. Precedence is `--runtime-dir` > the env var >
+   the persisted install config > the platformdirs default
+   (`<platformdirs user_data_dir>/minizinc`).
+2. Streams the pinned MiniZinc bundle from the official MiniZinc GitHub release,
+   verifies its SHA256, extracts it safely, and smoke-checks the resulting
+   `bin/minizinc`.
+3. Writes a small JSON config (`<platformdirs user_config_dir>/install.json`,
+   typically `~/.config/openconstraint-mcp/install.json` on Linux) recording the
+   chosen path.
+
+Once that config is written, subsequent `check-runtime` and `list-solvers` calls
+find the runtime automatically — no env-var fiddling. To reset, delete the
+config file, or set `OPENCONSTRAINT_MCP_RUNTIME_DIR` (the env var always wins).
+If the config file is present but corrupt (e.g. hand-edited into invalid JSON),
+`check-runtime` and `list-solvers` print a warning to stderr and fall back to the
+default location rather than failing silently.
+
+If you pass `--runtime-dir <path>` again on a later install, the new path
+replaces the old one in the config. The previous runtime directory is not
+touched and can be deleted manually.
+
+A successful install also writes a `.openconstraint-runtime.json` marker into
+the runtime directory itself. Future `install-runtime` invocations check that
+marker before overwriting: an unmanaged non-empty directory is refused
+regardless of `--yes`, which makes `--runtime-dir $HOME --yes` (or similar)
+safe — your home directory cannot be wiped by a fat-finger.
+
 ## v0 limitations
 
 This is an early release; the focus is "easy install, reliable solving, clear
 errors" rather than feature breadth. In particular:
 
-- **The managed runtime is not yet auto-downloaded.** `install-runtime` is a
-  placeholder. Until it lands, point `OPENCONSTRAINT_MCP_RUNTIME_DIR` at an
-  existing MiniZinc install (a directory containing `bin/minizinc`) if you want
-  `list-solvers` to work.
+- **The automated installer is Linux x86_64 only.** macOS, Windows, and Linux
+  ARM bundles are tracked separately. On those platforms, `install-runtime`
+  exits 1 with a clear message — point `OPENCONSTRAINT_MCP_RUNTIME_DIR` at an
+  existing MiniZinc install (a directory containing `bin/minizinc`) in the
+  meantime.
 - **No `solve` / `optimize` MCP tool yet.** v0 only exposes introspection
   (`check_runtime`, `list_available_solvers`). The solve tool is the next
   iteration.
 - **No telemetry, ever**, unless and until you explicitly opt in to a clearly
   labelled future feature.
-- **No hidden network calls.** The package does not phone home; the only
-  intentional network-using code path is the (not-yet-implemented)
-  `install-runtime`. `httpx` is declared as a dependency in `pyproject.toml`
-  but is reserved for that future work and is not imported anywhere in v0.
+- **The only code path that touches the network is the `install-runtime` CLI
+  command.** The package does not phone home; `httpx` is only imported when
+  `install-runtime` runs (enforced by a regression test).
+
+## Licensing & upstream sources
+
+`openconstraint-mcp` itself is open source. The MiniZinc runtime it wraps is
+**fetched** from the official MiniZincIDE GitHub release at install time — this
+repository does **not** redistribute MiniZinc or its bundled solvers.
+
+The upstream bundle includes:
+
+- MiniZinc itself (the constraint modelling language and its compiler).
+- Gecode, Chuffed, OR-Tools CP-SAT, COIN-BC, and other solvers shipped with the
+  MiniZincIDE bundle. Their licenses are surfaced upstream — see
+  [minizinc.org](https://www.minizinc.org/) for the license index, or the
+  per-solver entries on the
+  [MiniZincIDE release page](https://github.com/MiniZinc/MiniZincIDE/releases).
+
+After `install-runtime`, each bundled component's license file lives inside the
+installed runtime tree (typically under `<runtime_dir>/share/minizinc/...` and
+adjacent directories) and is left untouched by the installer. For a single
+authoritative document, the MiniZincIDE release page is the recommended source.

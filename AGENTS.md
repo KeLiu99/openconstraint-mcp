@@ -54,9 +54,10 @@ Plans must preserve explicit user requirements. If a plan intentionally deviates
 
 ```
 cli  ──►  server  ──►  minizinc  ──►  runtime  ──►  schemas
+ └─────►  runtime_install   (install-time only; imports no internal modules)
 ```
 
-A module may import any module to its right. Imports never flow leftward or between same-layer modules.
+A module may import any module to its right. Imports never flow leftward or between same-layer modules. `runtime_install` is a leaf used only by `cli` (lazily, so its `httpx`/`rich.progress` deps stay off the cold paths); it imports no internal modules, so it sits outside the left-to-right chain.
 
 ## Before You Run Commands
 

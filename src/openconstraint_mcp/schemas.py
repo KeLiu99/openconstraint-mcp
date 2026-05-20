@@ -1,6 +1,8 @@
 from __future__ import annotations
 
-from pydantic import BaseModel, Field
+from pathlib import Path
+
+from pydantic import BaseModel, Field, field_validator
 
 
 class RuntimeStatus(BaseModel):
@@ -18,3 +20,14 @@ class SolverInfo(BaseModel):
 
 class SolverList(BaseModel):
     solvers: list[SolverInfo]
+
+
+class InstallConfig(BaseModel):
+    runtime_dir: str
+
+    @field_validator("runtime_dir")
+    @classmethod
+    def _runtime_dir_must_be_absolute(cls, value: str) -> str:
+        if not value or not Path(value).is_absolute():
+            raise ValueError("runtime_dir must be a non-empty absolute path")
+        return value
