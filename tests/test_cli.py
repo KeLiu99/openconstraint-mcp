@@ -387,6 +387,27 @@ def test_install_runtime_installer_error_surfaces(
     assert "simulated failure" in result.stdout
 
 
+def test_install_runtime_filesystem_error_surfaces_cleanly(
+    tmp_path: Path,
+    isolated_config_dir: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # A bare OSError (e.g. PermissionError on `parent.mkdir` for a privileged
+    # --runtime-dir) must produce the clean red message, not a raw traceback.
+    def _fake(*args: object, **kwargs: object) -> Path:
+        raise PermissionError(13, "Permission denied", str(tmp_path / "runtime"))
+
+    monkeypatch.setattr(
+        "openconstraint_mcp.runtime_install.install_managed_runtime", _fake
+    )
+
+    target = tmp_path / "runtime"
+    result = runner.invoke(app, ["install-runtime", "--runtime-dir", str(target), "--yes"])
+    assert result.exit_code == 1
+    assert not isinstance(result.exception, OSError)
+    assert "Permission denied" in result.stdout
+
+
 def test_cli_module_does_not_import_httpx_eagerly() -> None:
     saved = {
         name: module

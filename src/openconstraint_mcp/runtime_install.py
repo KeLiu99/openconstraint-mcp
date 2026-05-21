@@ -158,7 +158,7 @@ def _extract_bundle(archive: Path, dest: Path) -> None:
             )
         wrapper = entries[0]
         for child in wrapper.iterdir():
-            shutil.move(str(child), dest / child.name)
+            shutil.move(child, dest / child.name)
         wrapper.rmdir()
     finally:
         if scratch.exists():

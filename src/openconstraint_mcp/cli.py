@@ -132,7 +132,7 @@ def install_runtime(
         installed = install_managed_runtime(
             target_resolved, yes=effective_yes, console=_console
         )
-    except RuntimeInstallError as exc:
+    except (RuntimeInstallError, OSError) as exc:
         _console.print(f"[red]{exc}[/red]")
         raise typer.Exit(code=1) from exc
 
