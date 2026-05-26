@@ -138,7 +138,16 @@ def install_runtime(
         _console.print(f"[red]{exc}[/red]")
         raise typer.Exit(code=1) from exc
 
-    write_install_config(installed)
+    try:
+        write_install_config(installed)
+    except OSError as exc:
+        _console.print(
+            f"[yellow]Runtime installed at {installed}, but could not save "
+            f"the install config ({exc}). Set "
+            f"OPENCONSTRAINT_MCP_RUNTIME_DIR={installed} or fix the config "
+            f"directory and re-run install-runtime to persist the location."
+            "[/yellow]"
+        )
 
 
 @app.command("check-runtime")

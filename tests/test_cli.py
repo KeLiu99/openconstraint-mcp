@@ -99,6 +99,36 @@ def test_check_runtime_warns_on_corrupt_config(
 # install-runtime CLI
 
 
+def test_install_runtime_succeeds_when_config_write_fails(
+    tmp_path: Path,
+    isolated_config_dir: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def _fake_install(target: Path, *, yes: bool, console: object) -> Path:
+        return _fake_install_success(target)
+
+    def _fail_write(_runtime_dir: Path) -> None:
+        raise PermissionError(13, "Permission denied", str(isolated_config_dir))
+
+    monkeypatch.setattr(
+        "openconstraint_mcp.runtime_install.install_managed_runtime", _fake_install
+    )
+    monkeypatch.setattr(
+        "openconstraint_mcp.runtime.write_install_config", _fail_write
+    )
+
+    target = tmp_path / "runtime"
+    result = runner.invoke(
+        app, ["install-runtime", "--runtime-dir", str(target), "--yes"]
+    )
+    # The runtime is on disk, so the command exits 0 with a yellow warning
+    # pointing the user at the env-var workaround.
+    assert result.exit_code == 0, result.output
+    assert "Permission denied" in result.stdout
+    assert "OPENCONSTRAINT_MCP_RUNTIME_DIR" in result.stdout
+    assert str(target.resolve()) in result.stdout
+
+
 def test_install_runtime_warns_on_corrupt_config(
     tmp_path: Path,
     isolated_config_dir: Path,
