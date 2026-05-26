@@ -139,3 +139,13 @@ def test_get_runtime_dir_falls_back_to_platformdirs_default(
     result = get_runtime_dir()
     assert result.name == "minizinc"
     assert "openconstraint-mcp" in str(result)
+
+
+def test_get_runtime_dir_expands_tilde_in_env(
+    isolated_config_dir: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("OPENCONSTRAINT_MCP_RUNTIME_DIR", "~/managed-minizinc")
+    result = get_runtime_dir()
+    assert "~" not in str(result)
+    assert result == Path("~/managed-minizinc").expanduser()

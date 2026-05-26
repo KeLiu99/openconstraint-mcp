@@ -76,6 +76,8 @@ def install_runtime(
         _console.print(f"[red]{exc}[/red]")
         raise typer.Exit(code=1) from exc
 
+    _warn_on_corrupt_install_config()
+
     if runtime_dir is not None:
         target = runtime_dir
     else:

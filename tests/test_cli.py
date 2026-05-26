@@ -99,6 +99,29 @@ def test_check_runtime_warns_on_corrupt_config(
 # install-runtime CLI
 
 
+def test_install_runtime_warns_on_corrupt_config(
+    tmp_path: Path,
+    isolated_config_dir: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    isolated_config_dir.parent.mkdir(parents=True, exist_ok=True)
+    isolated_config_dir.write_text("{ not valid json")
+
+    def _fake(target: Path, *, yes: bool, console: object) -> Path:
+        return _fake_install_success(target)
+
+    monkeypatch.setattr(
+        "openconstraint_mcp.runtime_install.install_managed_runtime", _fake
+    )
+
+    target = tmp_path / "runtime"
+    result = runner.invoke(
+        app, ["install-runtime", "--runtime-dir", str(target), "--yes"]
+    )
+    assert result.exit_code == 0, result.output
+    assert "corrupt" in result.stderr.lower()
+
+
 def test_install_runtime_with_explicit_dir_and_yes(
     tmp_path: Path,
     isolated_config_dir: Path,

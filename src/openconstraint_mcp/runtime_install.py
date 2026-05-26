@@ -28,7 +28,7 @@ MINIZINC_VERSION: str = "2.9.7"
 # MiniZincIDE GitHub release. Recompute alongside MINIZINC_VERSION when bumping.
 _ARCHIVE_SHA256: str = "7e78d3a1d6feec2f5b6a43628632decb6995755ade92ff4e51a2188c54ca6399"
 
-_BUNDLE_FILENAME: str = "MiniZincIDE-2.9.7-bundle-linux-x86_64.tgz"
+_BUNDLE_FILENAME: str = f"MiniZincIDE-{MINIZINC_VERSION}-bundle-linux-x86_64.tgz"
 _BUNDLE_URL: str = (
     f"https://github.com/MiniZinc/MiniZincIDE/releases/download/{MINIZINC_VERSION}/"
     f"{_BUNDLE_FILENAME}"

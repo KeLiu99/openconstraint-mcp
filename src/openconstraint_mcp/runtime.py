@@ -71,7 +71,7 @@ def write_install_config(runtime_dir: Path) -> None:
 def get_runtime_dir() -> Path:
     override = os.environ.get(_ENV_RUNTIME_DIR)
     if override:
-        return Path(override)
+        return Path(override).expanduser()
     config = read_install_config()
     if config is not None:
         return Path(config.runtime_dir)
