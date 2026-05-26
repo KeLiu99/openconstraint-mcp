@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import sys
 from pathlib import Path
 
@@ -148,6 +149,50 @@ def install_runtime(
             f"directory and re-run install-runtime to persist the location."
             "[/yellow]"
         )
+
+
+@app.command("configure-runtime")
+def configure_runtime(
+    runtime_dir: Path = typer.Option(  # noqa: B008  (typer-standard pattern)
+        ...,
+        "--runtime-dir",
+        help=(
+            "Path to an existing MiniZinc install (a directory containing "
+            "bin/minizinc). The path is persisted so check-runtime and "
+            "list-solvers find it without setting OPENCONSTRAINT_MCP_RUNTIME_DIR."
+        ),
+    ),
+) -> None:
+    """Point openconstraint-mcp at an existing MiniZinc install (no download)."""
+    from .runtime import write_install_config
+
+    target = runtime_dir.expanduser().resolve()
+    if not target.is_dir():
+        _console.print(f"[red]Not a directory: {target}[/red]")
+        raise typer.Exit(code=1)
+
+    binary_name = "minizinc.exe" if sys.platform == "win32" else "minizinc"
+    binary = target / "bin" / binary_name
+    if not binary.is_file():
+        _console.print(
+            f"[red]{target} does not look like a MiniZinc install: "
+            f"expected {binary} to exist.[/red]"
+        )
+        raise typer.Exit(code=1)
+    if sys.platform != "win32" and not os.access(binary, os.X_OK):
+        _console.print(f"[red]{binary} is not executable.[/red]")
+        raise typer.Exit(code=1)
+
+    try:
+        write_install_config(target)
+    except OSError as exc:
+        _console.print(
+            f"[red]Could not save install config ({exc}). Set "
+            f"OPENCONSTRAINT_MCP_RUNTIME_DIR={target} as a workaround.[/red]"
+        )
+        raise typer.Exit(code=1) from exc
+
+    _console.print(f"[green]Configured runtime at {target}[/green]")
 
 
 @app.command("check-runtime")

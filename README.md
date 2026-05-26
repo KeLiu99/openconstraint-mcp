@@ -21,9 +21,32 @@ uv sync --all-groups
 The `openconstraint-mcp` script will be available via `uv run openconstraint-mcp …`
 (or `just cli …`, which wraps the same thing).
 
+## Quick start (MCP users)
+
+After installing the package above:
+
+1. **Set up MiniZinc** — one of:
+   - `openconstraint-mcp install-runtime` to fetch and install the managed bundle (Linux x86_64).
+   - `openconstraint-mcp configure-runtime --runtime-dir <path>` to point the package at an existing MiniZinc install (a directory containing `bin/minizinc`).
+2. **Verify:** `openconstraint-mcp check-runtime` and `openconstraint-mcp list-solvers`.
+3. **Wire into your MCP client.** Example for Claude Desktop (`claude_desktop_config.json`):
+
+   ```json
+   {
+     "mcpServers": {
+       "openconstraint": {
+         "command": "openconstraint-mcp",
+         "args": ["stdio"]
+       }
+     }
+   }
+   ```
+
+   Restart your MCP client; `check_runtime` and `list_available_solvers` tools should appear.
+
 ## CLI
 
-The package exposes four commands:
+The package exposes five commands:
 
 - **`openconstraint-mcp stdio`** — run the MCP server over stdio. This is the entry
   point an MCP client (e.g. Claude Desktop, Claude Code) launches.
@@ -54,6 +77,14 @@ The package exposes four commands:
 
   When stdin is a TTY and neither `--runtime-dir` nor `--yes` is given, the
   command prompts for the install location (Enter accepts the default).
+- **`openconstraint-mcp configure-runtime --runtime-dir <path>`** — point the
+  package at an existing MiniZinc install (e.g. a system install, package-manager
+  install, or one you built yourself) without setting
+  `OPENCONSTRAINT_MCP_RUNTIME_DIR`. Validates that `<path>/bin/minizinc` exists
+  and is executable, then persists the path to the install config. Does not
+  download anything and does not claim ownership of the directory — use this
+  when you already have MiniZinc on disk and just want `openconstraint-mcp` to
+  find it.
 - **`openconstraint-mcp check-runtime`** — report whether the managed MiniZinc
   runtime is installed. Prints the expected runtime path and exits 0 when present,
   exits 1 otherwise.

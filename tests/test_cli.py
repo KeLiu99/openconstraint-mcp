@@ -57,7 +57,13 @@ def test_list_solvers_reports_missing(fake_runtime_dir: Path) -> None:
 def test_help_lists_all_commands() -> None:
     result = runner.invoke(app, ["--help"])
     assert result.exit_code == 0
-    for cmd in ("stdio", "install-runtime", "check-runtime", "list-solvers"):
+    for cmd in (
+        "stdio",
+        "install-runtime",
+        "configure-runtime",
+        "check-runtime",
+        "list-solvers",
+    ):
         assert cmd in result.stdout
 
 
@@ -459,6 +465,113 @@ def test_install_runtime_filesystem_error_surfaces_cleanly(
     assert result.exit_code == 1
     assert not isinstance(result.exception, OSError)
     assert "Permission denied" in result.stdout
+
+
+# ---------------------------------------------------------------------------
+# configure-runtime CLI
+
+
+def _fake_external_minizinc(target: Path) -> Path:
+    """Build a fake external MiniZinc install — bin/minizinc only, no marker.
+
+    Mirrors what configure-runtime expects to find on disk: a user-owned
+    MiniZinc directory that this package did not install and does not manage.
+    """
+    target = target.expanduser().resolve()
+    bin_dir = target / "bin"
+    bin_dir.mkdir(parents=True, exist_ok=True)
+    binary = bin_dir / "minizinc"
+    binary.write_text("#!/bin/sh\necho 'minizinc fake'\n")
+    binary.chmod(binary.stat().st_mode | stat.S_IXUSR)
+    return target
+
+
+def test_configure_runtime_persists_path(
+    tmp_path: Path,
+    isolated_config_dir: Path,
+) -> None:
+    target = _fake_external_minizinc(tmp_path / "existing-minizinc")
+    result = runner.invoke(
+        app, ["configure-runtime", "--runtime-dir", str(target)]
+    )
+    assert result.exit_code == 0, result.output
+
+    config = read_install_config()
+    assert config is not None
+    assert Path(config.runtime_dir) == target.resolve()
+
+
+def test_configure_runtime_rejects_missing_dir(
+    tmp_path: Path,
+    isolated_config_dir: Path,
+) -> None:
+    target = tmp_path / "does-not-exist"
+    result = runner.invoke(
+        app, ["configure-runtime", "--runtime-dir", str(target)]
+    )
+    assert result.exit_code == 1
+    assert "Not a directory" in result.stdout
+    assert read_install_config() is None
+
+
+def test_configure_runtime_rejects_dir_without_minizinc_binary(
+    tmp_path: Path,
+    isolated_config_dir: Path,
+) -> None:
+    target = tmp_path / "empty-dir"
+    target.mkdir()
+    result = runner.invoke(
+        app, ["configure-runtime", "--runtime-dir", str(target)]
+    )
+    assert result.exit_code == 1
+    # rich may wrap long tmp paths, including inside words around line breaks.
+    assert "does not look like a MiniZinc install" in " ".join(result.stdout.split())
+    assert read_install_config() is None
+
+
+def test_configure_runtime_rejects_non_executable_binary(
+    tmp_path: Path,
+    isolated_config_dir: Path,
+) -> None:
+    if sys.platform == "win32":
+        pytest.skip("Executable bit semantics differ on Windows")
+    target = tmp_path / "broken-minizinc"
+    bin_dir = target / "bin"
+    bin_dir.mkdir(parents=True)
+    binary = bin_dir / "minizinc"
+    binary.write_text("#!/bin/sh\n")
+    # Deliberately no chmod +x.
+
+    result = runner.invoke(
+        app, ["configure-runtime", "--runtime-dir", str(target)]
+    )
+    assert result.exit_code == 1
+    assert "not executable" in result.stdout
+    assert read_install_config() is None
+
+
+def test_configure_runtime_config_write_failure_surfaces_cleanly(
+    tmp_path: Path,
+    isolated_config_dir: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    target = _fake_external_minizinc(tmp_path / "existing-minizinc")
+
+    def _fail_write(_runtime_dir: Path) -> None:
+        raise PermissionError(13, "Permission denied", str(isolated_config_dir))
+
+    monkeypatch.setattr(
+        "openconstraint_mcp.runtime.write_install_config", _fail_write
+    )
+
+    result = runner.invoke(
+        app, ["configure-runtime", "--runtime-dir", str(target)]
+    )
+    assert result.exit_code == 1
+    flat = result.stdout.replace("\n", "")
+    assert "Permission denied" in flat
+    assert "OPENCONSTRAINT_MCP_RUNTIME_DIR" in flat
+    assert str(target.resolve()) in flat
 
 
 def test_cli_module_does_not_import_httpx_eagerly() -> None:
