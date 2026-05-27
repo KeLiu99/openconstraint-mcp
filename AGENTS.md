@@ -81,10 +81,23 @@ If `just` is unavailable in your environment, fall back to the underlying `uv ru
 - **One responsibility per file.** Files that change together live; split by responsibility, not by technical layer.
 - **Keep functions testable.** Inject dependencies (paths, subprocess runners, clocks) where it makes a function meaningfully easier to mock. Avoid global state.
 
+## Solving Scope
+
+The v0 introspection-only restriction is lifted. Solving features — `solve`, `optimize`, model validation, dry-run compilation, solution checking, global-constraint lookup, and similar — may be added incrementally as long as the following invariants hold:
+
+- **Local-first.** All solving runs on the user's machine. No remote solving backends, no upload of models or data, no telemetry on solver runs.
+- **Managed runtime.** Solver execution must use the managed/local MiniZinc runtime resolved through the runtime layer (`OPENCONSTRAINT_MCP_RUNTIME_DIR` or the install config), never an arbitrary `$PATH` lookup.
+- **No server-side LLM calls.** The MCP server must never own LLM credentials or invoke a generative model. This includes MCP sampling — the server may not request the client's LLM either.
+- **No LangChain / LangGraph in the core server.** Do not pull these dependencies into the server package. They imply agent loops and LLM coupling that conflict with the deterministic, local-first posture.
+- **No hidden network calls.** Solving, validation, model lookup, and result inspection must all be offline. The only sanctioned network call remains the user-invoked `install-runtime` download.
+
+LLM-assisted modeling — natural-language → MiniZinc, model critique, repair suggestions, explanation — belongs in the **MCP client**. The server's job is to expose deterministic, verifiable MCP tools and prompts the client's LLM can call: model validation, dry-run compilation, solving, solution checking, global-constraint lookup, example retrieval, etc. The division of labor is **LLM proposes, server verifies.**
+
+The product direction is **MiniZinc-first, not MiniZinc-only forever**: start with MiniZinc-compatible discrete optimization, and add native solver backends only when they solve concrete gaps.
+
 ## v0 Scope Guards
 
 - **No Choco solver in v0.** Java/JAR friction; deferred (likely cloud-first).
-- **No `solve` / `optimize` MCP tool in v0.** The skeleton ships `check_runtime` + `list_solvers` only.
 - **Managed-runtime download is installer-only in v0.** `install-runtime` may download a pinned MiniZinc bundle when the user invokes it explicitly. No import, MCP server boot, `check-runtime`, or `list-solvers` path may download anything.
 
 ## Testing

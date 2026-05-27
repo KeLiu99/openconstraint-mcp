@@ -8,6 +8,69 @@ from .minizinc import MiniZincExecutionError, list_solvers
 from .runtime import RuntimeMissingError, get_runtime_status
 from .schemas import RuntimeStatus, SolverList
 
+_SOLVE_CONSTRAINT_PROBLEM_PROMPT = """\
+You are the MCP client's reasoning model helping the user solve a
+constraint-programming or optimization problem using openconstraint-mcp.
+
+openconstraint-mcp itself does not call any LLM and does not embed agent
+frameworks. It only exposes MCP prompts and deterministic local tools that
+run MiniZinc on the user's machine. The division of labor is: you draft the
+model, the local managed MiniZinc runtime verifies and solves it.
+
+User problem:
+{problem}
+
+Do the following:
+
+1. Analyze the problem. Identify:
+   - decision variables and their domains,
+   - hard constraints,
+   - any objective (minimize / maximize), or "satisfy" if it is a pure
+     feasibility problem.
+
+2. If anything important is missing (sizes, bounds, the objective, tie-
+   breakers), ask the user at most a few concise clarifying questions before
+   drafting anything. Do not silently invent values.
+
+3. When you have enough information, draft a complete MiniZinc model. The
+   model must include:
+   - every variable and parameter declaration,
+   - every constraint,
+   - exactly one `solve` statement (`solve satisfy;`,
+     `solve minimize <expr>;`, or `solve maximize <expr>;`),
+   - an `output` block that prints the solution in a self-describing form.
+
+   Prefer `cp-sat` as the default solver unless the user has specified
+   otherwise.
+
+4. Execute the model:
+   - If the tool `solve_minizinc_model` is available to you, call it with
+     the drafted MiniZinc model and let the local managed MiniZinc runtime
+     do the solving. Use exactly that tool name; do not invent a different
+     one or invent additional arguments.
+   - If `solve_minizinc_model` is not available to you yet, do not
+     fabricate a tool call. Present the complete MiniZinc model to the
+     user as a code block and tell them they can run it locally with:
+
+         minizinc --solver cp-sat model.mzn
+
+5. If MiniZinc reports a syntax, type, or solver error, revise the model
+   and retry — but only retry through `solve_minizinc_model` when that
+   tool is actually available. Never fabricate solver output.
+
+6. Once you have a result, explain it to the user in plain language: what
+   the decision variables ended up as, whether the solution is optimal or
+   only feasible, and any caveats worth noting.
+
+Boundary reminders:
+- You draft the MiniZinc model; openconstraint-mcp does not.
+- openconstraint-mcp does not own LLM credentials and does not invoke a
+  generative model.
+- All solving runs locally on the user's machine through the managed
+  MiniZinc runtime — no remote backends, no uploads, no hidden network
+  calls.
+"""
+
 
 def create_server() -> FastMCP:
     mcp: FastMCP[Any] = FastMCP("openconstraint-mcp")
@@ -27,6 +90,18 @@ def create_server() -> FastMCP:
             # "hint": "run install-runtime"}) so MCP clients can branch on it
             # programmatically rather than parsing the message string.
             raise RuntimeError(str(exc)) from exc
+
+    @mcp.prompt(
+        name="solve_constraint_problem",
+        description=(
+            "Guide the MCP client's LLM through translating a natural-language "
+            "constraint or optimization problem into MiniZinc and running it "
+            "through the local managed runtime (via solve_minizinc_model when "
+            "available, otherwise a local CLI fallback)."
+        ),
+    )
+    def solve_constraint_problem(problem: str) -> str:
+        return _SOLVE_CONSTRAINT_PROBLEM_PROMPT.format(problem=problem)
 
     return mcp
 

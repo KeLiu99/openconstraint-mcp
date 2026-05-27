@@ -102,7 +102,35 @@ The stdio server exposes two introspection tools:
   (`id`, `name`, `version`, `tags`). Raises a runtime-missing error if the
   managed MiniZinc binary is not present.
 
-A `solve` / `optimize` tool is intentionally **not** part of v0 — see below.
+An execution tool (`solve_minizinc_model`) is not yet implemented — the
+`solve_constraint_problem` MCP prompt below tells the client's LLM to fall
+back to a local CLI command until it ships.
+
+## MCP prompts
+
+The stdio server also exposes one MCP prompt for client-side LLMs to use:
+
+- **`solve_constraint_problem(problem: str)`** — a guided template for the
+  MCP client's LLM. Given a natural-language constraint or optimization
+  problem, the prompt instructs the client's model to:
+
+  1. Identify decision variables, domains, constraints, and any objective.
+  2. Ask the user a few concise clarifying questions if the problem is
+     underspecified, rather than silently inventing values.
+  3. Draft a complete MiniZinc model — including declarations,
+     constraints, exactly one `solve` statement, and an `output` block —
+     preferring the `cp-sat` solver by default.
+  4. Call the future `solve_minizinc_model` tool if it is available, or
+     otherwise present the drafted model to the user with the local
+     fallback command `minizinc --solver cp-sat model.mzn`.
+  5. Revise the model if MiniZinc reports an error, and explain the final
+     result in plain language.
+
+  The openconstraint-mcp server itself does **not** call an LLM and does
+  not embed any agent framework. The prompt only structures how the
+  *client's* LLM should propose a MiniZinc model; the model is then
+  verified by the local managed MiniZinc runtime once an execution tool
+  is wired in. `LLM proposes, local MiniZinc verifies.`
 
 ## Managed runtime
 
@@ -182,9 +210,11 @@ errors" rather than feature breadth. In particular:
   exits 1 with a clear message — point `OPENCONSTRAINT_MCP_RUNTIME_DIR` at an
   existing MiniZinc install (a directory containing `bin/minizinc`) in the
   meantime.
-- **No `solve` / `optimize` MCP tool yet.** v0 only exposes introspection
-  (`check_runtime`, `list_available_solvers`). The solve tool is the next
-  iteration.
+- **No `solve_minizinc_model` execution tool yet.** v0 exposes introspection
+  (`check_runtime`, `list_available_solvers`) and the `solve_constraint_problem`
+  MCP prompt that guides the client's LLM to draft a MiniZinc model. A
+  deterministic execution tool that runs the drafted model through the
+  managed local runtime is the next iteration.
 - **No telemetry, ever**, unless and until you explicitly opt in to a clearly
   labelled future feature.
 - **The only code path that touches the network is the `install-runtime` CLI
