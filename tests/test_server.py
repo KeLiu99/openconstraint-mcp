@@ -79,9 +79,24 @@ async def test_solve_constraint_problem_prompt_guides_minizinc_drafting() -> Non
         "draft",
         "MiniZinc",
         "solve_minizinc_model",
-        "minizinc --solver cp-sat model.mzn",
+        "check-runtime",
+        "install-runtime",
     ):
         assert substring in text, f"prompt missing required guidance: {substring!r}"
+
+
+@pytest.mark.asyncio
+async def test_solve_constraint_problem_prompt_does_not_recommend_bare_path_minizinc() -> None:
+    text = await _get_prompt_text(
+        "solve_constraint_problem", {"problem": SAMPLE_PROBLEM}
+    )
+
+    # The managed-runtime invariant in AGENTS.md forbids recommending an
+    # arbitrary `$PATH`-resolved `minizinc`. The fallback must route users
+    # through the openconstraint-mcp CLI instead.
+    assert "minizinc --solver cp-sat model.mzn" not in text, (
+        "fallback must not recommend a bare PATH-based minizinc invocation"
+    )
 
 
 @pytest.mark.asyncio
