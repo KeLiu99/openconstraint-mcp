@@ -49,24 +49,10 @@ Do the following:
      do the solving. Use exactly that tool name; do not invent a different
      one or invent additional arguments.
    - If `solve_minizinc_model` is not available to you yet, do not
-     fabricate a tool call, and do not tell the user to run a bare
-     `minizinc` from their PATH — that bypasses the managed runtime and
-     can pick up a different MiniZinc version with different solvers.
-     Instead, walk the user through the openconstraint-mcp CLI:
-       a. Have them run `openconstraint-mcp check-runtime` to confirm
-          the managed runtime is installed and to read the exact path
-          of its `minizinc` binary.
-       b. If `check-runtime` reports the runtime as missing, have them
-          either run `openconstraint-mcp install-runtime` to download
-          the managed bundle, or run
-          `openconstraint-mcp configure-runtime --runtime-dir <path>`
-          (equivalently, set `OPENCONSTRAINT_MCP_RUNTIME_DIR=<path>`)
-          to point at an existing MiniZinc install, then re-run
-          `check-runtime`.
-       c. Present the complete MiniZinc model as a code block and have
-          them solve it by invoking that exact managed `minizinc`
-          binary (the path printed by `check-runtime`) with the chosen
-          solver flag, e.g. `--solver cp-sat`.
+     fabricate a tool call. Present the complete MiniZinc model to the
+     user as a code block and tell them they can run it locally with:
+
+         minizinc --solver cp-sat model.mzn
 
 5. If MiniZinc reports a syntax, type, or solver error, revise the model
    and retry — but only retry through `solve_minizinc_model` when that
@@ -111,9 +97,7 @@ def create_server() -> FastMCP:
             "Guide the MCP client's LLM through translating a natural-language "
             "constraint or optimization problem into MiniZinc and running it "
             "through the local managed runtime (via solve_minizinc_model when "
-            "available, otherwise by walking the user through the "
-            "openconstraint-mcp CLI to set up and invoke the managed runtime "
-            "manually — never via a bare PATH-based minizinc)."
+            "available, otherwise a local CLI fallback)."
         ),
     )
     def solve_constraint_problem(problem: str) -> str:

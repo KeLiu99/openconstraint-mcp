@@ -104,10 +104,7 @@ The stdio server exposes two introspection tools:
 
 An execution tool (`solve_minizinc_model`) is not yet implemented — the
 `solve_constraint_problem` MCP prompt below tells the client's LLM to fall
-back to driving the openconstraint-mcp CLI (`check-runtime` to locate the
-managed `minizinc` binary, plus `install-runtime` or `configure-runtime`
-if it is missing) and invoking that managed binary directly, never a bare
-`minizinc` from `$PATH`.
+back to a local CLI command until it ships.
 
 ## MCP prompts
 
@@ -124,12 +121,8 @@ The stdio server also exposes one MCP prompt for client-side LLMs to use:
      constraints, exactly one `solve` statement, and an `output` block —
      preferring the `cp-sat` solver by default.
   4. Call the future `solve_minizinc_model` tool if it is available, or
-     otherwise walk the user through the openconstraint-mcp CLI —
-     `check-runtime` to locate the managed `minizinc` binary (with
-     `install-runtime` or `configure-runtime` first if it is missing) —
-     and have them invoke that exact managed binary on the drafted
-     model. The prompt explicitly forbids recommending a bare
-     PATH-based `minizinc` invocation.
+     otherwise present the drafted model to the user with the local
+     fallback command `minizinc --solver cp-sat model.mzn`.
   5. Revise the model if MiniZinc reports an error, and explain the final
      result in plain language.
 
