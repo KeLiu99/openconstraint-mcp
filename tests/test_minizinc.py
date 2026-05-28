@@ -105,6 +105,27 @@ def test_list_solvers_wraps_exec_failure(
     assert "install-runtime" in str(exc_info.value)
 
 
+def test_list_solvers_decodes_output_as_utf8(
+    fake_minizinc_binary: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[dict[str, Any]] = []
+
+    class _FakeCompleted:
+        stdout = "[]"
+        returncode = 0
+
+    def _fake_run(*args: Any, **kwargs: Any) -> _FakeCompleted:
+        calls.append({"kwargs": kwargs})
+        return _FakeCompleted()
+
+    monkeypatch.setattr("openconstraint_mcp.minizinc.subprocess.run", _fake_run)
+
+    list_solvers()
+
+    assert calls[0]["kwargs"].get("encoding") == "utf-8"
+
+
 def test_solve_result_round_trips() -> None:
     result = SolveResult(
         status="optimal",
@@ -157,6 +178,25 @@ def test_parse_status_follows_precedence_table(
     expected: SolveStatus,
 ) -> None:
     assert _parse_status(stdout, returncode, timed_out) == expected
+
+
+@pytest.mark.parametrize(
+    ("stdout", "expected"),
+    [
+        # A rule of more than ten equals printed by the model's own output
+        # block must not be read as the optimality marker, which is exactly
+        # ten equals alone on its own line.
+        ("x = 3;\n=============\n----------\n", "satisfied"),
+        # A status string embedded in a longer output line is not a marker;
+        # FlatZinc markers always occupy their own line.
+        ("x = 2; note =====UNKNOWN===== ref\n----------\n", "satisfied"),
+    ],
+)
+def test_parse_status_ignores_markers_embedded_in_output_lines(
+    stdout: str,
+    expected: SolveStatus,
+) -> None:
+    assert _parse_status(stdout, returncode=0, timed_out=False) == expected
 
 
 class _FakeCompletedProcess:
@@ -419,3 +459,37 @@ def test_solve_model_wraps_oserror_as_execution_error(
     with pytest.raises(MiniZincExecutionError) as exc_info:
         solve_model("solve satisfy;")
     assert "install-runtime" in str(exc_info.value)
+
+
+def test_solve_model_decodes_output_as_utf8(
+    fake_minizinc_binary: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls = _record_subprocess(
+        monkeypatch, _FakeCompletedProcess(stdout="==========\n", stderr="", returncode=0)
+    )
+
+    solve_model("solve satisfy;")
+
+    assert calls[0]["kwargs"].get("encoding") == "utf-8"
+
+
+def test_solve_model_writes_model_file_as_utf8(
+    fake_minizinc_binary: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured: dict[str, Any] = {}
+    original_write_text = Path.write_text
+
+    def _spy_write_text(self: Path, data: str, **kwargs: Any) -> int:
+        captured["encoding"] = kwargs.get("encoding")
+        return original_write_text(self, data, **kwargs)
+
+    monkeypatch.setattr(Path, "write_text", _spy_write_text)
+    _record_subprocess(
+        monkeypatch, _FakeCompletedProcess(stdout="==========\n", stderr="", returncode=0)
+    )
+
+    solve_model("% café λ\nsolve satisfy;")
+
+    assert captured["encoding"] == "utf-8"

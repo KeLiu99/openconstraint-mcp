@@ -21,19 +21,24 @@ class MiniZincExecutionError(RuntimeError):
 def _parse_status(stdout: str, returncode: int, timed_out: bool) -> SolveStatus:
     if timed_out:
         return "timeout"
-    if "=====ERROR=====" in stdout:
+    # FlatZinc status markers always occupy their own line, so match whole
+    # stripped lines rather than substrings — otherwise a model whose output
+    # block prints a rule of dashes/equals or the literal marker text would be
+    # misclassified.
+    lines = {line.strip() for line in stdout.splitlines()}
+    if "=====ERROR=====" in lines:
         return "error"
-    if "=====UNSATISFIABLE=====" in stdout:
+    if "=====UNSATISFIABLE=====" in lines:
         return "unsatisfiable"
-    if "=====UNBOUNDED=====" in stdout:
+    if "=====UNBOUNDED=====" in lines:
         return "unbounded"
-    if "=====UNSATorUNBOUNDED=====" in stdout:
+    if "=====UNSATorUNBOUNDED=====" in lines:
         return "unsat_or_unbounded"
-    if "=====UNKNOWN=====" in stdout:
+    if "=====UNKNOWN=====" in lines:
         return "unknown"
-    if "==========" in stdout:
+    if "==========" in lines:
         return "optimal"
-    if "----------" in stdout:
+    if "----------" in lines:
         return "satisfied"
     if returncode != 0:
         return "error"
@@ -60,6 +65,8 @@ def list_solvers() -> SolverList:
             [str(binary), "--solvers-json"],
             capture_output=True,
             text=True,
+            encoding="utf-8",
+            errors="replace",
             check=True,
         )
     except (subprocess.CalledProcessError, OSError) as exc:
@@ -103,7 +110,7 @@ def solve_model(
     with tempfile.TemporaryDirectory(prefix="openconstraint-mcp-") as tmp:
         tmp_dir = Path(tmp)
         model_file = tmp_dir / "model.mzn"
-        model_file.write_text(model)
+        model_file.write_text(model, encoding="utf-8")
         cmd = [
             str(binary),
             "--solver",
@@ -118,6 +125,8 @@ def solve_model(
                 cmd,
                 capture_output=True,
                 text=True,
+                encoding="utf-8",
+                errors="replace",
                 timeout=subprocess_timeout,
                 cwd=str(tmp_dir),
             )
