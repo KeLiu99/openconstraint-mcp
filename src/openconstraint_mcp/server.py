@@ -4,9 +4,15 @@ from typing import Any
 
 from mcp.server.fastmcp import FastMCP
 
-from .minizinc import MiniZincExecutionError, list_solvers
+from .minizinc import (
+    DEFAULT_SOLVE_TIMEOUT_MS,
+    DEFAULT_SOLVER,
+    MiniZincExecutionError,
+    list_solvers,
+    solve_model,
+)
 from .runtime import RuntimeMissingError, get_runtime_status
-from .schemas import RuntimeStatus, SolverList
+from .schemas import RuntimeStatus, SolveResult, SolverList
 
 _SOLVE_CONSTRAINT_PROBLEM_PROMPT = """\
 You are the MCP client's reasoning model helping the user solve a
@@ -103,6 +109,26 @@ def create_server() -> FastMCP:
             # structured error envelope (e.g. {"code": "runtime_missing",
             # "hint": "run install-runtime"}) so MCP clients can branch on it
             # programmatically rather than parsing the message string.
+            raise RuntimeError(str(exc)) from exc
+
+    @mcp.tool(
+        description=(
+            "Run a complete MiniZinc model through the managed local MiniZinc "
+            "runtime. The `model` argument must be complete MiniZinc source — "
+            "declarations, constraints, exactly one `solve` statement, and an "
+            "`output` block. Returns a SolveResult with the run's status plus "
+            "the runtime's raw stdout and stderr so the caller can revise and "
+            "retry on MiniZinc errors."
+        )
+    )
+    def solve_minizinc_model(
+        model: str,
+        solver: str = DEFAULT_SOLVER,
+        timeout_ms: int = DEFAULT_SOLVE_TIMEOUT_MS,
+    ) -> SolveResult:
+        try:
+            return solve_model(model, solver=solver, timeout_ms=timeout_ms)
+        except (RuntimeMissingError, MiniZincExecutionError, ValueError) as exc:
             raise RuntimeError(str(exc)) from exc
 
     @mcp.prompt(
