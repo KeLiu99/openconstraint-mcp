@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Literal
 
 from pydantic import BaseModel, Field, field_validator
 
@@ -20,6 +21,26 @@ class SolverInfo(BaseModel):
 
 class SolverList(BaseModel):
     solvers: list[SolverInfo]
+
+
+SolveStatus = Literal[
+    "satisfied",
+    "optimal",
+    "unsatisfiable",
+    "unknown",
+    "unbounded",
+    "unsat_or_unbounded",
+    "error",
+    "timeout",
+]
+
+
+class SolveResult(BaseModel):
+    status: SolveStatus
+    solver: str
+    stdout: str
+    stderr: str
+    elapsed_ms: int
 
 
 class InstallConfig(BaseModel):

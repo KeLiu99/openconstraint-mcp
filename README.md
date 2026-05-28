@@ -94,20 +94,49 @@ The package exposes five commands:
 
 ## MCP tools
 
-The stdio server exposes two introspection tools:
+The stdio server exposes two introspection tools and one execution tool:
 
 - **`check_runtime`** — returns a `RuntimeStatus` with fields
   `installed: bool`, `runtime_dir: str`, and `minizinc_binary: str | None`.
 - **`list_available_solvers`** — returns a `SolverList` of `SolverInfo` entries
   (`id`, `name`, `version`, `tags`). Raises a runtime-missing error if the
   managed MiniZinc binary is not present.
+- **`solve_minizinc_model`** — run a complete MiniZinc model through the
+  managed local runtime. Arguments:
 
-An execution tool (`solve_minizinc_model`) is not yet implemented — the
-`solve_constraint_problem` MCP prompt below tells the client's LLM to fall
-back to driving the openconstraint-mcp CLI (`check-runtime` to locate the
-managed `minizinc` binary, plus `install-runtime` or `configure-runtime`
-if it is missing) and invoking that managed binary directly, never a bare
-`minizinc` from `$PATH`.
+  - `model: str` — the complete MiniZinc source (declarations, constraints,
+    exactly one `solve` statement, and an `output` block). Must not be empty.
+  - `solver: str = "cp-sat"` — passed through verbatim to MiniZinc's
+    `--solver` flag.
+  - `timeout_ms: int = 30000` — solving budget in milliseconds. Must be
+    strictly positive. `0` is **not** "no timeout" — it is a validation
+    error. Pass a real budget, or omit the argument to get the default.
+
+  Returns a `SolveResult` with fields:
+
+  - `status: str` — one of `"timeout"`, `"error"`, `"unsatisfiable"`,
+    `"unbounded"`, `"unsat_or_unbounded"`, `"unknown"`, `"optimal"`,
+    `"satisfied"` (precedence in that order — see the source for details).
+  - `solver: str` — the solver name that ran, echoed from the request.
+  - `stdout: str` — the runtime's raw stdout (solution lines and separator
+    markers from the model's `output` block).
+  - `stderr: str` — the runtime's raw stderr (compile, type, and solver
+    errors land here).
+  - `elapsed_ms: int` — wall-clock duration of the subprocess call.
+
+  **Division of labor.** The `solve_constraint_problem` MCP prompt (below)
+  guides the client LLM to draft a MiniZinc model; `solve_minizinc_model`
+  executes that drafted model locally and returns the runtime's verbatim
+  output. `LLM proposes, server verifies.`
+
+  **Failure-mode contract.** Environment and argument problems —
+  runtime not installed, empty `model`, non-positive `timeout_ms`, OS-level
+  failure to exec the managed binary — surface as **MCP errors** the
+  client must surface to the user. Solving outcomes — unsat, unbounded,
+  timeout, MiniZinc model/syntax/type/solver errors — come back as a
+  normal `SolveResult` whose `status` field encodes the outcome, so a
+  client LLM can branch on it (and feed `stderr` back into a revise-and-
+  retry loop) without exception handling.
 
 ## MCP prompts
 
@@ -123,7 +152,7 @@ The stdio server also exposes one MCP prompt for client-side LLMs to use:
   3. Draft a complete MiniZinc model — including declarations,
      constraints, exactly one `solve` statement, and an `output` block —
      preferring the `cp-sat` solver by default.
-  4. Call the future `solve_minizinc_model` tool if it is available, or
+  4. Call the `solve_minizinc_model` tool if it is available, or
      otherwise walk the user through the openconstraint-mcp CLI —
      `check-runtime` to locate the managed `minizinc` binary (with
      `install-runtime` or `configure-runtime` first if it is missing) —
@@ -136,8 +165,8 @@ The stdio server also exposes one MCP prompt for client-side LLMs to use:
   The openconstraint-mcp server itself does **not** call an LLM and does
   not embed any agent framework. The prompt only structures how the
   *client's* LLM should propose a MiniZinc model; the model is then
-  verified by the local managed MiniZinc runtime once an execution tool
-  is wired in. `LLM proposes, local MiniZinc verifies.`
+  verified by the local managed MiniZinc runtime via
+  `solve_minizinc_model`. `LLM proposes, local MiniZinc verifies.`
 
 ## Managed runtime
 
@@ -217,11 +246,6 @@ errors" rather than feature breadth. In particular:
   exits 1 with a clear message — point `OPENCONSTRAINT_MCP_RUNTIME_DIR` at an
   existing MiniZinc install (a directory containing `bin/minizinc`) in the
   meantime.
-- **No `solve_minizinc_model` execution tool yet.** v0 exposes introspection
-  (`check_runtime`, `list_available_solvers`) and the `solve_constraint_problem`
-  MCP prompt that guides the client's LLM to draft a MiniZinc model. A
-  deterministic execution tool that runs the drafted model through the
-  managed local runtime is the next iteration.
 - **No telemetry, ever**, unless and until you explicitly opt in to a clearly
   labelled future feature.
 - **The only code path that touches the network is the `install-runtime` CLI
