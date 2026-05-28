@@ -130,9 +130,11 @@ def test_install_runtime_succeeds_when_config_write_fails(
     # The runtime is on disk, so the command exits 0 with a yellow warning
     # pointing the user at the env-var workaround.
     assert result.exit_code == 0, result.output
-    assert "Permission denied" in result.stdout
-    assert "OPENCONSTRAINT_MCP_RUNTIME_DIR" in result.stdout
-    assert str(target.resolve()) in result.stdout
+    # rich may wrap the long tmp path across lines; normalise before matching.
+    flat = result.stdout.replace("\n", "")
+    assert "Permission denied" in flat
+    assert "OPENCONSTRAINT_MCP_RUNTIME_DIR" in flat
+    assert str(target.resolve()) in flat
 
 
 def test_install_runtime_warns_on_corrupt_config(
