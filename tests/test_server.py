@@ -37,6 +37,26 @@ SAMPLE_PROBLEM = (
     "one nurse and nobody works two shifts in a row."
 )
 
+_UNSAT_CORE_MODEL = (
+    "var 0..10: x;\n"
+    "var 0..10: y;\n"
+    "\n"
+    "constraint x + y > 5;\n"
+    "constraint x + y < 3;\n"
+    "constraint x != y;\n"
+    "\n"
+    "solve satisfy;\n"
+)
+
+_UNSAT_CORE_STDOUT = (
+    "FznSubProblem:  hard cons: 0    soft cons: 3   leaves: 3      "
+    "branches: 4    Built tree in 0.01 seconds.\n"
+    "MUS: 1 2\n"
+    "Brief: int_lin_le, int_lin_le\n"
+    "Traces: model.mzn|4|12|4|20|;model.mzn|5|12|5|20|;"
+    "redefinitions.mzn|10|1|10|5|\n"
+)
+
 
 async def _get_prompt_text(prompt_name: str, arguments: dict[str, str]) -> str:
     mcp = create_server()
@@ -359,3 +379,85 @@ async def test_check_minizinc_model_empty_model_surfaces_actionable_error(
     with pytest.raises(Exception) as exc_info:
         await mcp.call_tool("check_minizinc_model", {"model": ""})
     assert "empty" in str(exc_info.value)
+
+
+@pytest.mark.asyncio
+async def test_find_unsat_core_tool_is_listed() -> None:
+    mcp = create_server()
+    tools = await mcp.list_tools()
+
+    names = {tool.name for tool in tools}
+    assert "find_unsat_core" in names
+
+    tool = next(t for t in tools if t.name == "find_unsat_core")
+    properties = tool.inputSchema.get("properties", {})
+    assert {"model", "timeout_ms"} <= set(properties.keys())
+    assert "solver" not in properties
+
+
+@pytest.mark.asyncio
+async def test_find_unsat_core_happy_path(
+    fake_minizinc_binary: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def _fake_run(*args: object, **kwargs: object) -> _FakeCompletedProcess:
+        return _FakeCompletedProcess(
+            stdout=_UNSAT_CORE_STDOUT,
+            stderr="",
+            returncode=0,
+        )
+
+    monkeypatch.setattr("openconstraint_mcp.minizinc.subprocess.run", _fake_run)
+
+    mcp = create_server()
+    result = await mcp.call_tool("find_unsat_core", {"model": _UNSAT_CORE_MODEL})
+
+    structured = _structured(result)
+    assert structured["status"] == "mus_found"
+    assert len(structured["core"]) == 2
+
+
+@pytest.mark.asyncio
+async def test_find_unsat_core_runtime_missing_surfaces_actionable_error(
+    fake_runtime_dir: Path,
+) -> None:
+    mcp = create_server()
+    with pytest.raises(Exception) as exc_info:
+        await mcp.call_tool("find_unsat_core", {"model": "solve satisfy;"})
+
+    message = str(exc_info.value)
+    assert "install-runtime" in message
+    assert "MiniZinc" in message
+
+
+@pytest.mark.asyncio
+async def test_find_unsat_core_empty_model_surfaces_actionable_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def _fail_if_called(*args: object, **kwargs: object) -> None:
+        raise AssertionError("subprocess.run must not be invoked for empty model")
+
+    monkeypatch.setattr("openconstraint_mcp.minizinc.subprocess.run", _fail_if_called)
+
+    mcp = create_server()
+    with pytest.raises(Exception) as exc_info:
+        await mcp.call_tool("find_unsat_core", {"model": ""})
+    assert "empty" in str(exc_info.value)
+
+
+@pytest.mark.asyncio
+async def test_find_unsat_core_non_positive_timeout_surfaces_actionable_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def _fail_if_called(*args: object, **kwargs: object) -> None:
+        raise AssertionError("subprocess.run must not be invoked for bad timeout")
+
+    monkeypatch.setattr("openconstraint_mcp.minizinc.subprocess.run", _fail_if_called)
+
+    mcp = create_server()
+    with pytest.raises(Exception) as exc_info:
+        await mcp.call_tool(
+            "find_unsat_core",
+            {"model": "constraint false;\nsolve satisfy;", "timeout_ms": 0},
+        )
+    assert "positive" in str(exc_info.value)

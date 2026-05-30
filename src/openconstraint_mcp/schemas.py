@@ -58,6 +58,47 @@ class CheckResult(BaseModel):
     elapsed_ms: int
 
 
+class UnsatCoreConstraint(BaseModel):
+    line: int | None = None
+    column: int | None = None
+    end_line: int | None = None
+    end_column: int | None = None
+    source: str
+
+
+UnsatCoreStatus = Literal["mus_found", "no_core", "error", "timeout"]
+
+
+class UnsatCoreResult(BaseModel):
+    """Outcome of a findMUS (org.minizinc.findmus) run.
+
+    `core` reports *a* minimal unsatisfiable subset (MUS): constraints that
+    are jointly unsatisfiable and from which none can be removed without
+    losing unsatisfiability. "Minimal" does NOT mean globally smallest — a
+    model may have several MUSes of differing sizes and findMUS returns one.
+    `stdout` holds findMUS's raw output and is authoritative; `core` is a
+    best-effort structured view and may be empty even when status is
+    "mus_found". `no_core` means findMUS finished without reporting a MUS,
+    NOT that the model is satisfiable — a tight `timeout_ms` can also surface
+    as `no_core` (findMUS may stop at its own --time-limit with rc 0).
+    Clients branch on `status`; there is no derived `core_found` flag.
+    """
+
+    status: UnsatCoreStatus
+    core: list[UnsatCoreConstraint] = Field(
+        default_factory=list,
+        description=(
+            "Best-effort structured view of the minimal unsatisfiable subset "
+            "(MUS) — minimal, not necessarily globally smallest. May be empty "
+            'even when status is "mus_found"; stdout is the authoritative output.'
+        ),
+    )
+    message: str
+    stdout: str
+    stderr: str
+    elapsed_ms: int
+
+
 class InstallConfig(BaseModel):
     runtime_dir: str
 
