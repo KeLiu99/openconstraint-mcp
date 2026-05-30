@@ -8,13 +8,21 @@ from .minizinc import (
     DEFAULT_CHECK_TIMEOUT_MS,
     DEFAULT_SOLVE_TIMEOUT_MS,
     DEFAULT_SOLVER,
+    DEFAULT_UNSAT_CORE_TIMEOUT_MS,
     MiniZincExecutionError,
     check_model,
     list_solvers,
     solve_model,
 )
+from .minizinc import find_unsat_core as _find_unsat_core
 from .runtime import RuntimeMissingError, get_runtime_status
-from .schemas import CheckResult, RuntimeStatus, SolveResult, SolverList
+from .schemas import (
+    CheckResult,
+    RuntimeStatus,
+    SolveResult,
+    SolverList,
+    UnsatCoreResult,
+)
 
 _SOLVE_CONSTRAINT_PROBLEM_PROMPT = """\
 You are the MCP client's reasoning model helping the user solve a
@@ -167,6 +175,31 @@ def create_server() -> FastMCP:
     ) -> CheckResult:
         try:
             return check_model(model, solver=solver, timeout_ms=timeout_ms)
+        except (RuntimeMissingError, MiniZincExecutionError, ValueError) as exc:
+            raise RuntimeError(str(exc)) from exc
+
+    @mcp.tool(
+        description=(
+            "Diagnose why a MiniZinc model is unsatisfiable by computing a "
+            "minimal unsatisfiable subset (MUS) of its constraints via the "
+            "managed runtime's findMUS tool (org.minizinc.findmus). Use it when "
+            "solve_minizinc_model returns status 'unsatisfiable' to localize the "
+            "conflict. Returns an UnsatCoreResult whose status is 'mus_found', "
+            "'no_core' (findMUS finished without reporting a MUS), 'error' (see "
+            "stderr), or 'timeout'. `core` is a best-effort structured list of the "
+            "conflicting constraints (source span + text) resolved from the "
+            "submitted model; `stdout` preserves findMUS's raw output verbatim. "
+            "The reported subset is MINIMAL — no constraint can be dropped while "
+            "staying unsatisfiable — but NOT necessarily the globally smallest, "
+            "and a model may have several."
+        )
+    )
+    def find_unsat_core(
+        model: str,
+        timeout_ms: int = DEFAULT_UNSAT_CORE_TIMEOUT_MS,
+    ) -> UnsatCoreResult:
+        try:
+            return _find_unsat_core(model, timeout_ms=timeout_ms)
         except (RuntimeMissingError, MiniZincExecutionError, ValueError) as exc:
             raise RuntimeError(str(exc)) from exc
 

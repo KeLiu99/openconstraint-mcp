@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 import subprocess
 import tempfile
 import time
@@ -16,14 +17,21 @@ from .schemas import (
     SolverInfo,
     SolverList,
     SolveStatus,
+    UnsatCoreConstraint,
+    UnsatCoreResult,
 )
 
 DEFAULT_SOLVER: str = "cp-sat"
+FINDMUS_SOLVER: str = "org.minizinc.findmus"
 DEFAULT_SOLVE_TIMEOUT_MS: int = 30_000
 # Named separately from the solve budget so the check call site doesn't read as
 # a solve constant. A compile-check is far cheaper than a solve, but reusing the
 # same value keeps the two tools' timeout semantics aligned.
 DEFAULT_CHECK_TIMEOUT_MS: int = DEFAULT_SOLVE_TIMEOUT_MS
+# Named separately from the solve budget so the findMUS call site describes the
+# diagnostic operation even though it uses the same default wall-clock budget.
+DEFAULT_UNSAT_CORE_TIMEOUT_MS: int = DEFAULT_SOLVE_TIMEOUT_MS
+_MODEL_FILENAME: str = "model.mzn"
 
 
 class MiniZincExecutionError(RuntimeError):
@@ -138,7 +146,7 @@ def _run_managed_minizinc(
     subprocess_timeout = (timeout_ms / 1000) + 5
     with tempfile.TemporaryDirectory(prefix="openconstraint-mcp-") as tmp:
         tmp_dir = Path(tmp)
-        model_file = tmp_dir / "model.mzn"
+        model_file = tmp_dir / _MODEL_FILENAME
         model_file.write_text(model, encoding="utf-8")
         cmd = [
             str(binary),
@@ -183,6 +191,129 @@ def _run_managed_minizinc(
             stderr=completed.stderr,
             elapsed_ms=elapsed_ms,
         )
+
+
+def _slice_source(model: str, sl: int, sc: int, el: int, ec: int) -> str:
+    lines = model.splitlines()
+    if sl < 1 or el < 1 or sl > el or sl > len(lines):
+        return ""
+
+    bounded_end = min(el, len(lines))
+    referenced_lines = lines[sl - 1 : bounded_end]
+    if not referenced_lines:
+        return ""
+    fallback = "\n".join(referenced_lines)
+
+    if sc < 1 or ec < 1 or el > len(lines):
+        return fallback
+
+    if sl == el:
+        line = lines[sl - 1]
+        if sc > ec or sc > len(line) or ec > len(line):
+            return fallback
+        return line[sc - 1 : ec]
+
+    first_line = lines[sl - 1]
+    last_line = lines[el - 1]
+    if sc > len(first_line) or ec > len(last_line):
+        return fallback
+
+    sliced = [first_line[sc - 1 :], *lines[sl: el - 1], last_line[:ec]]
+    return "\n".join(sliced)
+
+
+def _parse_unsat_core(stdout: str, model: str) -> tuple[bool, list[UnsatCoreConstraint]]:
+    mus_present = any(line.lstrip().startswith("MUS:") for line in stdout.splitlines())
+    if not mus_present:
+        return False, []
+
+    span_pattern = re.compile(r"([^\s|;]+\.mzn)\|(\d+)\|(\d+)\|(\d+)\|(\d+)")
+    core: list[UnsatCoreConstraint] = []
+    seen: set[tuple[int, int, int, int]] = set()
+    for match in span_pattern.finditer(stdout):
+        file_name, sl_raw, sc_raw, el_raw, ec_raw = match.groups()
+        if Path(file_name).name != _MODEL_FILENAME:
+            continue
+
+        span = (int(sl_raw), int(sc_raw), int(el_raw), int(ec_raw))
+        if span in seen:
+            continue
+
+        seen.add(span)
+        sl, sc, el, ec = span
+        core.append(
+            UnsatCoreConstraint(
+                line=sl,
+                column=sc,
+                end_line=el,
+                end_column=ec,
+                source=_slice_source(model, sl, sc, el, ec),
+            )
+        )
+
+    return True, core
+
+
+def find_unsat_core(
+    model: str,
+    *,
+    timeout_ms: int = DEFAULT_UNSAT_CORE_TIMEOUT_MS,
+) -> UnsatCoreResult:
+    outcome = _run_managed_minizinc(
+        model,
+        solver=FINDMUS_SOLVER,
+        timeout_ms=timeout_ms,
+        extra_args=(),
+    )
+    if outcome.timed_out:
+        return UnsatCoreResult(
+            status="timeout",
+            core=[],
+            message="findMUS timed out before reporting a result.",
+            stdout=outcome.stdout,
+            stderr=outcome.stderr,
+            elapsed_ms=outcome.elapsed_ms,
+        )
+
+    mus_present, core = _parse_unsat_core(outcome.stdout, model)
+    if mus_present:
+        if core:
+            message = (
+                "findMUS reported a minimal unsatisfiable subset; "
+                f"{len(core)} constraint location(s) resolved from the submitted model."
+            )
+        else:
+            message = (
+                "findMUS reported a minimal unsatisfiable subset, but no submitted-model "
+                "constraint locations were resolved; see stdout."
+            )
+        return UnsatCoreResult(
+            status="mus_found",
+            core=core,
+            message=message,
+            stdout=outcome.stdout,
+            stderr=outcome.stderr,
+            elapsed_ms=outcome.elapsed_ms,
+        )
+
+    if outcome.returncode != 0:
+        return UnsatCoreResult(
+            status="error",
+            core=[],
+            message="findMUS did not complete successfully; see stderr.",
+            stdout=outcome.stdout,
+            stderr=outcome.stderr,
+            elapsed_ms=outcome.elapsed_ms,
+        )
+
+    return UnsatCoreResult(
+        status="no_core",
+        core=[],
+        message="findMUS completed without reporting a minimal unsatisfiable subset.",
+        stdout=outcome.stdout,
+        stderr=outcome.stderr,
+        elapsed_ms=outcome.elapsed_ms,
+    )
 
 
 def solve_model(

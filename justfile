@@ -28,6 +28,10 @@ test:
 pytest *args:
     uv run pytest {{args}}
 
+# Run real-runtime integration tests.
+integration:
+    uv run pytest -m integration -v
+
 # Lint the source tree with ruff.
 lint:
     uv run ruff check .

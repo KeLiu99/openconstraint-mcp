@@ -126,8 +126,8 @@ The package exposes five commands:
 
 ## MCP tools
 
-The stdio server exposes two introspection tools, a model-check tool, and an
-execution tool:
+The stdio server exposes two introspection tools, a model-check tool, an
+execution tool, and an unsat-core diagnostic tool:
 
 - **`check_runtime`** — returns a `RuntimeStatus` with fields
   `installed: bool`, `runtime_dir: str`, and `minizinc_binary: str | None`.
@@ -219,6 +219,45 @@ execution tool:
   normal `SolveResult` whose `status` field encodes the outcome, so a
   client LLM can branch on it (and feed `stderr` back into a revise-and-
   retry loop) without exception handling.
+
+- **`find_unsat_core`** — diagnose why a MiniZinc model is unsatisfiable by
+  wrapping findMUS (`org.minizinc.findmus`) through the managed runtime.
+  This complements the solve loop: when `solve_minizinc_model` returns
+  `status="unsatisfiable"`, call `find_unsat_core` to localize the conflict.
+  Arguments:
+
+  - `model: str` — the complete MiniZinc source. Must not be empty.
+  - `timeout_ms: int = 30000` — findMUS budget in milliseconds. Must be
+    strictly positive. `0` is a validation error, not "no timeout".
+
+  Returns an `UnsatCoreResult` with fields:
+
+  - `status: str` — one of `"mus_found"`, `"no_core"`, `"error"`,
+    `"timeout"`. Clients branch on this field; there is no derived
+    `core_found` flag.
+  - `core: list[UnsatCoreConstraint]` — best-effort structured constraints
+    from the submitted model, each with `line`, `column`, `end_line`,
+    `end_column`, and `source`. This may be empty even when a MUS was found.
+  - `message: str` — short run-specific summary.
+  - `stdout: str` — raw findMUS output, preserved verbatim and authoritative.
+  - `stderr: str` — raw runtime diagnostics.
+  - `elapsed_ms: int` — wall-clock duration of the subprocess call.
+
+  **MUS caveat.** The tool reports **a** minimal unsatisfiable subset:
+  constraints that are jointly unsatisfiable and from which none can be
+  removed while staying unsatisfiable. Minimal does **not** mean globally
+  smallest, and a model may have several MUSes.
+
+  **Conservative `no_core`.** `status="no_core"` means findMUS completed
+  without reporting a MUS, **not** that the model is satisfiable. A tight
+  `timeout_ms` can also surface as `no_core` rather than `timeout` if
+  findMUS stops at its own `--time-limit` with return code 0.
+
+  **Failure-mode contract.** Environment and argument problems — runtime not
+  installed, empty `model`, non-positive `timeout_ms`, OS-level failure to
+  exec the managed binary — surface as **MCP errors**. findMUS outcomes —
+  MUS found, no MUS reported, findMUS/runtime diagnostics, and timeout — come
+  back as a normal `UnsatCoreResult` whose `status` encodes the outcome.
 
 ## MCP prompts
 

@@ -37,7 +37,7 @@ dev = [
 testpaths = ["tests"]
 addopts = "-ra -m 'not integration'"
 markers = [
-    "integration: requires a real managed MiniZinc runtime (excluded from `just check`; run with `just pytest -m integration`)",
+    "integration: requires a real managed MiniZinc runtime (excluded from `just check`; run with `just integration`)",
 ]
 
 [tool.ruff]

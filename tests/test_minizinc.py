@@ -11,14 +11,45 @@ from pydantic import ValidationError
 from openconstraint_mcp.minizinc import (
     DEFAULT_SOLVE_TIMEOUT_MS,
     DEFAULT_SOLVER,
+    DEFAULT_UNSAT_CORE_TIMEOUT_MS,
+    FINDMUS_SOLVER,
     MiniZincExecutionError,
     _parse_status,
+    _parse_unsat_core,
     check_model,
+    find_unsat_core,
     list_solvers,
     solve_model,
 )
 from openconstraint_mcp.runtime import RuntimeMissingError
-from openconstraint_mcp.schemas import CheckResult, SolveResult, SolverList, SolveStatus
+from openconstraint_mcp.schemas import (
+    CheckResult,
+    SolveResult,
+    SolverList,
+    SolveStatus,
+    UnsatCoreConstraint,
+    UnsatCoreResult,
+)
+
+_UNSAT_CORE_MODEL = (
+    "var 0..10: x;\n"
+    "var 0..10: y;\n"
+    "\n"
+    "constraint x + y > 5;\n"
+    "constraint x + y < 3;\n"
+    "constraint x != y;\n"
+    "\n"
+    "solve satisfy;\n"
+)
+
+_UNSAT_CORE_STDOUT = (
+    "FznSubProblem:  hard cons: 0    soft cons: 3   leaves: 3      "
+    "branches: 4    Built tree in 0.01 seconds.\n"
+    "MUS: 1 2\n"
+    "Brief: int_lin_le, int_lin_le\n"
+    "Traces: model.mzn|4|12|4|20|;model.mzn|5|12|5|20|;"
+    "redefinitions.mzn|10|1|10|5|\n"
+)
 
 
 def test_list_solvers_raises_clear_error_when_runtime_missing(
@@ -183,6 +214,77 @@ def test_check_result_rejects_unknown_status() -> None:
             stderr="",
             elapsed_ms=0,
         )
+
+
+def test_unsat_core_result_round_trips() -> None:
+    result = UnsatCoreResult(
+        status="mus_found",
+        core=[
+            UnsatCoreConstraint(
+                line=4,
+                column=12,
+                end_line=4,
+                end_column=20,
+                source="x + y > 5",
+            )
+        ],
+        message="findMUS reported a minimal unsatisfiable subset.",
+        stdout="MUS: 1 2\n",
+        stderr="",
+        elapsed_ms=7,
+    )
+
+    assert result.model_dump() == {
+        "status": "mus_found",
+        "core": [
+            {
+                "line": 4,
+                "column": 12,
+                "end_line": 4,
+                "end_column": 20,
+                "source": "x + y > 5",
+            }
+        ],
+        "message": "findMUS reported a minimal unsatisfiable subset.",
+        "stdout": "MUS: 1 2\n",
+        "stderr": "",
+        "elapsed_ms": 7,
+    }
+
+
+def test_unsat_core_result_rejects_unknown_status() -> None:
+    with pytest.raises(ValidationError):
+        UnsatCoreResult(
+            status="bogus",  # type: ignore[arg-type]
+            message="bad status",
+            stdout="",
+            stderr="",
+            elapsed_ms=0,
+        )
+
+
+def test_parse_unsat_core_extracts_model_spans() -> None:
+    mus_present, core = _parse_unsat_core(_UNSAT_CORE_STDOUT, _UNSAT_CORE_MODEL)
+
+    assert mus_present is True
+    assert len(core) == 2
+    assert core[0].line == 4
+    assert core[0].column == 12
+    assert core[0].end_line == 4
+    assert core[0].end_column == 20
+    assert "x + y > 5" in core[0].source
+    assert "x + y < 3" in core[1].source
+    assert all("x != y" not in item.source for item in core)
+
+
+def test_parse_unsat_core_without_mus_returns_empty_core() -> None:
+    assert _parse_unsat_core("=====UNKNOWN=====\n", _UNSAT_CORE_MODEL) == (False, [])
+
+
+def test_parse_unsat_core_ignores_trace_spans_without_mus_line() -> None:
+    assert _parse_unsat_core(
+        "Traces: model.mzn|4|12|4|20|\n", _UNSAT_CORE_MODEL
+    ) == (False, [])
 
 
 @pytest.mark.parametrize(
@@ -700,3 +802,163 @@ def test_check_model_wraps_oserror_as_execution_error(
     with pytest.raises(MiniZincExecutionError) as exc_info:
         check_model("solve satisfy;")
     assert "install-runtime" in str(exc_info.value)
+
+
+def test_find_unsat_core_mus_found_preserves_raw_output(
+    fake_minizinc_binary: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _record_subprocess(
+        monkeypatch,
+        _FakeCompletedProcess(stdout=_UNSAT_CORE_STDOUT, stderr="", returncode=0),
+    )
+
+    result = find_unsat_core(_UNSAT_CORE_MODEL)
+
+    assert result.status == "mus_found"
+    assert len(result.core) == 2
+    assert result.stdout == _UNSAT_CORE_STDOUT
+    assert "minimal unsatisfiable subset" in result.message
+
+
+def test_find_unsat_core_command_shape(
+    fake_minizinc_binary: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls = _record_subprocess(
+        monkeypatch,
+        _FakeCompletedProcess(stdout=_UNSAT_CORE_STDOUT, stderr="", returncode=0),
+    )
+
+    find_unsat_core(_UNSAT_CORE_MODEL)
+
+    cmd = calls[0]["args"][0]
+    kwargs = calls[0]["kwargs"]
+    solver_idx = cmd.index("--solver")
+    timeout_idx = cmd.index("--time-limit")
+    model_path = Path(cmd[-1])
+
+    assert cmd[solver_idx + 1] == FINDMUS_SOLVER
+    assert cmd[timeout_idx + 1] == str(DEFAULT_UNSAT_CORE_TIMEOUT_MS)
+    assert "-c" not in cmd
+    assert calls[0]["model_path_existed"]
+    assert calls[0]["model_contents"] == _UNSAT_CORE_MODEL
+    assert kwargs["cwd"] == str(model_path.parent)
+
+
+def test_find_unsat_core_no_core_clears_structured_core(
+    fake_minizinc_binary: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _record_subprocess(
+        monkeypatch,
+        _FakeCompletedProcess(stdout="=====UNKNOWN=====\n", stderr="", returncode=0),
+    )
+
+    result = find_unsat_core(_UNSAT_CORE_MODEL)
+
+    assert result.status == "no_core"
+    assert result.core == []
+
+
+def test_find_unsat_core_error_clears_structured_core_and_preserves_stderr(
+    fake_minizinc_binary: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    stderr = "Error: cannot load solver org.minizinc.findmus\n"
+    _record_subprocess(
+        monkeypatch,
+        _FakeCompletedProcess(stdout="", stderr=stderr, returncode=1),
+    )
+
+    result = find_unsat_core(_UNSAT_CORE_MODEL)
+
+    assert result.status == "error"
+    assert result.core == []
+    assert result.stderr == stderr
+
+
+def test_find_unsat_core_timeout_with_bytes_payload_decodes(
+    fake_minizinc_binary: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def _fake_run(*args: Any, **kwargs: Any) -> None:
+        raise subprocess.TimeoutExpired(
+            cmd=args[0],
+            timeout=kwargs.get("timeout", 35.0),
+            output=b"partial",
+            stderr=b"",
+        )
+
+    monkeypatch.setattr("openconstraint_mcp.minizinc.subprocess.run", _fake_run)
+
+    result = find_unsat_core(_UNSAT_CORE_MODEL)
+
+    assert result.status == "timeout"
+    assert result.core == []
+    assert result.stdout == "partial"
+
+
+@pytest.mark.parametrize("bad_model", ["", "\n  \t"])
+def test_find_unsat_core_rejects_empty_or_whitespace_model(
+    bad_model: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def _fail_if_called(*args: Any, **kwargs: Any) -> Any:
+        raise AssertionError("subprocess.run must not be invoked for empty model")
+
+    monkeypatch.setattr("openconstraint_mcp.minizinc.subprocess.run", _fail_if_called)
+
+    with pytest.raises(ValueError, match="empty"):
+        find_unsat_core(bad_model)
+
+
+@pytest.mark.parametrize("bad_timeout", [0, -1])
+def test_find_unsat_core_rejects_non_positive_timeout(
+    bad_timeout: int,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def _fail_if_called(*args: Any, **kwargs: Any) -> Any:
+        raise AssertionError("subprocess.run must not be invoked for bad timeout")
+
+    monkeypatch.setattr("openconstraint_mcp.minizinc.subprocess.run", _fail_if_called)
+
+    with pytest.raises(ValueError, match="positive"):
+        find_unsat_core(_UNSAT_CORE_MODEL, timeout_ms=bad_timeout)
+
+
+def test_find_unsat_core_raises_when_runtime_missing(fake_runtime_dir: Path) -> None:
+    with pytest.raises(RuntimeMissingError) as exc_info:
+        find_unsat_core(_UNSAT_CORE_MODEL)
+    message = str(exc_info.value)
+    assert "install-runtime" in message
+    assert "MiniZinc" in message
+
+
+def test_find_unsat_core_wraps_oserror_as_execution_error(
+    fake_minizinc_binary: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def _fake_run(*args: Any, **kwargs: Any) -> None:
+        raise OSError(8, "Exec format error")
+
+    monkeypatch.setattr("openconstraint_mcp.minizinc.subprocess.run", _fake_run)
+
+    with pytest.raises(MiniZincExecutionError) as exc_info:
+        find_unsat_core(_UNSAT_CORE_MODEL)
+    assert "install-runtime" in str(exc_info.value)
+
+
+def test_find_unsat_core_uses_default_timeout(
+    fake_minizinc_binary: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls = _record_subprocess(
+        monkeypatch,
+        _FakeCompletedProcess(stdout=_UNSAT_CORE_STDOUT, stderr="", returncode=0),
+    )
+
+    find_unsat_core(_UNSAT_CORE_MODEL)
+
+    cmd = calls[0]["args"][0]
+    assert cmd[cmd.index("--time-limit") + 1] == str(DEFAULT_UNSAT_CORE_TIMEOUT_MS)
