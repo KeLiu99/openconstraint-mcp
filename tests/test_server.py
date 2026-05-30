@@ -75,6 +75,7 @@ async def test_solve_constraint_problem_prompt_guides_minizinc_drafting() -> Non
         "you",
         "draft",
         "MiniZinc",
+        "check_minizinc_model",
         "solve_minizinc_model",
         "check-runtime",
         "install-runtime",
@@ -117,6 +118,35 @@ async def test_solve_constraint_problem_prompt_preserves_local_first_boundary() 
         assert forbidden not in text, (
             f"prompt must not imply server-side LLM coupling: {forbidden!r}"
         )
+
+
+@pytest.mark.asyncio
+async def test_solve_constraint_problem_prompt_orders_check_before_solve() -> None:
+    text = await _get_prompt_text("solve_constraint_problem", {"problem": SAMPLE_PROBLEM})
+
+    # Pin the order on the single recommended-loop line that names both tools,
+    # not a whole-prompt first-index comparison: the execute step and CLI
+    # walkthrough also mention solve_minizinc_model, so a global comparison
+    # could pass or fail for the wrong reasons.
+    loop_lines = [
+        line
+        for line in text.splitlines()
+        if "check_minizinc_model" in line and "solve_minizinc_model" in line
+    ]
+    assert len(loop_lines) == 1, "expected one recommended-loop line naming both tools in order"
+    loop_line = loop_lines[0]
+    assert loop_line.index("check_minizinc_model") < loop_line.index("solve_minizinc_model")
+
+
+@pytest.mark.asyncio
+async def test_solve_constraint_problem_prompt_timeout_branch_does_not_auto_solve() -> None:
+    text = await _get_prompt_text("solve_constraint_problem", {"problem": SAMPLE_PROBLEM})
+
+    # The timeout branch must not silently regress to "treat timeout as ok".
+    # Anchor on stable keywords for the three options the LLM should offer the
+    # user rather than exact prose: simplify, raise timeout_ms, or solve anyway.
+    for keyword in ("timeout_ms", "simplify", "anyway"):
+        assert keyword in text, f"timeout branch missing guidance: {keyword!r}"
 
 
 class _FakeCompletedProcess:
@@ -242,3 +272,90 @@ async def test_solve_minizinc_model_compile_error_returns_structured_result(
     structured = _structured(result)
     assert structured["status"] == "error"
     assert "type error" in structured["stderr"]
+
+
+@pytest.mark.asyncio
+async def test_check_minizinc_model_tool_is_listed() -> None:
+    mcp = create_server()
+    tools = await mcp.list_tools()
+
+    names = {tool.name for tool in tools}
+    assert "check_minizinc_model" in names
+
+    tool = next(t for t in tools if t.name == "check_minizinc_model")
+    properties = tool.inputSchema.get("properties", {})
+    assert {"model", "solver", "timeout_ms"} <= set(properties.keys())
+
+
+@pytest.mark.asyncio
+async def test_check_minizinc_model_happy_path(
+    fake_minizinc_binary: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def _fake_run(*args: object, **kwargs: object) -> _FakeCompletedProcess:
+        return _FakeCompletedProcess(stdout="", stderr="", returncode=0)
+
+    monkeypatch.setattr("openconstraint_mcp.minizinc.subprocess.run", _fake_run)
+
+    mcp = create_server()
+    result = await mcp.call_tool(
+        "check_minizinc_model",
+        {"model": "var 1..5: x;\nconstraint x > 2;\nsolve satisfy;"},
+    )
+
+    structured = _structured(result)
+    assert structured["status"] == "ok"
+    assert structured["solver"] == "cp-sat"
+
+
+@pytest.mark.asyncio
+async def test_check_minizinc_model_compile_error_returns_structured_result(
+    fake_minizinc_binary: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def _fake_run(*args: object, **kwargs: object) -> _FakeCompletedProcess:
+        return _FakeCompletedProcess(
+            stdout="",
+            stderr="Error: type error: undefined identifier 'xz'\n",
+            returncode=1,
+        )
+
+    monkeypatch.setattr("openconstraint_mcp.minizinc.subprocess.run", _fake_run)
+
+    mcp = create_server()
+    result = await mcp.call_tool(
+        "check_minizinc_model",
+        {"model": "var 1..5: x;\nconstraint xz > 2;\nsolve satisfy;"},
+    )
+
+    structured = _structured(result)
+    assert structured["status"] == "error"
+    assert "type error" in structured["stderr"]
+
+
+@pytest.mark.asyncio
+async def test_check_minizinc_model_runtime_missing_surfaces_actionable_error(
+    fake_runtime_dir: Path,
+) -> None:
+    mcp = create_server()
+    with pytest.raises(Exception) as exc_info:
+        await mcp.call_tool("check_minizinc_model", {"model": "solve satisfy;"})
+
+    message = str(exc_info.value)
+    assert "install-runtime" in message
+    assert "MiniZinc" in message
+
+
+@pytest.mark.asyncio
+async def test_check_minizinc_model_empty_model_surfaces_actionable_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def _fail_if_called(*args: object, **kwargs: object) -> None:
+        raise AssertionError("subprocess.run must not be invoked for empty model")
+
+    monkeypatch.setattr("openconstraint_mcp.minizinc.subprocess.run", _fail_if_called)
+
+    mcp = create_server()
+    with pytest.raises(Exception) as exc_info:
+        await mcp.call_tool("check_minizinc_model", {"model": ""})
+    assert "empty" in str(exc_info.value)

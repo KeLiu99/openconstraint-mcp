@@ -13,11 +13,12 @@ from openconstraint_mcp.minizinc import (
     DEFAULT_SOLVER,
     MiniZincExecutionError,
     _parse_status,
+    check_model,
     list_solvers,
     solve_model,
 )
 from openconstraint_mcp.runtime import RuntimeMissingError
-from openconstraint_mcp.schemas import SolveResult, SolverList, SolveStatus
+from openconstraint_mcp.schemas import CheckResult, SolveResult, SolverList, SolveStatus
 
 
 def test_list_solvers_raises_clear_error_when_runtime_missing(
@@ -147,6 +148,35 @@ def test_solve_result_round_trips() -> None:
 def test_solve_result_rejects_unknown_status() -> None:
     with pytest.raises(ValidationError):
         SolveResult(
+            status="bogus",  # type: ignore[arg-type]
+            solver="cp-sat",
+            stdout="",
+            stderr="",
+            elapsed_ms=0,
+        )
+
+
+def test_check_result_round_trips() -> None:
+    result = CheckResult(
+        status="ok",
+        solver="cp-sat",
+        stdout="",
+        stderr="",
+        elapsed_ms=12,
+    )
+    dumped = result.model_dump()
+    assert dumped == {
+        "status": "ok",
+        "solver": "cp-sat",
+        "stdout": "",
+        "stderr": "",
+        "elapsed_ms": 12,
+    }
+
+
+def test_check_result_rejects_unknown_status() -> None:
+    with pytest.raises(ValidationError):
+        CheckResult(
             status="bogus",  # type: ignore[arg-type]
             solver="cp-sat",
             stdout="",
@@ -493,3 +523,180 @@ def test_solve_model_writes_model_file_as_utf8(
     solve_model("% café λ\nsolve satisfy;")
 
     assert captured["encoding"] == "utf-8"
+
+
+def test_check_model_happy_path_returns_ok(
+    fake_minizinc_binary: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls = _record_subprocess(
+        monkeypatch, _FakeCompletedProcess(stdout="", stderr="", returncode=0)
+    )
+
+    result = check_model("var 1..5: x;\nconstraint x > 2;\nsolve satisfy;")
+
+    assert isinstance(result, CheckResult)
+    assert result.status == "ok"
+    assert result.solver == "cp-sat"
+    assert result.stdout == ""
+    assert result.stderr == ""
+    assert result.elapsed_ms >= 0
+    assert len(calls) == 1
+
+
+def test_check_model_command_shape(
+    fake_minizinc_binary: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    model = "var 1..5: x;\nconstraint x > 2;\nsolve satisfy;"
+    calls = _record_subprocess(
+        monkeypatch, _FakeCompletedProcess(stdout="", stderr="", returncode=0)
+    )
+
+    check_model(model)
+
+    cmd = calls[0]["args"][0]
+    kwargs = calls[0]["kwargs"]
+
+    assert cmd[0] == str(fake_minizinc_binary)
+    solver_idx = cmd.index("--solver")
+    assert cmd[solver_idx + 1] == "cp-sat"
+    timeout_idx = cmd.index("--time-limit")
+    assert cmd[timeout_idx + 1] == "30000"
+    assert "-c" in cmd
+
+    model_path = Path(cmd[-1])
+    assert model_path.suffix == ".mzn"
+    assert calls[0]["model_path_existed"]
+    assert calls[0]["model_contents"] == model
+    assert kwargs["cwd"] == str(model_path.parent)
+
+
+def test_check_model_custom_solver_is_passed_through(
+    fake_minizinc_binary: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls = _record_subprocess(
+        monkeypatch, _FakeCompletedProcess(stdout="", stderr="", returncode=0)
+    )
+
+    result = check_model("solve satisfy;", solver="gecode")
+
+    cmd = calls[0]["args"][0]
+    assert cmd[cmd.index("--solver") + 1] == "gecode"
+    assert result.solver == "gecode"
+
+
+def test_check_model_custom_timeout_drives_outer_grace(
+    fake_minizinc_binary: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls = _record_subprocess(
+        monkeypatch, _FakeCompletedProcess(stdout="", stderr="", returncode=0)
+    )
+
+    check_model("solve satisfy;", timeout_ms=5000)
+
+    cmd = calls[0]["args"][0]
+    assert cmd[cmd.index("--time-limit") + 1] == "5000"
+    assert calls[0]["kwargs"]["timeout"] == pytest.approx(10.0)
+
+
+def test_check_model_returns_structured_result_for_compile_error(
+    fake_minizinc_binary: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _record_subprocess(
+        monkeypatch,
+        _FakeCompletedProcess(
+            stdout="",
+            stderr="Error: type error: undefined identifier 'xz'\n",
+            returncode=1,
+        ),
+    )
+
+    result = check_model("var 1..3: x;\nconstraint xz > 2;\nsolve satisfy;")
+
+    assert result.status == "error"
+    assert "type error" in result.stderr
+
+
+@pytest.mark.parametrize("bad_model", ["", "\n\n  \t\n"])
+def test_check_model_rejects_empty_or_whitespace_model(
+    bad_model: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def _fail_if_called(*args: Any, **kwargs: Any) -> Any:
+        raise AssertionError("subprocess.run must not be invoked for empty model")
+
+    monkeypatch.setattr("openconstraint_mcp.minizinc.subprocess.run", _fail_if_called)
+
+    with pytest.raises(ValueError, match="empty"):
+        check_model(bad_model)
+
+
+@pytest.mark.parametrize("bad_timeout", [0, -1])
+def test_check_model_rejects_non_positive_timeout(
+    bad_timeout: int,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def _fail_if_called(*args: Any, **kwargs: Any) -> Any:
+        raise AssertionError("subprocess.run must not be invoked for bad timeout")
+
+    monkeypatch.setattr("openconstraint_mcp.minizinc.subprocess.run", _fail_if_called)
+
+    with pytest.raises(ValueError, match="positive"):
+        check_model("solve satisfy;", timeout_ms=bad_timeout)
+
+
+def test_check_model_timeout_validation_precedes_runtime_check(
+    fake_runtime_dir: Path,
+) -> None:
+    with pytest.raises(ValueError, match="positive"):
+        check_model("solve satisfy;", timeout_ms=0)
+
+
+def test_check_model_raises_when_runtime_missing(
+    fake_runtime_dir: Path,
+) -> None:
+    with pytest.raises(RuntimeMissingError) as exc_info:
+        check_model("solve satisfy;")
+    message = str(exc_info.value)
+    assert "install-runtime" in message
+    assert "MiniZinc" in message
+
+
+def test_check_model_timeout_with_bytes_payload_decodes(
+    fake_minizinc_binary: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def _fake_run(*args: Any, **kwargs: Any) -> None:
+        raise subprocess.TimeoutExpired(
+            cmd=args[0],
+            timeout=kwargs.get("timeout", 35.0),
+            output=b"partial",
+            stderr=b"",
+        )
+
+    monkeypatch.setattr("openconstraint_mcp.minizinc.subprocess.run", _fake_run)
+
+    result = check_model("solve satisfy;")
+
+    assert result.status == "timeout"
+    assert result.stdout == "partial"
+    assert result.stderr == ""
+    assert result.elapsed_ms >= 0
+
+
+def test_check_model_wraps_oserror_as_execution_error(
+    fake_minizinc_binary: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def _fake_run(*args: Any, **kwargs: Any) -> None:
+        raise OSError(8, "Exec format error")
+
+    monkeypatch.setattr("openconstraint_mcp.minizinc.subprocess.run", _fake_run)
+
+    with pytest.raises(MiniZincExecutionError) as exc_info:
+        check_model("solve satisfy;")
+    assert "install-runtime" in str(exc_info.value)

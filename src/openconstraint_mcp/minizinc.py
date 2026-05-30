@@ -4,11 +4,19 @@ import json
 import subprocess
 import tempfile
 import time
+from collections.abc import Sequence
 from pathlib import Path
-from typing import Any
+from typing import Any, NamedTuple
 
 from .runtime import RuntimeMissingError, get_minizinc_binary, is_runtime_installed
-from .schemas import SolveResult, SolverInfo, SolverList, SolveStatus
+from .schemas import (
+    CheckResult,
+    CheckStatus,
+    SolveResult,
+    SolverInfo,
+    SolverList,
+    SolveStatus,
+)
 
 DEFAULT_SOLVER: str = "cp-sat"
 DEFAULT_SOLVE_TIMEOUT_MS: int = 30_000
@@ -90,12 +98,29 @@ def list_solvers() -> SolverList:
     return SolverList(solvers=solvers)
 
 
-def solve_model(
+class _RunOutcome(NamedTuple):
+    timed_out: bool
+    returncode: int  # meaningful only when timed_out is False
+    stdout: str
+    stderr: str
+    elapsed_ms: int
+
+
+def _run_managed_minizinc(
     model: str,
     *,
-    solver: str = DEFAULT_SOLVER,
-    timeout_ms: int = DEFAULT_SOLVE_TIMEOUT_MS,
-) -> SolveResult:
+    solver: str,
+    timeout_ms: int,
+    extra_args: Sequence[str],
+) -> _RunOutcome:
+    """Run the managed MiniZinc binary on ``model`` and report the raw outcome.
+
+    Shared by ``solve_model`` (``extra_args=()``) and ``check_model``
+    (``extra_args=("-c",)``). The model is written into a private temp dir and
+    ``subprocess.run`` is pinned to that dir via ``cwd`` so cwd-relative
+    ``include`` statements resolve onto emptiness rather than the server's
+    working directory. The model file is always the last command argument.
+    """
     if not model.strip():
         raise ValueError("model must not be empty")
     if timeout_ms <= 0:
@@ -117,6 +142,7 @@ def solve_model(
             solver,
             "--time-limit",
             str(timeout_ms),
+            *extra_args,
             str(model_file),
         ]
         start = time.monotonic()
@@ -132,9 +158,9 @@ def solve_model(
             )
         except subprocess.TimeoutExpired as exc:
             elapsed_ms = max(int((time.monotonic() - start) * 1000), 0)
-            return SolveResult(
-                status="timeout",
-                solver=solver,
+            return _RunOutcome(
+                timed_out=True,
+                returncode=0,
                 stdout=_coerce_to_text(exc.stdout),
                 stderr=_coerce_to_text(exc.stderr),
                 elapsed_ms=elapsed_ms,
@@ -146,11 +172,64 @@ def solve_model(
                 "`openconstraint-mcp install-runtime`."
             ) from exc
         elapsed_ms = max(int((time.monotonic() - start) * 1000), 0)
-        status = _parse_status(completed.stdout, completed.returncode, timed_out=False)
-        return SolveResult(
-            status=status,
-            solver=solver,
+        return _RunOutcome(
+            timed_out=False,
+            returncode=completed.returncode,
             stdout=completed.stdout,
             stderr=completed.stderr,
             elapsed_ms=elapsed_ms,
         )
+
+
+def solve_model(
+    model: str,
+    *,
+    solver: str = DEFAULT_SOLVER,
+    timeout_ms: int = DEFAULT_SOLVE_TIMEOUT_MS,
+) -> SolveResult:
+    outcome = _run_managed_minizinc(
+        model, solver=solver, timeout_ms=timeout_ms, extra_args=()
+    )
+    if outcome.timed_out:
+        return SolveResult(
+            status="timeout",
+            solver=solver,
+            stdout=outcome.stdout,
+            stderr=outcome.stderr,
+            elapsed_ms=outcome.elapsed_ms,
+        )
+    status = _parse_status(outcome.stdout, outcome.returncode, timed_out=False)
+    return SolveResult(
+        status=status,
+        solver=solver,
+        stdout=outcome.stdout,
+        stderr=outcome.stderr,
+        elapsed_ms=outcome.elapsed_ms,
+    )
+
+
+def check_model(
+    model: str,
+    *,
+    solver: str = DEFAULT_SOLVER,
+    timeout_ms: int = DEFAULT_SOLVE_TIMEOUT_MS,
+) -> CheckResult:
+    outcome = _run_managed_minizinc(
+        model, solver=solver, timeout_ms=timeout_ms, extra_args=("-c",)
+    )
+    if outcome.timed_out:
+        return CheckResult(
+            status="timeout",
+            solver=solver,
+            stdout=outcome.stdout,
+            stderr=outcome.stderr,
+            elapsed_ms=outcome.elapsed_ms,
+        )
+    status: CheckStatus = "ok" if outcome.returncode == 0 else "error"
+    return CheckResult(
+        status=status,
+        solver=solver,
+        stdout=outcome.stdout,
+        stderr=outcome.stderr,
+        elapsed_ms=outcome.elapsed_ms,
+    )

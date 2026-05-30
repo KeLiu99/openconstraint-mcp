@@ -8,11 +8,12 @@ from .minizinc import (
     DEFAULT_SOLVE_TIMEOUT_MS,
     DEFAULT_SOLVER,
     MiniZincExecutionError,
+    check_model,
     list_solvers,
     solve_model,
 )
 from .runtime import RuntimeMissingError, get_runtime_status
-from .schemas import RuntimeStatus, SolveResult, SolverList
+from .schemas import CheckResult, RuntimeStatus, SolveResult, SolverList
 
 _SOLVE_CONSTRAINT_PROBLEM_PROMPT = """\
 You are the MCP client's reasoning model helping the user solve a
@@ -49,7 +50,22 @@ Do the following:
    Prefer `cp-sat` as the default solver unless the user has specified
    otherwise.
 
-4. Execute the model:
+4. Validate the model before solving. If the tool `check_minizinc_model`
+   is available to you, call it on the drafted model first and branch on
+   the returned `status`. Never call `solve_minizinc_model` ahead of a
+   clean check. The recommended loop is:
+   `draft -> check_minizinc_model -> repair -> solve_minizinc_model -> explain`.
+   - `"ok"`: the model compiles. Proceed to solving. Do not solve until
+     the check returns `"ok"`.
+   - `"error"`: read the `stderr` diagnostics, repair the model, and
+     re-run `check_minizinc_model`. Loop until it returns `"ok"`; do not
+     solve while errors remain.
+   - `"timeout"`: validation itself — not the solve — timed out. Do not
+     automatically solve. Explain this to the user and ask how they want
+     to proceed: simplify the model, raise `timeout_ms`, or try solving
+     anyway. Continue only per the user's choice.
+
+5. Execute the model:
    - If the tool `solve_minizinc_model` is available to you, call it with
      the drafted MiniZinc model and let the local managed MiniZinc runtime
      do the solving. Use exactly that tool name; do not invent a different
@@ -74,11 +90,11 @@ Do the following:
           binary (the path printed by `check-runtime`) with the chosen
           solver flag, e.g. `--solver cp-sat`.
 
-5. If MiniZinc reports a syntax, type, or solver error, revise the model
+6. If MiniZinc reports a syntax, type, or solver error, revise the model
    and retry — but only retry through `solve_minizinc_model` when that
    tool is actually available. Never fabricate solver output.
 
-6. Once you have a result, explain it to the user in plain language: what
+7. Once you have a result, explain it to the user in plain language: what
    the decision variables ended up as, whether the solution is optimal or
    only feasible, and any caveats worth noting.
 
@@ -128,6 +144,28 @@ def create_server() -> FastMCP:
     ) -> SolveResult:
         try:
             return solve_model(model, solver=solver, timeout_ms=timeout_ms)
+        except (RuntimeMissingError, MiniZincExecutionError, ValueError) as exc:
+            raise RuntimeError(str(exc)) from exc
+
+    @mcp.tool(
+        description=(
+            "Compile-check a complete MiniZinc model through the managed local "
+            "MiniZinc runtime without solving it. Flattens (compiles) the "
+            "`model` for the chosen solver — catching syntax, type, "
+            "missing-include, invalid-domain, and unsupported-construct errors "
+            "— and returns a CheckResult with the check's status plus the "
+            "runtime's raw stdout and stderr, so the caller can repair the "
+            "model before calling `solve_minizinc_model`. A status of `ok` "
+            "means the model compiles, not that it is satisfiable."
+        )
+    )
+    def check_minizinc_model(
+        model: str,
+        solver: str = DEFAULT_SOLVER,
+        timeout_ms: int = DEFAULT_SOLVE_TIMEOUT_MS,
+    ) -> CheckResult:
+        try:
+            return check_model(model, solver=solver, timeout_ms=timeout_ms)
         except (RuntimeMissingError, MiniZincExecutionError, ValueError) as exc:
             raise RuntimeError(str(exc)) from exc
 
