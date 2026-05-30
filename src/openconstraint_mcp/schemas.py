@@ -43,6 +43,21 @@ class SolveResult(BaseModel):
     elapsed_ms: int
 
 
+CheckStatus = Literal[
+    "ok",  # rc == 0 — the model compiled (flattened) for the chosen solver
+    "error",  # rc != 0 — syntax/type/include/domain/unsupported-construct error (see stderr)
+    "timeout",  # subprocess wall-clock cap fired during compilation
+]
+
+
+class CheckResult(BaseModel):
+    status: CheckStatus
+    solver: str
+    stdout: str
+    stderr: str
+    elapsed_ms: int
+
+
 class InstallConfig(BaseModel):
     runtime_dir: str
 

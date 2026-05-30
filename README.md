@@ -94,13 +94,63 @@ The package exposes five commands:
 
 ## MCP tools
 
-The stdio server exposes two introspection tools and one execution tool:
+The stdio server exposes two introspection tools, a model-check tool, and an
+execution tool:
 
 - **`check_runtime`** — returns a `RuntimeStatus` with fields
   `installed: bool`, `runtime_dir: str`, and `minizinc_binary: str | None`.
 - **`list_available_solvers`** — returns a `SolverList` of `SolverInfo` entries
   (`id`, `name`, `version`, `tags`). Raises a runtime-missing error if the
   managed MiniZinc binary is not present.
+- **`check_minizinc_model`** — compile-check a complete MiniZinc model
+  through the managed local runtime **without solving it**. This is the
+  cheap pre-flight before `solve_minizinc_model`: it runs MiniZinc's
+  dry-run compile (`-c`) for the chosen solver, flattening the model to
+  FlatZinc but stopping before the search, so it catches syntax, type,
+  missing-include, invalid-domain, and unsupported-construct errors in a
+  fraction of a solve. Arguments:
+
+  - `model: str` — the complete MiniZinc source. Must not be empty.
+  - `solver: str = "cp-sat"` — passed through verbatim to MiniZinc's
+    `--solver` flag. The compile is solver-aware, so a model that
+    compiles for one solver may not for another — check against the
+    solver you intend to solve with. An unknown or unavailable solver is
+    a compile failure: it surfaces as `status="error"` with MiniZinc's
+    diagnostic in `stderr`, not as an MCP error.
+  - `timeout_ms: int = 30000` — compile budget in milliseconds, enforced
+    as a wall-clock cap on the runtime subprocess (plus a few seconds'
+    grace). It is also passed through to MiniZinc's `--time-limit`, but
+    that flag primarily bounds *solving*, so for a compile the subprocess
+    cap is the real stop. Must be strictly positive (`0` is a validation
+    error, not "no timeout").
+
+  Returns a `CheckResult` with fields:
+
+  - `status: str` — one of `"ok"`, `"error"`, `"timeout"`. `"ok"` means
+    **the model compiles, not that it is satisfiable** — compilation does
+    not run the search, so a clean check does not guarantee a solution
+    exists (that is only known after solving).
+  - `solver: str` — the solver the model was flattened for, echoed from
+    the request.
+  - `stdout: str` — the runtime's raw stdout (normally empty on a clean
+    compile).
+  - `stderr: str` — the runtime's raw stderr (compile diagnostics and
+    warnings land here).
+  - `elapsed_ms: int` — wall-clock duration of the subprocess call.
+
+  **Failure-mode contract.** As with `solve_minizinc_model`, environment
+  and argument problems — runtime not installed, empty `model`,
+  non-positive `timeout_ms`, OS-level failure to exec the managed binary —
+  surface as **MCP errors**. Compile diagnostics come back as a normal
+  `CheckResult` with `status="error"` and the diagnostic in `stderr`, so a
+  client LLM can repair the model and re-check without exception handling.
+
+  **Recommended loop.** `check_minizinc_model` is the validate step in
+  **draft → check → repair → solve → explain**: draft a model, check it,
+  repair on `status="error"` and re-check until `"ok"`, then hand the clean
+  model to `solve_minizinc_model`. Validating first turns a class of
+  failures into cheap compile errors instead of spent solve attempts.
+
 - **`solve_minizinc_model`** — run a complete MiniZinc model through the
   managed local runtime. Arguments:
 
@@ -152,14 +202,19 @@ The stdio server also exposes one MCP prompt for client-side LLMs to use:
   3. Draft a complete MiniZinc model — including declarations,
      constraints, exactly one `solve` statement, and an `output` block —
      preferring the `cp-sat` solver by default.
-  4. Call the `solve_minizinc_model` tool if it is available, or
+  4. Validate the drafted model with `check_minizinc_model` before
+     solving, when that tool is available: solve only after the check
+     returns `"ok"`; on `"error"`, repair the model from `stderr` and
+     re-check; on `"timeout"`, ask the user how to proceed (simplify the
+     model, raise `timeout_ms`, or solve anyway) rather than auto-solving.
+  5. Call the `solve_minizinc_model` tool if it is available, or
      otherwise walk the user through the openconstraint-mcp CLI —
      `check-runtime` to locate the managed `minizinc` binary (with
      `install-runtime` or `configure-runtime` first if it is missing) —
      and have them invoke that exact managed binary on the drafted
      model. The prompt explicitly forbids recommending a bare
      PATH-based `minizinc` invocation.
-  5. Revise the model if MiniZinc reports an error, and explain the final
+  6. Revise the model if MiniZinc reports an error, and explain the final
      result in plain language.
 
   The openconstraint-mcp server itself does **not** call an LLM and does

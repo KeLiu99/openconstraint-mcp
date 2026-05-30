@@ -35,7 +35,10 @@ dev = [
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-addopts = "-ra"
+addopts = "-ra -m 'not integration'"
+markers = [
+    "integration: requires a real managed MiniZinc runtime (excluded from `just check`; run with `just pytest -m integration`)",
+]
 
 [tool.ruff]
 line-length = 100
