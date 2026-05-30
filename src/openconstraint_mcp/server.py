@@ -5,6 +5,7 @@ from typing import Any
 from mcp.server.fastmcp import FastMCP
 
 from .minizinc import (
+    DEFAULT_CHECK_TIMEOUT_MS,
     DEFAULT_SOLVE_TIMEOUT_MS,
     DEFAULT_SOLVER,
     MiniZincExecutionError,
@@ -162,7 +163,7 @@ def create_server() -> FastMCP:
     def check_minizinc_model(
         model: str,
         solver: str = DEFAULT_SOLVER,
-        timeout_ms: int = DEFAULT_SOLVE_TIMEOUT_MS,
+        timeout_ms: int = DEFAULT_CHECK_TIMEOUT_MS,
     ) -> CheckResult:
         try:
             return check_model(model, solver=solver, timeout_ms=timeout_ms)

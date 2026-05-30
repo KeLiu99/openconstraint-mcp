@@ -115,8 +115,12 @@ execution tool:
     `--solver` flag. The compile is solver-aware, so a model that
     compiles for one solver may not for another — check against the
     solver you intend to solve with.
-  - `timeout_ms: int = 30000` — compile budget in milliseconds. Must be
-    strictly positive (`0` is a validation error, not "no timeout").
+  - `timeout_ms: int = 30000` — compile budget in milliseconds, enforced
+    as a wall-clock cap on the runtime subprocess (plus a few seconds'
+    grace). It is also passed through to MiniZinc's `--time-limit`, but
+    that flag primarily bounds *solving*, so for a compile the subprocess
+    cap is the real stop. Must be strictly positive (`0` is a validation
+    error, not "no timeout").
 
   Returns a `CheckResult` with fields:
 

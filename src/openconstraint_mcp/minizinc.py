@@ -20,6 +20,10 @@ from .schemas import (
 
 DEFAULT_SOLVER: str = "cp-sat"
 DEFAULT_SOLVE_TIMEOUT_MS: int = 30_000
+# Named separately from the solve budget so the check call site doesn't read as
+# a solve constant. A compile-check is far cheaper than a solve, but reusing the
+# same value keeps the two tools' timeout semantics aligned.
+DEFAULT_CHECK_TIMEOUT_MS: int = DEFAULT_SOLVE_TIMEOUT_MS
 
 
 class MiniZincExecutionError(RuntimeError):
@@ -212,7 +216,7 @@ def check_model(
     model: str,
     *,
     solver: str = DEFAULT_SOLVER,
-    timeout_ms: int = DEFAULT_SOLVE_TIMEOUT_MS,
+    timeout_ms: int = DEFAULT_CHECK_TIMEOUT_MS,
 ) -> CheckResult:
     outcome = _run_managed_minizinc(
         model, solver=solver, timeout_ms=timeout_ms, extra_args=("-c",)
@@ -225,6 +229,9 @@ def check_model(
             stderr=outcome.stderr,
             elapsed_ms=outcome.elapsed_ms,
         )
+    # A pure `-c` compile emits no FlatZinc status markers, so the process
+    # return code is the whole signal here — unlike solve_model, do not route
+    # this through _parse_status.
     status: CheckStatus = "ok" if outcome.returncode == 0 else "error"
     return CheckResult(
         status=status,
