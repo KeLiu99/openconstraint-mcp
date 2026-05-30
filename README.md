@@ -114,7 +114,9 @@ execution tool:
   - `solver: str = "cp-sat"` — passed through verbatim to MiniZinc's
     `--solver` flag. The compile is solver-aware, so a model that
     compiles for one solver may not for another — check against the
-    solver you intend to solve with.
+    solver you intend to solve with. An unknown or unavailable solver is
+    a compile failure: it surfaces as `status="error"` with MiniZinc's
+    diagnostic in `stderr`, not as an MCP error.
   - `timeout_ms: int = 30000` — compile budget in milliseconds, enforced
     as a wall-clock cap on the runtime subprocess (plus a few seconds'
     grace). It is also passed through to MiniZinc's `--time-limit`, but

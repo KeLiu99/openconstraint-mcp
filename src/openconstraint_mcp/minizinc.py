@@ -164,7 +164,7 @@ def _run_managed_minizinc(
             elapsed_ms = max(int((time.monotonic() - start) * 1000), 0)
             return _RunOutcome(
                 timed_out=True,
-                returncode=0,
+                returncode=-1,  # sentinel: never read while timed_out is True
                 stdout=_coerce_to_text(exc.stdout),
                 stderr=_coerce_to_text(exc.stderr),
                 elapsed_ms=elapsed_ms,
