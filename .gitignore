@@ -8,3 +8,31 @@ wheels/
 
 # Virtual environments
 .venv
+
+# Tool caches
+.mypy_cache/
+.pytest_cache/
+.ruff_cache/
+.dmypy.json
+dmypy.json
+
+# Local agent/editor state
+.claude/
+.codex/
+.idea/
+
+# Local DB/store files
+*.db
+*.db-shm
+*.db-wal
+*.sqlite
+*.sqlite3
+*.duckdb
+
+# Logs and runtime scratch
+*.log
+*.pid
+
+# macOS
+.DS_Store
+._*
