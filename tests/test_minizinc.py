@@ -16,6 +16,7 @@ from openconstraint_mcp.minizinc import (
     MiniZincExecutionError,
     _parse_status,
     _parse_unsat_core,
+    _slice_source,
     check_model,
     find_unsat_core,
     list_solvers,
@@ -285,6 +286,50 @@ def test_parse_unsat_core_ignores_trace_spans_without_mus_line() -> None:
     assert _parse_unsat_core(
         "Traces: model.mzn|4|12|4|20|\n", _UNSAT_CORE_MODEL
     ) == (False, [])
+
+
+# 1-indexed, end-inclusive spans over a 3-line model whose lines are each 5 chars.
+_SLICE_MODEL = "abcde\nfghij\nklmno"
+
+
+@pytest.mark.parametrize(
+    ("sl", "sc", "el", "ec", "expected"),
+    [
+        pytest.param(1, 2, 1, 4, "bcd", id="single-line"),
+        pytest.param(1, 3, 3, 2, "cde\nfghij\nkl", id="multi-line"),
+    ],
+)
+def test_slice_source_returns_precise_span(
+    sl: int, sc: int, el: int, ec: int, expected: str
+) -> None:
+    assert _slice_source(_SLICE_MODEL, sl, sc, el, ec) == expected
+
+
+@pytest.mark.parametrize(
+    ("sl", "sc", "el", "ec"),
+    [
+        pytest.param(3, 1, 1, 1, id="start-after-end"),
+        pytest.param(5, 1, 6, 2, id="start-past-eof"),
+    ],
+)
+def test_slice_source_invalid_line_span_returns_empty(
+    sl: int, sc: int, el: int, ec: int
+) -> None:
+    assert _slice_source(_SLICE_MODEL, sl, sc, el, ec) == ""
+
+
+@pytest.mark.parametrize(
+    ("sl", "sc", "el", "ec", "expected"),
+    [
+        pytest.param(2, 9, 2, 10, "fghij", id="column-past-line-end"),
+        pytest.param(1, 4, 1, 2, "abcde", id="start-col-after-end-col"),
+        pytest.param(2, 1, 5, 3, "fghij\nklmno", id="end-line-past-eof-clamped"),
+    ],
+)
+def test_slice_source_falls_back_to_whole_lines(
+    sl: int, sc: int, el: int, ec: int, expected: str
+) -> None:
+    assert _slice_source(_SLICE_MODEL, sl, sc, el, ec) == expected
 
 
 @pytest.mark.parametrize(

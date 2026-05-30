@@ -195,31 +195,36 @@ def _run_managed_minizinc(
 
 def _slice_source(model: str, sl: int, sc: int, el: int, ec: int) -> str:
     lines = model.splitlines()
+    # Reject an unusable line span: before the file, inverted, or starting past EOF.
     if sl < 1 or el < 1 or sl > el or sl > len(lines):
         return ""
 
-    bounded_end = min(el, len(lines))
-    referenced_lines = lines[sl - 1 : bounded_end]
-    if not referenced_lines:
-        return ""
-    fallback = "\n".join(referenced_lines)
+    # Clamp the end line into the file; the guard above keeps this non-empty.
+    referenced = lines[sl - 1 : min(el, len(lines))]
+    fallback = "\n".join(referenced)
+    first, last = referenced[0], referenced[-1]
 
-    if sc < 1 or ec < 1 or el > len(lines):
+    # Slice precisely only when every column bound lands inside its line (and, on
+    # a single line, start precedes end). An end line past EOF means the end
+    # column can't be trusted, so fall back to the whole referenced line(s).
+    cols_usable = (
+        el <= len(lines)
+        and 1 <= sc <= len(first)
+        and 1 <= ec <= len(last)
+        and (sl != el or sc <= ec)
+    )
+    if not cols_usable:
         return fallback
 
     if sl == el:
-        line = lines[sl - 1]
-        if sc > ec or sc > len(line) or ec > len(line):
-            return fallback
-        return line[sc - 1 : ec]
+        return first[sc - 1 : ec]
+    return "\n".join([first[sc - 1 :], *referenced[1:-1], last[:ec]])
 
-    first_line = lines[sl - 1]
-    last_line = lines[el - 1]
-    if sc > len(first_line) or ec > len(last_line):
-        return fallback
 
-    sliced = [first_line[sc - 1 :], *lines[sl: el - 1], last_line[:ec]]
-    return "\n".join(sliced)
+# findMUS prints each MUS constraint as a pipe-delimited trace span:
+# <file>|<start-line>|<start-col>|<end-line>|<end-col>|... — capture the file
+# token (ending in .mzn) and the four 1-indexed coordinates.
+_SPAN_PATTERN = re.compile(r"([^\s|;]+\.mzn)\|(\d+)\|(\d+)\|(\d+)\|(\d+)")
 
 
 def _parse_unsat_core(stdout: str, model: str) -> tuple[bool, list[UnsatCoreConstraint]]:
@@ -227,31 +232,24 @@ def _parse_unsat_core(stdout: str, model: str) -> tuple[bool, list[UnsatCoreCons
     if not mus_present:
         return False, []
 
-    span_pattern = re.compile(r"([^\s|;]+\.mzn)\|(\d+)\|(\d+)\|(\d+)\|(\d+)")
-    core: list[UnsatCoreConstraint] = []
-    seen: set[tuple[int, int, int, int]] = set()
-    for match in span_pattern.finditer(stdout):
-        file_name, sl_raw, sc_raw, el_raw, ec_raw = match.groups()
+    # Keyed by span so repeated trace lines for the same constraint collapse to a
+    # single entry, with first-seen order preserved (dict keeps insertion order).
+    by_span: dict[tuple[int, int, int, int], UnsatCoreConstraint] = {}
+    for file_name, sl_raw, sc_raw, el_raw, ec_raw in _SPAN_PATTERN.findall(stdout):
         if Path(file_name).name != _MODEL_FILENAME:
             continue
-
-        span = (int(sl_raw), int(sc_raw), int(el_raw), int(ec_raw))
-        if span in seen:
-            continue
-
-        seen.add(span)
-        sl, sc, el, ec = span
-        core.append(
-            UnsatCoreConstraint(
+        sl, sc, el, ec = int(sl_raw), int(sc_raw), int(el_raw), int(ec_raw)
+        span = (sl, sc, el, ec)
+        if span not in by_span:
+            by_span[span] = UnsatCoreConstraint(
                 line=sl,
                 column=sc,
                 end_line=el,
                 end_column=ec,
                 source=_slice_source(model, sl, sc, el, ec),
             )
-        )
 
-    return True, core
+    return True, list(by_span.values())
 
 
 def find_unsat_core(
