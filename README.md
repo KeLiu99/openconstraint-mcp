@@ -1,11 +1,43 @@
 # openconstraint-mcp
 
 A local-first [Model Context Protocol](https://modelcontextprotocol.io) server for
-constraint programming and optimization. `openconstraint-mcp` wraps a **managed**
-MiniZinc runtime (bundled and controlled by this project, not your system install)
-and exposes open-source solvers — OR-Tools CP-SAT as the default, Chuffed as an
-optional verifier — over MCP stdio. Privacy-first: no telemetry, no background
-network calls, nothing leaves your machine unless you explicitly opt in.
+constraint programming and optimization. `openconstraint-mcp` gives an MCP client a
+deterministic way to compile-check and solve [MiniZinc](https://www.minizinc.org/)
+models on a **managed** solver runtime — controlled by this project, not your system
+install — exposing open-source solvers (OR-Tools CP-SAT by default,
+Chuffed as an optional verifier) over MCP stdio.
+
+Constraint problems — scheduling, rostering, assignment, routing, production
+planning, inventory — are exactly where a language model is most likely to produce an
+answer that looks right but is subtly infeasible. The division of labor here is
+**LLM proposes, server verifies**: the client's LLM drafts a MiniZinc model, and the
+local runtime compiles and solves it to produce a checked result. The server runs the
+solver; it never drafts a model of its own and never calls an LLM.
+
+Everything runs on your machine. No telemetry, no background network calls, and
+nothing leaves your machine unless you opt in — the only network access in the entire
+package is the runtime download you trigger explicitly with `install-runtime`.
+
+## Design principles
+
+- **Local-first.** Solving, validation, and result inspection all run on your machine.
+  There are no remote solving backends and no upload of your models or data.
+- **Managed runtime.** Solver execution always goes through a MiniZinc runtime this
+  project resolves and controls, never an arbitrary `$PATH` binary — so a run does not
+  depend on whatever MiniZinc happens to be installed on the host.
+- **LLM proposes, server verifies.** Natural-language → model translation, critique,
+  and repair belong in the MCP *client's* LLM. The server owns the deterministic half:
+  compile-check, solve, and report the runtime's verbatim output. It holds no LLM
+  credentials and never invokes a generative model.
+- **No hidden network calls.** Validation, solving, and result inspection are all
+  offline. The only sanctioned network call is the runtime download, and only when you
+  run `install-runtime` — never on import, on server boot, or as a "convenience".
+- **No telemetry.** Not implemented. Any future telemetry would be opt-in and
+  documented.
+- **MiniZinc-first, not MiniZinc-only forever.** v0 targets MiniZinc-compatible
+  discrete optimization because it is a mature, solver-agnostic modelling layer. Native
+  solver backends may be added later to close concrete gaps, not as a goal in
+  themselves.
 
 ## Installation
 
@@ -306,6 +338,23 @@ errors" rather than feature breadth. In particular:
 - **The only code path that touches the network is the `install-runtime` CLI
   command.** The package does not phone home; `httpx` is only imported when
   `install-runtime` runs (enforced by a regression test).
+
+## Commercial support
+
+openconstraint-mcp is open source and free to use, and it is also the open-source
+on-ramp for expert help with real-world constraint and optimization problems. If you
+are applying constraint programming to production scheduling, workforce rostering,
+assignment, routing, planning, or inventory problems, paid support is available for
+work such as:
+
+- modelling a business problem as a correct, maintainable constraint model;
+- solver selection and tuning when a model is slow or returning poor solutions;
+- integrating an optimization workflow into existing systems and data pipelines;
+- hardening a prototype into a reliable, productionized service.
+
+The project is maintained by a specialist with a research background in constraint
+programming. For consulting enquiries, open an issue on the repository to start a
+conversation.
 
 ## Licensing & upstream sources
 
