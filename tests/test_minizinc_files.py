@@ -167,8 +167,7 @@ def test_find_unsat_core_filters_by_real_basename(
     model_path.write_text(_UNSAT_CORE_MODEL)
     # Traces reference the real basename plus a differently-named included file.
     stdout = (
-        "MUS: 1 2\n"
-        "Traces: nurses.mzn|4|12|4|20|;nurses.mzn|5|12|5|20|;helpers.mzn|10|1|10|5|\n"
+        "MUS: 1 2\nTraces: nurses.mzn|4|12|4|20|;nurses.mzn|5|12|5|20|;helpers.mzn|10|1|10|5|\n"
     )
     calls = _record_run(monkeypatch, _FakeCompletedProcess(stdout=stdout, stderr="", returncode=0))
 
