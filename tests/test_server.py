@@ -6,7 +6,7 @@ from typing import Any
 
 import pytest
 
-from openconstraint_mcp.server import create_server
+from openconstraint_mcp.server import create_mcp_server
 
 
 @pytest.mark.asyncio
@@ -23,7 +23,7 @@ async def test_list_available_solvers_surfaces_actionable_error_on_binary_failur
 
     monkeypatch.setattr("openconstraint_mcp.minizinc.subprocess.run", _fake_run)
 
-    mcp = create_server()
+    mcp = create_mcp_server()
     with pytest.raises(Exception) as exc_info:
         await mcp.call_tool("list_available_solvers", {})
 
@@ -59,7 +59,7 @@ _UNSAT_CORE_STDOUT = (
 
 
 async def _get_prompt_text(prompt_name: str, arguments: dict[str, str]) -> str:
-    mcp = create_server()
+    mcp = create_mcp_server()
     result = await mcp.get_prompt(prompt_name, arguments)
     return "\n".join(
         message.content.text  # type: ignore[union-attr]
@@ -69,7 +69,7 @@ async def _get_prompt_text(prompt_name: str, arguments: dict[str, str]) -> str:
 
 @pytest.mark.asyncio
 async def test_solve_constraint_problem_prompt_is_listed() -> None:
-    mcp = create_server()
+    mcp = create_mcp_server()
     prompts = await mcp.list_prompts()
 
     names = {prompt.name for prompt in prompts}
@@ -224,7 +224,7 @@ def _record_data_run(
 
 @pytest.mark.asyncio
 async def test_solve_minizinc_model_tool_is_listed() -> None:
-    mcp = create_server()
+    mcp = create_mcp_server()
     tools = await mcp.list_tools()
 
     names = {tool.name for tool in tools}
@@ -249,7 +249,7 @@ async def test_solve_minizinc_model_happy_path(
 
     monkeypatch.setattr("openconstraint_mcp.minizinc.subprocess.run", _fake_run)
 
-    mcp = create_server()
+    mcp = create_mcp_server()
     result = await mcp.call_tool(
         "solve_minizinc_model",
         {"model": "var 1..5: x;\nconstraint x > 2;\nsolve satisfy;"},
@@ -270,7 +270,7 @@ async def test_solve_minizinc_model_threads_inline_data_to_runtime(
         _FakeCompletedProcess(stdout="==========\n", stderr="", returncode=0),
     )
 
-    mcp = create_server()
+    mcp = create_mcp_server()
     result = await mcp.call_tool(
         "solve_minizinc_model",
         {"model": "int: n;\nvar 1..n: x;\nconstraint x = n;\nsolve satisfy;", "data": "n = 3;"},
@@ -284,7 +284,7 @@ async def test_solve_minizinc_model_threads_inline_data_to_runtime(
 async def test_solve_minizinc_model_runtime_missing_surfaces_actionable_error(
     fake_runtime_dir: Path,
 ) -> None:
-    mcp = create_server()
+    mcp = create_mcp_server()
     with pytest.raises(Exception) as exc_info:
         await mcp.call_tool("solve_minizinc_model", {"model": "solve satisfy;"})
 
@@ -302,7 +302,7 @@ async def test_solve_minizinc_model_empty_model_surfaces_actionable_error(
 
     monkeypatch.setattr("openconstraint_mcp.minizinc.subprocess.run", _fail_if_called)
 
-    mcp = create_server()
+    mcp = create_mcp_server()
     with pytest.raises(Exception) as exc_info:
         await mcp.call_tool("solve_minizinc_model", {"model": ""})
     assert "empty" in str(exc_info.value)
@@ -317,7 +317,7 @@ async def test_solve_minizinc_model_non_positive_timeout_surfaces_actionable_err
 
     monkeypatch.setattr("openconstraint_mcp.minizinc.subprocess.run", _fail_if_called)
 
-    mcp = create_server()
+    mcp = create_mcp_server()
     with pytest.raises(Exception) as exc_info:
         await mcp.call_tool(
             "solve_minizinc_model",
@@ -340,7 +340,7 @@ async def test_solve_minizinc_model_compile_error_returns_structured_result(
 
     monkeypatch.setattr("openconstraint_mcp.minizinc.subprocess.run", _fake_run)
 
-    mcp = create_server()
+    mcp = create_mcp_server()
     result = await mcp.call_tool(
         "solve_minizinc_model",
         {"model": "var 1..5: x;\nconstraint xz > 2;\nsolve satisfy;"},
@@ -353,7 +353,7 @@ async def test_solve_minizinc_model_compile_error_returns_structured_result(
 
 @pytest.mark.asyncio
 async def test_check_minizinc_model_tool_is_listed() -> None:
-    mcp = create_server()
+    mcp = create_mcp_server()
     tools = await mcp.list_tools()
 
     names = {tool.name for tool in tools}
@@ -374,7 +374,7 @@ async def test_check_minizinc_model_happy_path(
 
     monkeypatch.setattr("openconstraint_mcp.minizinc.subprocess.run", _fake_run)
 
-    mcp = create_server()
+    mcp = create_mcp_server()
     result = await mcp.call_tool(
         "check_minizinc_model",
         {"model": "var 1..5: x;\nconstraint x > 2;\nsolve satisfy;"},
@@ -392,7 +392,7 @@ async def test_check_minizinc_model_threads_inline_data_to_runtime(
 ) -> None:
     calls = _record_data_run(monkeypatch, _FakeCompletedProcess(stdout="", stderr="", returncode=0))
 
-    mcp = create_server()
+    mcp = create_mcp_server()
     result = await mcp.call_tool(
         "check_minizinc_model",
         {"model": "int: n;\nvar 1..n: x;\nsolve satisfy;", "data": "n = 3;"},
@@ -416,7 +416,7 @@ async def test_check_minizinc_model_compile_error_returns_structured_result(
 
     monkeypatch.setattr("openconstraint_mcp.minizinc.subprocess.run", _fake_run)
 
-    mcp = create_server()
+    mcp = create_mcp_server()
     result = await mcp.call_tool(
         "check_minizinc_model",
         {"model": "var 1..5: x;\nconstraint xz > 2;\nsolve satisfy;"},
@@ -431,7 +431,7 @@ async def test_check_minizinc_model_compile_error_returns_structured_result(
 async def test_check_minizinc_model_runtime_missing_surfaces_actionable_error(
     fake_runtime_dir: Path,
 ) -> None:
-    mcp = create_server()
+    mcp = create_mcp_server()
     with pytest.raises(Exception) as exc_info:
         await mcp.call_tool("check_minizinc_model", {"model": "solve satisfy;"})
 
@@ -449,7 +449,7 @@ async def test_check_minizinc_model_empty_model_surfaces_actionable_error(
 
     monkeypatch.setattr("openconstraint_mcp.minizinc.subprocess.run", _fail_if_called)
 
-    mcp = create_server()
+    mcp = create_mcp_server()
     with pytest.raises(Exception) as exc_info:
         await mcp.call_tool("check_minizinc_model", {"model": ""})
     assert "empty" in str(exc_info.value)
@@ -457,7 +457,7 @@ async def test_check_minizinc_model_empty_model_surfaces_actionable_error(
 
 @pytest.mark.asyncio
 async def test_find_unsat_core_tool_is_listed() -> None:
-    mcp = create_server()
+    mcp = create_mcp_server()
     tools = await mcp.list_tools()
 
     names = {tool.name for tool in tools}
@@ -483,7 +483,7 @@ async def test_find_unsat_core_happy_path(
 
     monkeypatch.setattr("openconstraint_mcp.minizinc.subprocess.run", _fake_run)
 
-    mcp = create_server()
+    mcp = create_mcp_server()
     result = await mcp.call_tool("find_unsat_core", {"model": _UNSAT_CORE_MODEL})
 
     structured = _structured(result)
@@ -501,7 +501,7 @@ async def test_find_unsat_core_threads_inline_data_to_runtime(
         _FakeCompletedProcess(stdout=_UNSAT_CORE_STDOUT, stderr="", returncode=0),
     )
 
-    mcp = create_server()
+    mcp = create_mcp_server()
     result = await mcp.call_tool(
         "find_unsat_core",
         {"model": _UNSAT_CORE_MODEL, "data": "lo = 5;"},
@@ -515,7 +515,7 @@ async def test_find_unsat_core_threads_inline_data_to_runtime(
 async def test_find_unsat_core_runtime_missing_surfaces_actionable_error(
     fake_runtime_dir: Path,
 ) -> None:
-    mcp = create_server()
+    mcp = create_mcp_server()
     with pytest.raises(Exception) as exc_info:
         await mcp.call_tool("find_unsat_core", {"model": "solve satisfy;"})
 
@@ -533,7 +533,7 @@ async def test_find_unsat_core_empty_model_surfaces_actionable_error(
 
     monkeypatch.setattr("openconstraint_mcp.minizinc.subprocess.run", _fail_if_called)
 
-    mcp = create_server()
+    mcp = create_mcp_server()
     with pytest.raises(Exception) as exc_info:
         await mcp.call_tool("find_unsat_core", {"model": ""})
     assert "empty" in str(exc_info.value)
@@ -548,7 +548,7 @@ async def test_find_unsat_core_non_positive_timeout_surfaces_actionable_error(
 
     monkeypatch.setattr("openconstraint_mcp.minizinc.subprocess.run", _fail_if_called)
 
-    mcp = create_server()
+    mcp = create_mcp_server()
     with pytest.raises(Exception) as exc_info:
         await mcp.call_tool(
             "find_unsat_core",

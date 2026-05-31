@@ -1,7 +1,7 @@
 """Prompt templates exposed by the MCP server.
 
 Editorial copy for the server's MCP prompts lives here, separate from the
-FastMCP wiring in ``server.py``. This is a leaf module: ``server`` imports it
+FastMCP wiring in ``server.py``. This is a leaf module: ``server`` imports it,
 and it imports nothing internal.
 """
 

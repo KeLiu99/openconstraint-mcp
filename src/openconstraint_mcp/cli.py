@@ -36,6 +36,8 @@ def _warn_on_corrupt_install_config() -> None:
 @app.command()
 def stdio() -> None:
     """Run the MCP server over stdio."""
+    # CLI entry point used by MCP clients. The FastMCP app is built in
+    # server.create_mcp_server(), so importing the CLI does not register tools.
     run_stdio()
 
 
