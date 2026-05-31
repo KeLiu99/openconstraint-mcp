@@ -555,3 +555,153 @@ async def test_find_unsat_core_non_positive_timeout_surfaces_actionable_error(
             {"model": "constraint false;\nsolve satisfy;", "timeout_ms": 0},
         )
     assert "positive" in str(exc_info.value)
+
+
+# --- path-based file tools -------------------------------------------------
+
+_FILE_MODEL_SRC = "var 1..5: x;\nconstraint x > 2;\nsolve satisfy;\n"
+
+
+def _record_run_capturing_cwd(
+    monkeypatch: pytest.MonkeyPatch, completed: _FakeCompletedProcess
+) -> list[dict[str, Any]]:
+    calls: list[dict[str, Any]] = []
+
+    def _fake_run(*args: Any, **kwargs: Any) -> _FakeCompletedProcess:
+        calls.append({"cmd": list(args[0]), "cwd": kwargs.get("cwd")})
+        return completed
+
+    monkeypatch.setattr("openconstraint_mcp.minizinc.subprocess.run", _fake_run)
+    return calls
+
+
+@pytest.mark.asyncio
+async def test_file_tools_are_listed_with_expected_properties() -> None:
+    mcp = create_mcp_server()
+    tools = await mcp.list_tools()
+    by_name = {tool.name: tool for tool in tools}
+
+    for name in ("solve_minizinc_files", "check_minizinc_files", "find_unsat_core_files"):
+        assert name in by_name
+
+    for name in ("solve_minizinc_files", "check_minizinc_files"):
+        properties = by_name[name].inputSchema.get("properties", {})
+        assert {"model_path", "data_path", "solver", "timeout_ms"} <= set(properties.keys())
+        # The two-mode flag was removed: file tools always run CLI-style.
+        assert "allow_local_includes" not in properties
+
+    findmus_props = by_name["find_unsat_core_files"].inputSchema.get("properties", {})
+    assert {"model_path", "data_path", "timeout_ms"} <= set(findmus_props.keys())
+    assert "solver" not in findmus_props
+    assert "allow_local_includes" not in findmus_props
+
+
+@pytest.mark.asyncio
+async def test_solve_minizinc_files_happy_path(
+    tmp_path: Path,
+    fake_minizinc_binary: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    model_path = tmp_path / "model.mzn"
+    model_path.write_text(_FILE_MODEL_SRC)
+    _record_run_capturing_cwd(
+        monkeypatch, _FakeCompletedProcess(stdout="==========\n", stderr="", returncode=0)
+    )
+
+    mcp = create_mcp_server()
+    result = await mcp.call_tool("solve_minizinc_files", {"model_path": str(model_path)})
+
+    assert _structured(result)["status"] == "optimal"
+
+
+@pytest.mark.asyncio
+async def test_check_minizinc_files_happy_path(
+    tmp_path: Path,
+    fake_minizinc_binary: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    model_path = tmp_path / "model.mzn"
+    model_path.write_text(_FILE_MODEL_SRC)
+    _record_run_capturing_cwd(
+        monkeypatch, _FakeCompletedProcess(stdout="", stderr="", returncode=0)
+    )
+
+    mcp = create_mcp_server()
+    result = await mcp.call_tool("check_minizinc_files", {"model_path": str(model_path)})
+
+    assert _structured(result)["status"] == "ok"
+
+
+@pytest.mark.asyncio
+async def test_find_unsat_core_files_happy_path(
+    tmp_path: Path,
+    fake_minizinc_binary: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    model_path = tmp_path / "model.mzn"
+    model_path.write_text(_UNSAT_CORE_MODEL)
+    _record_run_capturing_cwd(
+        monkeypatch, _FakeCompletedProcess(stdout=_UNSAT_CORE_STDOUT, stderr="", returncode=0)
+    )
+
+    mcp = create_mcp_server()
+    result = await mcp.call_tool("find_unsat_core_files", {"model_path": str(model_path)})
+
+    structured = _structured(result)
+    assert structured["status"] == "mus_found"
+    assert len(structured["core"]) == 2
+
+
+@pytest.mark.asyncio
+async def test_solve_minizinc_files_runs_from_model_parent(
+    tmp_path: Path,
+    fake_minizinc_binary: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    model_path = tmp_path / "model.mzn"
+    model_path.write_text(_FILE_MODEL_SRC)
+    calls = _record_run_capturing_cwd(
+        monkeypatch, _FakeCompletedProcess(stdout="==========\n", stderr="", returncode=0)
+    )
+
+    mcp = create_mcp_server()
+    await mcp.call_tool("solve_minizinc_files", {"model_path": str(model_path)})
+
+    assert calls[0]["cwd"] == str(model_path.resolve().parent)
+
+
+@pytest.mark.asyncio
+async def test_solve_minizinc_files_path_not_found_surfaces_actionable_error(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def _fail_if_called(*args: object, **kwargs: object) -> None:
+        raise AssertionError("subprocess.run must not be invoked for a missing path")
+
+    monkeypatch.setattr("openconstraint_mcp.minizinc.subprocess.run", _fail_if_called)
+    missing = tmp_path / "nope.mzn"
+
+    mcp = create_mcp_server()
+    with pytest.raises(Exception) as exc_info:
+        await mcp.call_tool("solve_minizinc_files", {"model_path": str(missing)})
+
+    message = str(exc_info.value)
+    assert "does not exist" in message
+    assert "nope.mzn" in message
+
+
+@pytest.mark.asyncio
+async def test_solve_minizinc_files_runtime_missing_surfaces_actionable_error(
+    tmp_path: Path,
+    fake_runtime_dir: Path,
+) -> None:
+    model_path = tmp_path / "model.mzn"
+    model_path.write_text(_FILE_MODEL_SRC)
+
+    mcp = create_mcp_server()
+    with pytest.raises(Exception) as exc_info:
+        await mcp.call_tool("solve_minizinc_files", {"model_path": str(model_path)})
+
+    message = str(exc_info.value)
+    assert "install-runtime" in message
+    assert "MiniZinc" in message

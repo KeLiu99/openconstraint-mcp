@@ -131,6 +131,54 @@ class _RunOutcome(NamedTuple):
     elapsed_ms: int
 
 
+def _invoke_minizinc(cmd: Sequence[str], *, timeout_ms: int, cwd: str) -> _RunOutcome:
+    """Run a fully-built MiniZinc ``cmd`` and capture the raw outcome.
+
+    Shared by the inline runner (``cwd`` is a private temp dir) and the
+    path-based runner (``cwd`` is the model's own directory). The
+    subprocess gets a wall-clock cap of ``(timeout_ms / 1000) + 5`` seconds —
+    a few seconds past MiniZinc's own ``--time-limit`` so the binary normally
+    stops itself first, and we capture its partial output. A ``TimeoutExpired``
+    becomes a ``timed_out`` outcome; an ``OSError`` (binary missing/not
+    executable) is wrapped as ``MiniZincExecutionError`` keyed on ``cmd[0]``.
+    """
+    subprocess_timeout = (timeout_ms / 1000) + 5
+    start = time.monotonic()
+    try:
+        completed = subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=subprocess_timeout,
+            cwd=cwd,
+        )
+    except subprocess.TimeoutExpired as exc:
+        elapsed_ms = max(int((time.monotonic() - start) * 1000), 0)
+        return _RunOutcome(
+            timed_out=True,
+            returncode=-1,  # sentinel: never read while timed_out is True
+            stdout=_coerce_to_text(exc.stdout),
+            stderr=_coerce_to_text(exc.stderr),
+            elapsed_ms=elapsed_ms,
+        )
+    except OSError as exc:
+        raise MiniZincExecutionError(
+            f"Managed MiniZinc binary at {cmd[0]} failed to execute: {exc}. "
+            "The runtime may be corrupt — try reinstalling with "
+            "`openconstraint-mcp install-runtime`."
+        ) from exc
+    elapsed_ms = max(int((time.monotonic() - start) * 1000), 0)
+    return _RunOutcome(
+        timed_out=False,
+        returncode=completed.returncode,
+        stdout=completed.stdout,
+        stderr=completed.stderr,
+        elapsed_ms=elapsed_ms,
+    )
+
+
 def _run_managed_minizinc(
     model: str,
     *,
@@ -166,7 +214,6 @@ def _run_managed_minizinc(
             "Run `openconstraint-mcp install-runtime` to set it up."
         )
     binary = get_minizinc_binary()
-    subprocess_timeout = (timeout_ms / 1000) + 5
     with tempfile.TemporaryDirectory(prefix="openconstraint-mcp-") as tmp:
         tmp_dir = Path(tmp)
         model_file = tmp_dir / _MODEL_FILENAME
@@ -186,40 +233,7 @@ def _run_managed_minizinc(
             str(model_file),
             *data_args,
         ]
-        start = time.monotonic()
-        try:
-            completed = subprocess.run(
-                cmd,
-                capture_output=True,
-                text=True,
-                encoding="utf-8",
-                errors="replace",
-                timeout=subprocess_timeout,
-                cwd=str(tmp_dir),
-            )
-        except subprocess.TimeoutExpired as exc:
-            elapsed_ms = max(int((time.monotonic() - start) * 1000), 0)
-            return _RunOutcome(
-                timed_out=True,
-                returncode=-1,  # sentinel: never read while timed_out is True
-                stdout=_coerce_to_text(exc.stdout),
-                stderr=_coerce_to_text(exc.stderr),
-                elapsed_ms=elapsed_ms,
-            )
-        except OSError as exc:
-            raise MiniZincExecutionError(
-                f"Managed MiniZinc binary at {binary} failed to execute: {exc}. "
-                "The runtime may be corrupt — try reinstalling with "
-                "`openconstraint-mcp install-runtime`."
-            ) from exc
-        elapsed_ms = max(int((time.monotonic() - start) * 1000), 0)
-        return _RunOutcome(
-            timed_out=False,
-            returncode=completed.returncode,
-            stdout=completed.stdout,
-            stderr=completed.stderr,
-            elapsed_ms=elapsed_ms,
-        )
+        return _invoke_minizinc(cmd, timeout_ms=timeout_ms, cwd=str(tmp_dir))
 
 
 def _slice_source(model: str, sl: int, sc: int, el: int, ec: int) -> str:
@@ -256,9 +270,14 @@ def _slice_source(model: str, sl: int, sc: int, el: int, ec: int) -> str:
 _SPAN_PATTERN = re.compile(r"([^\s|;]+\.mzn)\|(\d+)\|(\d+)\|(\d+)\|(\d+)")
 
 
-def _iter_model_spans(stdout: str) -> Iterator[tuple[int, int, int, int]]:
+def _iter_model_spans(stdout: str, model_filename: str) -> Iterator[tuple[int, int, int, int]]:
+    # Keep only spans whose file token matches the entry model's basename;
+    # spans from included files stay out of the structured core. The match is
+    # basename-only, so an included file sharing the entry model's basename in
+    # a different directory would be mis-attributed here — a documented
+    # best-effort limitation (raw stdout stays authoritative).
     for file_name, sl_raw, sc_raw, el_raw, ec_raw in _SPAN_PATTERN.findall(stdout):
-        if Path(file_name).name == _MODEL_FILENAME:
+        if Path(file_name).name == model_filename:
             yield int(sl_raw), int(sc_raw), int(el_raw), int(ec_raw)
 
 
@@ -273,30 +292,63 @@ def _constraint_from_span(model: str, span: tuple[int, int, int, int]) -> UnsatC
     )
 
 
-def _parse_unsat_core(stdout: str, model: str) -> tuple[bool, list[UnsatCoreConstraint]]:
+def _parse_unsat_core(
+    stdout: str, model: str, *, model_filename: str = _MODEL_FILENAME
+) -> tuple[bool, list[UnsatCoreConstraint]]:
     mus_present = any(line.lstrip().startswith("MUS:") for line in stdout.splitlines())
     if not mus_present:
         return False, []
 
     # Repeated trace lines for the same constraint collapse to a single entry,
     # with first-seen order preserved (dict keeps insertion order).
-    unique_spans = dict.fromkeys(_iter_model_spans(stdout))
+    unique_spans = dict.fromkeys(_iter_model_spans(stdout, model_filename))
     return True, [_constraint_from_span(model, span) for span in unique_spans]
 
 
-def find_unsat_core(
-    model: str,
-    *,
-    data: str | None = None,
-    timeout_ms: int = DEFAULT_UNSAT_CORE_TIMEOUT_MS,
-) -> UnsatCoreResult:
-    outcome = _run_managed_minizinc(
-        model,
-        solver=FINDMUS_SOLVER,
-        timeout_ms=timeout_ms,
-        extra_args=(),
-        data=data,
+def _build_solve_result(outcome: _RunOutcome, *, solver: str) -> SolveResult:
+    if outcome.timed_out:
+        return SolveResult(
+            status="timeout",
+            solver=solver,
+            stdout=outcome.stdout,
+            stderr=outcome.stderr,
+            elapsed_ms=outcome.elapsed_ms,
+        )
+    status = _parse_status(outcome.stdout, outcome.returncode, timed_out=False)
+    return SolveResult(
+        status=status,
+        solver=solver,
+        stdout=outcome.stdout,
+        stderr=outcome.stderr,
+        elapsed_ms=outcome.elapsed_ms,
     )
+
+
+def _build_check_result(outcome: _RunOutcome, *, solver: str) -> CheckResult:
+    if outcome.timed_out:
+        return CheckResult(
+            status="timeout",
+            solver=solver,
+            stdout=outcome.stdout,
+            stderr=outcome.stderr,
+            elapsed_ms=outcome.elapsed_ms,
+        )
+    # A pure `-c` compile emits no FlatZinc status markers, so the process
+    # return code is the whole signal here — unlike solve, do not route this
+    # through _parse_status.
+    status: CheckStatus = "ok" if outcome.returncode == 0 else "error"
+    return CheckResult(
+        status=status,
+        solver=solver,
+        stdout=outcome.stdout,
+        stderr=outcome.stderr,
+        elapsed_ms=outcome.elapsed_ms,
+    )
+
+
+def _build_unsat_core_result(
+    outcome: _RunOutcome, model: str, *, model_filename: str = _MODEL_FILENAME
+) -> UnsatCoreResult:
     if outcome.timed_out:
         return UnsatCoreResult(
             status="timeout",
@@ -307,7 +359,7 @@ def find_unsat_core(
             elapsed_ms=outcome.elapsed_ms,
         )
 
-    mus_present, core = _parse_unsat_core(outcome.stdout, model)
+    mus_present, core = _parse_unsat_core(outcome.stdout, model, model_filename=model_filename)
     if mus_present:
         return UnsatCoreResult(
             status="mus_found",
@@ -338,6 +390,22 @@ def find_unsat_core(
     )
 
 
+def find_unsat_core(
+    model: str,
+    *,
+    data: str | None = None,
+    timeout_ms: int = DEFAULT_UNSAT_CORE_TIMEOUT_MS,
+) -> UnsatCoreResult:
+    outcome = _run_managed_minizinc(
+        model,
+        solver=FINDMUS_SOLVER,
+        timeout_ms=timeout_ms,
+        extra_args=(),
+        data=data,
+    )
+    return _build_unsat_core_result(outcome, model)
+
+
 def solve_model(
     model: str,
     *,
@@ -348,22 +416,7 @@ def solve_model(
     outcome = _run_managed_minizinc(
         model, solver=solver, timeout_ms=timeout_ms, extra_args=(), data=data
     )
-    if outcome.timed_out:
-        return SolveResult(
-            status="timeout",
-            solver=solver,
-            stdout=outcome.stdout,
-            stderr=outcome.stderr,
-            elapsed_ms=outcome.elapsed_ms,
-        )
-    status = _parse_status(outcome.stdout, outcome.returncode, timed_out=False)
-    return SolveResult(
-        status=status,
-        solver=solver,
-        stdout=outcome.stdout,
-        stderr=outcome.stderr,
-        elapsed_ms=outcome.elapsed_ms,
-    )
+    return _build_solve_result(outcome, solver=solver)
 
 
 def check_model(
@@ -376,22 +429,163 @@ def check_model(
     outcome = _run_managed_minizinc(
         model, solver=solver, timeout_ms=timeout_ms, extra_args=("-c",), data=data
     )
-    if outcome.timed_out:
-        return CheckResult(
-            status="timeout",
-            solver=solver,
-            stdout=outcome.stdout,
-            stderr=outcome.stderr,
-            elapsed_ms=outcome.elapsed_ms,
+    return _build_check_result(outcome, solver=solver)
+
+
+def _read_text_utf8(path: Path) -> str:
+    """Read ``path`` as UTF-8, surfacing a bad encoding as a clear ValueError.
+
+    The path tools assume UTF-8 source (MiniZinc's convention); wrapping
+    ``UnicodeDecodeError`` here turns an opaque traceback into the repo's
+    "clear errors" bar, with the offending path named in the message.
+    """
+    try:
+        return path.read_text(encoding="utf-8")
+    except UnicodeDecodeError as exc:
+        raise ValueError(f"{path} is not valid UTF-8") from exc
+
+
+def _validate_model_data_paths(
+    model_path: Path, data_path: Path | None
+) -> tuple[Path, Path | None]:
+    """Resolve, validate, and return the model/data paths before any subprocess.
+
+    Resolves each input to an absolute path (``Path.resolve()`` — following a
+    symlink the caller named), then rejects a missing or non-regular-file
+    model/data, and an empty/whitespace-only or non-UTF-8 model, with a clear
+    ``ValueError`` naming the offending path. The resolved paths are *returned*
+    so callers use the same path for read, argv, and cwd — a relative input
+    can't then double-count its subdir (``cwd=parent`` + relative argv).
+
+    Model emptiness and UTF-8 are checked here (the model is read for the
+    check), so the failure is a clear ``ValueError`` before any run. Data
+    emptiness is allowed (a valid "no parameters" input, matching the inline
+    ``data`` contract).
+    """
+    model_path = model_path.resolve()
+    if not model_path.exists():
+        raise ValueError(f"model_path does not exist: {model_path}")
+    if not model_path.is_file():
+        raise ValueError(f"model_path is not a file: {model_path}")
+    if not _read_text_utf8(model_path).strip():
+        raise ValueError(f"model file is empty: {model_path}")
+    if data_path is not None:
+        data_path = data_path.resolve()
+        if not data_path.exists():
+            raise ValueError(f"data_path does not exist: {data_path}")
+        if not data_path.is_file():
+            raise ValueError(f"data_path is not a file: {data_path}")
+    return model_path, data_path
+
+
+def _run_managed_minizinc_paths(
+    model_path: Path,
+    *,
+    solver: str,
+    timeout_ms: int,
+    extra_args: Sequence[str],
+    data_path: Path | None = None,
+) -> _RunOutcome:
+    """Run the managed binary on the real ``model_path`` with ``cwd`` = its parent.
+
+    The path-based counterpart of ``_run_managed_minizinc``: instead of copying
+    the model into a private temp dir, it runs the resolved real path so
+    relative ``include`` statements resolve against the model's own directory,
+    like normal MiniZinc CLI usage. Receives the already-resolved absolute paths
+    from the public functions. The data file, when present, is appended
+    positionally after the model (MiniZinc's ``model.mzn data.dzn`` order, which
+    every solver path — including findMUS — accepts).
+    """
+    if timeout_ms <= 0:
+        raise ValueError("timeout_ms must be positive")
+    if not is_runtime_installed():
+        raise RuntimeMissingError(
+            "Managed MiniZinc runtime not found. "
+            "Run `openconstraint-mcp install-runtime` to set it up."
         )
-    # A pure `-c` compile emits no FlatZinc status markers, so the process
-    # return code is the whole signal here — unlike solve_model, do not route
-    # this through _parse_status.
-    status: CheckStatus = "ok" if outcome.returncode == 0 else "error"
-    return CheckResult(
-        status=status,
+    binary = get_minizinc_binary()
+    data_args = [str(data_path)] if data_path is not None else []
+    cmd = [
+        str(binary),
+        "--solver",
+        solver,
+        "--time-limit",
+        str(timeout_ms),
+        *extra_args,
+        str(model_path),
+        *data_args,
+    ]
+    return _invoke_minizinc(cmd, timeout_ms=timeout_ms, cwd=str(model_path.parent))
+
+
+def solve_model_path(
+    model_path: Path,
+    *,
+    solver: str = DEFAULT_SOLVER,
+    data_path: Path | None = None,
+    timeout_ms: int = DEFAULT_SOLVE_TIMEOUT_MS,
+) -> SolveResult:
+    """Solve a MiniZinc model read from ``model_path`` via the managed runtime.
+
+    Runs the managed binary on the real ``model_path`` with ``cwd`` = its
+    parent, like normal MiniZinc CLI usage, so a relative ``include`` resolves
+    against the model's own directory. Returns the inline tool's ``SolveResult``
+    shape.
+    """
+    model_path, data_path = _validate_model_data_paths(model_path, data_path)
+    outcome = _run_managed_minizinc_paths(
+        model_path,
         solver=solver,
-        stdout=outcome.stdout,
-        stderr=outcome.stderr,
-        elapsed_ms=outcome.elapsed_ms,
+        timeout_ms=timeout_ms,
+        extra_args=(),
+        data_path=data_path,
     )
+    return _build_solve_result(outcome, solver=solver)
+
+
+def check_model_path(
+    model_path: Path,
+    *,
+    solver: str = DEFAULT_SOLVER,
+    data_path: Path | None = None,
+    timeout_ms: int = DEFAULT_CHECK_TIMEOUT_MS,
+) -> CheckResult:
+    """Compile-check a MiniZinc model read from ``model_path`` via the runtime.
+
+    Same CLI-style execution as ``solve_model_path`` (real path, ``cwd`` = the
+    model's parent); returns the inline ``check_model`` ``CheckResult`` shape.
+    """
+    model_path, data_path = _validate_model_data_paths(model_path, data_path)
+    outcome = _run_managed_minizinc_paths(
+        model_path,
+        solver=solver,
+        timeout_ms=timeout_ms,
+        extra_args=("-c",),
+        data_path=data_path,
+    )
+    return _build_check_result(outcome, solver=solver)
+
+
+def find_unsat_core_path(
+    model_path: Path,
+    *,
+    data_path: Path | None = None,
+    timeout_ms: int = DEFAULT_UNSAT_CORE_TIMEOUT_MS,
+) -> UnsatCoreResult:
+    """Compute a MUS for a model read from ``model_path`` via the runtime.
+
+    Same CLI-style execution as ``solve_model_path``. The model runs under its
+    real basename, so the structured ``core`` is filtered by ``model_path.name``
+    (best-effort, basename-only — see ``_iter_model_spans``); raw ``stdout``
+    stays authoritative.
+    """
+    model_path, data_path = _validate_model_data_paths(model_path, data_path)
+    outcome = _run_managed_minizinc_paths(
+        model_path,
+        solver=FINDMUS_SOLVER,
+        timeout_ms=timeout_ms,
+        extra_args=(),
+        data_path=data_path,
+    )
+    model = _read_text_utf8(model_path)
+    return _build_unsat_core_result(outcome, model, model_filename=model_path.name)
