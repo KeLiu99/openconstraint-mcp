@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Any
 
 from mcp.server.fastmcp import FastMCP
@@ -11,8 +12,11 @@ from .minizinc import (
     DEFAULT_UNSAT_CORE_TIMEOUT_MS,
     MiniZincExecutionError,
     check_model,
+    check_model_path,
+    find_unsat_core_path,
     list_solvers,
     solve_model,
+    solve_model_path,
 )
 from .minizinc import find_unsat_core as _find_unsat_core
 from .prompts import SOLVE_CONSTRAINT_PROBLEM_PROMPT
@@ -128,6 +132,107 @@ def create_mcp_server() -> FastMCP:
     ) -> UnsatCoreResult:
         try:
             return _find_unsat_core(model, data=data, timeout_ms=timeout_ms)
+        except (RuntimeMissingError, MiniZincExecutionError, ValueError) as exc:
+            raise RuntimeError(str(exc)) from exc
+
+    # Shared guidance for the path-based file tools below. They read
+    # caller-named local files instead of inline source — convenient for large
+    # on-disk models the agent need not thread through MCP arguments.
+    _FILE_TOOL_INCLUDE_NOTE = (
+        "Reads the model (and optional data) from local FILE PATHS on the "
+        "machine running the server, then runs the managed runtime in MiniZinc "
+        "CLI style — from the model's own directory — so a relative "
+        "`include \"helpers.mzn\";` resolves against that directory, just like "
+        "running `minizinc` by hand. `model_path` is a `.mzn` path (required; "
+        "must exist and be a regular file); `data_path` is an optional `.dzn` "
+        "path (an empty data file is allowed). Standard-library includes "
+        "(`globals.mzn`, etc.) resolve as well. Paths are resolved to absolute "
+        "before use (prefer absolute paths); a missing/non-file, empty, or "
+        "non-UTF-8 model is a clear MCP error before any run. The tool reads "
+        "the model file, the optional data file, and any local files they "
+        "reference through `include`; it does NOT write files, make network "
+        "calls, upload data, or use a remote solver."
+    )
+
+    @mcp.tool(
+        description=(
+            "Compile-check a MiniZinc model from local file paths through the "
+            "managed runtime WITHOUT solving it — the path-based sibling of "
+            "`check_minizinc_model`. " + _FILE_TOOL_INCLUDE_NOTE + " Returns a "
+            "CheckResult with the same shape as `check_minizinc_model` "
+            "(`status` of `ok`/`error`/`timeout`, `solver`, `stdout`, "
+            "`stderr`, `elapsed_ms`); `ok` means the model compiles, not that "
+            "it is satisfiable."
+        )
+    )
+    def check_minizinc_files(
+        model_path: str,
+        data_path: str | None = None,
+        solver: str = DEFAULT_SOLVER,
+        timeout_ms: int = DEFAULT_CHECK_TIMEOUT_MS,
+    ) -> CheckResult:
+        try:
+            return check_model_path(
+                Path(model_path),
+                solver=solver,
+                data_path=Path(data_path) if data_path is not None else None,
+                timeout_ms=timeout_ms,
+            )
+        except (RuntimeMissingError, MiniZincExecutionError, ValueError) as exc:
+            raise RuntimeError(str(exc)) from exc
+
+    @mcp.tool(
+        description=(
+            "Run a MiniZinc model from local file paths through the managed "
+            "runtime — the path-based sibling of `solve_minizinc_model`. "
+            + _FILE_TOOL_INCLUDE_NOTE + " Returns a SolveResult with the same "
+            "shape as `solve_minizinc_model` (`status`, `solver`, `stdout`, "
+            "`stderr`, `elapsed_ms`)."
+        )
+    )
+    def solve_minizinc_files(
+        model_path: str,
+        data_path: str | None = None,
+        solver: str = DEFAULT_SOLVER,
+        timeout_ms: int = DEFAULT_SOLVE_TIMEOUT_MS,
+    ) -> SolveResult:
+        try:
+            return solve_model_path(
+                Path(model_path),
+                solver=solver,
+                data_path=Path(data_path) if data_path is not None else None,
+                timeout_ms=timeout_ms,
+            )
+        except (RuntimeMissingError, MiniZincExecutionError, ValueError) as exc:
+            raise RuntimeError(str(exc)) from exc
+
+    @mcp.tool(
+        description=(
+            "Diagnose why a MiniZinc model from local file paths is "
+            "unsatisfiable by computing a minimal unsatisfiable subset (MUS) "
+            "via the managed runtime's findMUS tool — the path-based sibling "
+            "of `find_unsat_core`. " + _FILE_TOOL_INCLUDE_NOTE + " Returns an "
+            "UnsatCoreResult (`status` of `mus_found`/`no_core`/`error`/"
+            "`timeout`, `core`, `message`, `stdout`, `stderr`, `elapsed_ms`). "
+            "`core` is a BEST-EFFORT structured list resolved from the "
+            "ENTRY MODEL FILE only; `stdout` is authoritative. A MUS member "
+            "that lives in an INCLUDED file appears in `stdout` but NOT in "
+            "`core` (the filter matches the entry model's basename). The "
+            "reported subset is MINIMAL but not necessarily the globally "
+            "smallest."
+        )
+    )
+    def find_unsat_core_files(
+        model_path: str,
+        data_path: str | None = None,
+        timeout_ms: int = DEFAULT_UNSAT_CORE_TIMEOUT_MS,
+    ) -> UnsatCoreResult:
+        try:
+            return find_unsat_core_path(
+                Path(model_path),
+                data_path=Path(data_path) if data_path is not None else None,
+                timeout_ms=timeout_ms,
+            )
         except (RuntimeMissingError, MiniZincExecutionError, ValueError) as exc:
             raise RuntimeError(str(exc)) from exc
 

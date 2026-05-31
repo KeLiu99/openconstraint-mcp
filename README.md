@@ -127,7 +127,9 @@ The package exposes five commands:
 ## MCP tools
 
 The stdio server exposes two introspection tools, a model-check tool, an
-execution tool, and an unsat-core diagnostic tool:
+execution tool, and an unsat-core diagnostic tool — each of the latter three
+in an **inline-source** form (below) and a **path-based file** sibling
+([Path-based file tools](#path-based-file-tools)):
 
 - **`check_runtime`** — returns a `RuntimeStatus` with fields
   `installed: bool`, `runtime_dir: str`, and `minizinc_binary: str | None`.
@@ -290,6 +292,67 @@ execution tool, and an unsat-core diagnostic tool:
   exec the managed binary — surface as **MCP errors**. findMUS outcomes —
   MUS found, no MUS reported, findMUS/runtime diagnostics, and timeout — come
   back as a normal `UnsatCoreResult` whose `status` encodes the outcome.
+
+### Path-based file tools
+
+The three tools above take the model (and optional data) as **inline source
+text**, which the server writes to a private temp file. That is ideal for the
+small/medium models a client LLM drafts, but it forces the agent to read an
+entire `.mzn`/`.dzn` from disk and thread the whole contents through MCP
+arguments. For large local models the server also exposes **path-based**
+siblings that read the model/data from local file paths instead:
+
+- **`check_minizinc_files`** — path-based sibling of `check_minizinc_model`.
+- **`solve_minizinc_files`** — path-based sibling of `solve_minizinc_model`.
+- **`find_unsat_core_files`** — path-based sibling of `find_unsat_core`.
+
+Each returns the **same** result shape as its inline counterpart
+(`CheckResult` / `SolveResult` / `UnsatCoreResult`). The inline tools are
+unchanged and remain the right choice for ephemeral, isolated text workflows.
+
+**Arguments** (all three):
+
+- `model_path: str` — path to a local `.mzn` file on the machine running the
+  server. Required; must exist and be a regular file.
+- `data_path: str | None = None` — path to a local `.dzn` file, or `null`. An
+  empty data file is allowed (a valid "no parameters" input).
+- `solver: str = "cp-sat"` — `solve`/`check` only (not `find_unsat_core_files`,
+  which always uses findMUS).
+- `timeout_ms: int = 30000` — same semantics as the inline tools; must be
+  strictly positive.
+
+**Includes (MiniZinc CLI style).** The file tools run the managed binary on the
+real `model_path` with the working directory set to the model's own directory,
+exactly like running `minizinc` by hand. A **relative** include such as
+`include "helpers.mzn";` therefore resolves against the model's directory, and
+**standard-library** includes (`globals.mzn`, `alldifferent.mzn`, etc.) resolve
+from the solver's library path. (The inline tools, by contrast, run the inline
+source in a private temp dir, so relative local includes do not resolve
+there — which is why the file tools exist.)
+
+**Path validation.** Before any subprocess, each tool resolves `model_path` and
+`data_path` to **absolute** paths (`Path.resolve()`, following symlinks the
+caller named) and rejects, as a clear MCP error naming the offending path: a
+missing or non-file `model_path`/`data_path`, an empty/whitespace-only model
+file, and a non-UTF-8 model file. Relative inputs resolve against the server
+process's working directory, which in MCP stdio is wherever the client launched
+the server — **prefer absolute paths** to avoid surprises.
+
+**Read scope.** A file tool reads the model file, the optional data file, and
+any local files they reference through MiniZinc `include`. It does **not** write
+files, make network calls, upload data, or use a remote solver, and solving
+still goes through the managed runtime. The threat model is "a local user
+pointing the tool at their own files": the tool reads nothing the user could not
+read by hand.
+
+**`find_unsat_core_files` core caveat.** As with the inline `find_unsat_core`,
+the structured `core` is **best-effort** and `stdout` is **authoritative**. The
+`core` resolves spans from the **entry model file only**: a MUS member that
+lives in an *included* file appears in `stdout` but not in `core`. The
+entry-file filter matches on **basename**, so an included file that shares the
+entry model's basename in a different directory could have its spans
+mis-attributed to the entry model — a documented limitation of the best-effort
+core (raw `stdout` stays authoritative).
 
 ## MCP prompts
 

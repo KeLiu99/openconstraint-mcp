@@ -10,9 +10,18 @@ machine where ``install-runtime`` has placed a runtime.
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
 
-from openconstraint_mcp.minizinc import check_model, find_unsat_core, solve_model
+from openconstraint_mcp.minizinc import (
+    check_model,
+    check_model_path,
+    find_unsat_core,
+    find_unsat_core_path,
+    solve_model,
+    solve_model_path,
+)
 from openconstraint_mcp.runtime import is_runtime_installed
 
 pytestmark = pytest.mark.integration
@@ -108,3 +117,56 @@ def test_find_unsat_core_honors_inline_data() -> None:
     assert result.status == "mus_found"
     assert any("x + y > lo" in source for source in normalized_sources)
     assert any("x + y < hi" in source for source in normalized_sources)
+
+
+# --- path-based file tools: CLI-style include behavior ---------------------
+
+# A stdlib include (`globals.mzn`) is resolved from the solver's library path,
+# never the model's directory.
+_STDLIB_INCLUDE_MODEL = (
+    'include "globals.mzn";\n'
+    "array[1..3] of var 1..3: x;\n"
+    "constraint alldifferent(x);\n"
+    "solve satisfy;\n"
+)
+
+
+def test_stdlib_include_compiles(tmp_path: Path) -> None:
+    model_path = tmp_path / "stdlib.mzn"
+    model_path.write_text(_STDLIB_INCLUDE_MODEL)
+
+    result = check_model_path(model_path)
+
+    # A global-constraint model compiles via the stdlib include.
+    assert result.status == "ok"
+
+
+def test_relative_local_include_resolves(tmp_path: Path) -> None:
+    proj = tmp_path / "proj"
+    proj.mkdir()
+    (proj / "helpers.mzn").write_text("int: helper_bound = 5;\n")
+    entry = proj / "entry.mzn"
+    entry.write_text(
+        'include "helpers.mzn";\nvar 1..helper_bound: x;\nconstraint x > 2;\nsolve satisfy;\n'
+    )
+
+    result = solve_model_path(entry)
+
+    # File tools run from the model's own directory, so a relative sibling
+    # include resolves like the MiniZinc CLI — the core of the file-tool design.
+    assert result.status in {"ok", "satisfied", "optimal"}
+
+
+def test_find_unsat_core_path_resolves_entry_basename(tmp_path: Path) -> None:
+    model_path = tmp_path / "conflict.mzn"
+    model_path.write_text(_UNSAT_CORE_MODEL)
+
+    result = find_unsat_core_path(model_path)
+
+    normalized_sources = [" ".join(item.source.split()) for item in result.core]
+    # The real model basename (`conflict.mzn`) must match findMUS's trace token
+    # for the structured core to resolve the entry-file spans.
+    assert result.status == "mus_found"
+    assert any("x + y > 5" in source for source in normalized_sources)
+    assert any("x + y < 3" in source for source in normalized_sources)
+    assert all("x != y" not in source for source in normalized_sources)
