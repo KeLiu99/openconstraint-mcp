@@ -26,7 +26,8 @@ from .schemas import (
 )
 
 
-def create_server() -> FastMCP:
+def create_mcp_server() -> FastMCP:
+    """Build a fresh FastMCP server and register all tools and prompts."""
     mcp: FastMCP[Any] = FastMCP("openconstraint-mcp")
 
     @mcp.tool(description="Report whether the managed MiniZinc runtime is installed.")
@@ -148,4 +149,5 @@ def create_server() -> FastMCP:
 
 
 def run_stdio() -> None:
-    create_server().run(transport="stdio")
+    """Create the MCP server and run it over stdio for CLI/client use."""
+    create_mcp_server().run(transport="stdio")

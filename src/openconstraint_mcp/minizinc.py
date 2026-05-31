@@ -5,7 +5,7 @@ import re
 import subprocess
 import tempfile
 import time
-from collections.abc import Sequence
+from collections.abc import Iterator, Sequence
 from pathlib import Path
 from typing import Any, NamedTuple
 
@@ -72,6 +72,18 @@ def _coerce_to_text(payload: str | bytes | None) -> str:
     if isinstance(payload, bytes):
         return payload.decode("utf-8", errors="replace")
     return payload
+
+
+def _format_unsat_core_message(core: Sequence[UnsatCoreConstraint]) -> str:
+    if core:
+        return (
+            "findMUS reported a minimal unsatisfiable subset; "
+            f"{len(core)} constraint location(s) resolved from the submitted model."
+        )
+    return (
+        "findMUS reported a minimal unsatisfiable subset, but no submitted-model "
+        "constraint locations were resolved; see stdout."
+    )
 
 
 def list_solvers() -> SolverList:
@@ -244,29 +256,32 @@ def _slice_source(model: str, sl: int, sc: int, el: int, ec: int) -> str:
 _SPAN_PATTERN = re.compile(r"([^\s|;]+\.mzn)\|(\d+)\|(\d+)\|(\d+)\|(\d+)")
 
 
+def _iter_model_spans(stdout: str) -> Iterator[tuple[int, int, int, int]]:
+    for file_name, sl_raw, sc_raw, el_raw, ec_raw in _SPAN_PATTERN.findall(stdout):
+        if Path(file_name).name == _MODEL_FILENAME:
+            yield int(sl_raw), int(sc_raw), int(el_raw), int(ec_raw)
+
+
+def _constraint_from_span(model: str, span: tuple[int, int, int, int]) -> UnsatCoreConstraint:
+    sl, sc, el, ec = span
+    return UnsatCoreConstraint(
+        line=sl,
+        column=sc,
+        end_line=el,
+        end_column=ec,
+        source=_slice_source(model, sl, sc, el, ec),
+    )
+
+
 def _parse_unsat_core(stdout: str, model: str) -> tuple[bool, list[UnsatCoreConstraint]]:
     mus_present = any(line.lstrip().startswith("MUS:") for line in stdout.splitlines())
     if not mus_present:
         return False, []
 
-    # Keyed by span so repeated trace lines for the same constraint collapse to a
-    # single entry, with first-seen order preserved (dict keeps insertion order).
-    by_span: dict[tuple[int, int, int, int], UnsatCoreConstraint] = {}
-    for file_name, sl_raw, sc_raw, el_raw, ec_raw in _SPAN_PATTERN.findall(stdout):
-        if Path(file_name).name != _MODEL_FILENAME:
-            continue
-        sl, sc, el, ec = int(sl_raw), int(sc_raw), int(el_raw), int(ec_raw)
-        span = (sl, sc, el, ec)
-        if span not in by_span:
-            by_span[span] = UnsatCoreConstraint(
-                line=sl,
-                column=sc,
-                end_line=el,
-                end_column=ec,
-                source=_slice_source(model, sl, sc, el, ec),
-            )
-
-    return True, list(by_span.values())
+    # Repeated trace lines for the same constraint collapse to a single entry,
+    # with first-seen order preserved (dict keeps insertion order).
+    unique_spans = dict.fromkeys(_iter_model_spans(stdout))
+    return True, [_constraint_from_span(model, span) for span in unique_spans]
 
 
 def find_unsat_core(
@@ -294,20 +309,10 @@ def find_unsat_core(
 
     mus_present, core = _parse_unsat_core(outcome.stdout, model)
     if mus_present:
-        if core:
-            message = (
-                "findMUS reported a minimal unsatisfiable subset; "
-                f"{len(core)} constraint location(s) resolved from the submitted model."
-            )
-        else:
-            message = (
-                "findMUS reported a minimal unsatisfiable subset, but no submitted-model "
-                "constraint locations were resolved; see stdout."
-            )
         return UnsatCoreResult(
             status="mus_found",
             core=core,
-            message=message,
+            message=_format_unsat_core_message(core),
             stdout=outcome.stdout,
             stderr=outcome.stderr,
             elapsed_ms=outcome.elapsed_ms,
