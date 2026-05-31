@@ -283,9 +283,7 @@ def test_parse_unsat_core_without_mus_returns_empty_core() -> None:
 
 
 def test_parse_unsat_core_ignores_trace_spans_without_mus_line() -> None:
-    assert _parse_unsat_core(
-        "Traces: model.mzn|4|12|4|20|\n", _UNSAT_CORE_MODEL
-    ) == (False, [])
+    assert _parse_unsat_core("Traces: model.mzn|4|12|4|20|\n", _UNSAT_CORE_MODEL) == (False, [])
 
 
 # 1-indexed, end-inclusive spans over a 3-line model whose lines are each 5 chars.
@@ -312,9 +310,7 @@ def test_slice_source_returns_precise_span(
         pytest.param(5, 1, 6, 2, id="start-past-eof"),
     ],
 )
-def test_slice_source_invalid_line_span_returns_empty(
-    sl: int, sc: int, el: int, ec: int
-) -> None:
+def test_slice_source_invalid_line_span_returns_empty(sl: int, sc: int, el: int, ec: int) -> None:
     assert _slice_source(_SLICE_MODEL, sl, sc, el, ec) == ""
 
 
@@ -388,21 +384,29 @@ def _record_subprocess(
 ) -> list[dict[str, Any]]:
     """Patch subprocess.run to record args/kwargs and return ``completed``.
 
-    Captures the cmd, kwargs, model-file existence, and model-file contents at
-    the moment ``subprocess.run`` was called — solve_model deletes the temp dir
-    on return, so post-call existence checks would race the cleanup.
+    Captures the cmd, kwargs, model-file existence, model-file contents, and —
+    when a positional ``data.dzn`` is present — the data-file contents at the
+    moment ``subprocess.run`` was called. The model and data files are located
+    by suffix (``.mzn`` / ``.dzn``) rather than position, since the data file
+    is appended after the model. solve_model deletes the temp dir on return,
+    so post-call reads would race the cleanup.
     """
     calls: list[dict[str, Any]] = []
 
     def _fake_run(*args: Any, **kwargs: Any) -> _FakeCompletedProcess:
         cmd = args[0]
-        model_path = Path(cmd[-1])
+        model_path = next((Path(arg) for arg in cmd if str(arg).endswith(".mzn")), Path(cmd[-1]))
+        data_path = next((Path(arg) for arg in cmd if str(arg).endswith(".dzn")), None)
+        data_contents: str | None = None
+        if data_path is not None and data_path.is_file():
+            data_contents = data_path.read_text()
         calls.append(
             {
                 "args": args,
                 "kwargs": kwargs,
                 "model_path_existed": model_path.is_file(),
                 "model_contents": (model_path.read_text() if model_path.is_file() else None),
+                "data_contents": data_contents,
             }
         )
         return completed
@@ -456,6 +460,61 @@ def test_solve_model_command_shape(
     assert calls[0]["model_path_existed"]
     assert calls[0]["model_contents"] == model
     assert kwargs["cwd"] == str(model_path.parent)
+
+
+def test_solve_model_forwards_inline_data_positionally(
+    fake_minizinc_binary: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    model = "int: n;\nvar 1..n: x;\nconstraint x = n;\nsolve satisfy;"
+    calls = _record_subprocess(
+        monkeypatch, _FakeCompletedProcess(stdout="==========\n", stderr="", returncode=0)
+    )
+
+    result = solve_model(model, data="n = 3;")
+
+    cmd = calls[0]["args"][0]
+    # Canonical MiniZinc order: model file, then data file as the last argument.
+    assert Path(cmd[-2]).suffix == ".mzn"
+    assert Path(cmd[-1]).suffix == ".dzn"
+    assert calls[0]["model_contents"] == model
+    assert calls[0]["data_contents"] == "n = 3;"
+    assert result.status == "optimal"
+
+
+def test_solve_model_without_data_passes_only_model(
+    fake_minizinc_binary: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls = _record_subprocess(
+        monkeypatch, _FakeCompletedProcess(stdout="==========\n", stderr="", returncode=0)
+    )
+
+    solve_model("var 1..5: x;\nsolve satisfy;")
+
+    cmd = calls[0]["args"][0]
+    assert not any(str(arg).endswith(".dzn") for arg in cmd)
+    assert Path(cmd[-1]).suffix == ".mzn"
+    assert calls[0]["data_contents"] is None
+
+
+def test_solve_model_returns_structured_error_for_malformed_data(
+    fake_minizinc_binary: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    diagnostic = (
+        "Error: syntax error, unexpected ';' in file '/tmp/openconstraint-mcp-xxxx/data.dzn'\n"
+    )
+    _record_subprocess(
+        monkeypatch,
+        _FakeCompletedProcess(stdout="", stderr=diagnostic, returncode=1),
+    )
+
+    result = solve_model("int: n;\nvar 1..n: x;\nsolve satisfy;", data="n = ;")
+
+    assert result.status == "error"
+    assert "data.dzn" in result.stderr
+    assert "syntax error" in result.stderr
 
 
 def test_solve_model_custom_solver_is_passed_through(
@@ -719,6 +778,42 @@ def test_check_model_command_shape(
     assert kwargs["cwd"] == str(model_path.parent)
 
 
+def test_check_model_forwards_inline_data_positionally(
+    fake_minizinc_binary: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    model = "int: n;\nvar 1..n: x;\nconstraint x = n;\nsolve satisfy;"
+    calls = _record_subprocess(
+        monkeypatch, _FakeCompletedProcess(stdout="", stderr="", returncode=0)
+    )
+
+    result = check_model(model, data="n = 3;")
+
+    cmd = calls[0]["args"][0]
+    # `-c` stays present; canonical model-then-data positional order.
+    assert "-c" in cmd
+    assert Path(cmd[-2]).suffix == ".mzn"
+    assert Path(cmd[-1]).suffix == ".dzn"
+    assert calls[0]["data_contents"] == "n = 3;"
+    assert result.status == "ok"
+
+
+def test_check_model_without_data_passes_only_model(
+    fake_minizinc_binary: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls = _record_subprocess(
+        monkeypatch, _FakeCompletedProcess(stdout="", stderr="", returncode=0)
+    )
+
+    check_model("var 1..5: x;\nsolve satisfy;")
+
+    cmd = calls[0]["args"][0]
+    assert not any(str(arg).endswith(".dzn") for arg in cmd)
+    assert Path(cmd[-1]).suffix == ".mzn"
+    assert calls[0]["data_contents"] is None
+
+
 def test_check_model_custom_solver_is_passed_through(
     fake_minizinc_binary: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -889,6 +984,48 @@ def test_find_unsat_core_command_shape(
     assert calls[0]["model_path_existed"]
     assert calls[0]["model_contents"] == _UNSAT_CORE_MODEL
     assert kwargs["cwd"] == str(model_path.parent)
+
+
+def test_find_unsat_core_forwards_inline_data_positionally(
+    fake_minizinc_binary: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls = _record_subprocess(
+        monkeypatch,
+        _FakeCompletedProcess(stdout=_UNSAT_CORE_STDOUT, stderr="", returncode=0),
+    )
+
+    result = find_unsat_core(_UNSAT_CORE_MODEL, data="lo = 5;")
+
+    cmd = calls[0]["args"][0]
+    # findMUS only accepts a positional data file, never the --data flag.
+    assert "--data" not in cmd
+    assert Path(cmd[-2]).suffix == ".mzn"
+    assert Path(cmd[-1]).suffix == ".dzn"
+    assert calls[0]["data_contents"] == "lo = 5;"
+    assert cmd[cmd.index("--solver") + 1] == FINDMUS_SOLVER
+    assert "-c" not in cmd
+    # The structured core still resolves from the model text (model-only spans).
+    assert result.status == "mus_found"
+    assert len(result.core) == 2
+    assert "x + y > 5" in result.core[0].source
+
+
+def test_find_unsat_core_without_data_passes_only_model(
+    fake_minizinc_binary: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls = _record_subprocess(
+        monkeypatch,
+        _FakeCompletedProcess(stdout=_UNSAT_CORE_STDOUT, stderr="", returncode=0),
+    )
+
+    find_unsat_core(_UNSAT_CORE_MODEL)
+
+    cmd = calls[0]["args"][0]
+    assert not any(str(arg).endswith(".dzn") for arg in cmd)
+    assert Path(cmd[-1]).suffix == ".mzn"
+    assert calls[0]["data_contents"] is None
 
 
 def test_find_unsat_core_no_core_clears_structured_core(

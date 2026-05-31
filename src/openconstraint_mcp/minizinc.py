@@ -32,6 +32,7 @@ DEFAULT_CHECK_TIMEOUT_MS: int = DEFAULT_SOLVE_TIMEOUT_MS
 # diagnostic operation even though it uses the same default wall-clock budget.
 DEFAULT_UNSAT_CORE_TIMEOUT_MS: int = DEFAULT_SOLVE_TIMEOUT_MS
 _MODEL_FILENAME: str = "model.mzn"
+_DATA_FILENAME: str = "data.dzn"
 
 
 class MiniZincExecutionError(RuntimeError):
@@ -124,6 +125,7 @@ def _run_managed_minizinc(
     solver: str,
     timeout_ms: int,
     extra_args: Sequence[str],
+    data: str | None = None,
 ) -> _RunOutcome:
     """Run the managed MiniZinc binary on ``model`` and report the raw outcome.
 
@@ -131,7 +133,16 @@ def _run_managed_minizinc(
     (``extra_args=("-c",)``). The model is written into a private temp dir and
     ``subprocess.run`` is pinned to that dir via ``cwd`` so cwd-relative
     ``include`` statements resolve onto emptiness rather than the server's
-    working directory. The model file is always the last command argument.
+    working directory. With no data the model file is the last command
+    argument.
+
+    When ``data`` is not ``None`` it is written verbatim to a sibling
+    ``data.dzn`` in the same temp dir and appended as a positional argument
+    *after* the model file — MiniZinc's documented ``<model>.mzn <data>.dzn``
+    order, which (unlike the ``--data`` flag) every solver path accepts,
+    including the findMUS meta-solver. ``None`` means no data file and no extra
+    argument — byte-identical to a dataless run. An empty string is a valid
+    "no parameters" input, so it is *not* rejected.
     """
     if not model.strip():
         raise ValueError("model must not be empty")
@@ -148,6 +159,11 @@ def _run_managed_minizinc(
         tmp_dir = Path(tmp)
         model_file = tmp_dir / _MODEL_FILENAME
         model_file.write_text(model, encoding="utf-8")
+        data_args: list[str] = []
+        if data is not None:
+            data_file = tmp_dir / _DATA_FILENAME
+            data_file.write_text(data, encoding="utf-8")
+            data_args = [str(data_file)]
         cmd = [
             str(binary),
             "--solver",
@@ -156,6 +172,7 @@ def _run_managed_minizinc(
             str(timeout_ms),
             *extra_args,
             str(model_file),
+            *data_args,
         ]
         start = time.monotonic()
         try:
@@ -255,6 +272,7 @@ def _parse_unsat_core(stdout: str, model: str) -> tuple[bool, list[UnsatCoreCons
 def find_unsat_core(
     model: str,
     *,
+    data: str | None = None,
     timeout_ms: int = DEFAULT_UNSAT_CORE_TIMEOUT_MS,
 ) -> UnsatCoreResult:
     outcome = _run_managed_minizinc(
@@ -262,6 +280,7 @@ def find_unsat_core(
         solver=FINDMUS_SOLVER,
         timeout_ms=timeout_ms,
         extra_args=(),
+        data=data,
     )
     if outcome.timed_out:
         return UnsatCoreResult(
@@ -318,10 +337,11 @@ def solve_model(
     model: str,
     *,
     solver: str = DEFAULT_SOLVER,
+    data: str | None = None,
     timeout_ms: int = DEFAULT_SOLVE_TIMEOUT_MS,
 ) -> SolveResult:
     outcome = _run_managed_minizinc(
-        model, solver=solver, timeout_ms=timeout_ms, extra_args=()
+        model, solver=solver, timeout_ms=timeout_ms, extra_args=(), data=data
     )
     if outcome.timed_out:
         return SolveResult(
@@ -345,10 +365,11 @@ def check_model(
     model: str,
     *,
     solver: str = DEFAULT_SOLVER,
+    data: str | None = None,
     timeout_ms: int = DEFAULT_CHECK_TIMEOUT_MS,
 ) -> CheckResult:
     outcome = _run_managed_minizinc(
-        model, solver=solver, timeout_ms=timeout_ms, extra_args=("-c",)
+        model, solver=solver, timeout_ms=timeout_ms, extra_args=("-c",), data=data
     )
     if outcome.timed_out:
         return CheckResult(

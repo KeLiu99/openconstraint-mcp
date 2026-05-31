@@ -159,6 +159,20 @@ async def test_solve_constraint_problem_prompt_orders_check_before_solve() -> No
 
 
 @pytest.mark.asyncio
+async def test_solve_constraint_problem_prompt_notes_inline_data_for_check_and_solve() -> None:
+    text = await _get_prompt_text("solve_constraint_problem", {"problem": SAMPLE_PROBLEM})
+
+    # The prompt as a whole still references inline data and names both tools.
+    assert "data" in text
+    assert "check_minizinc_model" in text
+    assert "solve_minizinc_model" in text
+
+    # There is a note that the same data flows to both the check and the solve.
+    data_notes = [line for line in text.splitlines() if "data" in line and "both" in line]
+    assert data_notes, "prompt should note passing the same data to both check and solve"
+
+
+@pytest.mark.asyncio
 async def test_solve_constraint_problem_prompt_timeout_branch_does_not_auto_solve() -> None:
     text = await _get_prompt_text("solve_constraint_problem", {"problem": SAMPLE_PROBLEM})
 
@@ -185,6 +199,29 @@ def _structured(result: Any) -> dict[str, Any]:
     return result[1]
 
 
+def _record_data_run(
+    monkeypatch: pytest.MonkeyPatch, completed: _FakeCompletedProcess
+) -> list[dict[str, Any]]:
+    """Patch subprocess.run to capture the inline-data file contents at call time.
+
+    The runtime deletes its temp dir on return, so the ``data.dzn`` written from
+    an inline ``data`` argument must be read inside the fake, before cleanup.
+    """
+    calls: list[dict[str, Any]] = []
+
+    def _fake_run(*args: Any, **kwargs: Any) -> _FakeCompletedProcess:
+        cmd = args[0]
+        data_contents: str | None = None
+        data_path = next((Path(arg) for arg in cmd if str(arg).endswith(".dzn")), None)
+        if data_path is not None and data_path.is_file():
+            data_contents = data_path.read_text()
+        calls.append({"data_contents": data_contents})
+        return completed
+
+    monkeypatch.setattr("openconstraint_mcp.minizinc.subprocess.run", _fake_run)
+    return calls
+
+
 @pytest.mark.asyncio
 async def test_solve_minizinc_model_tool_is_listed() -> None:
     mcp = create_server()
@@ -195,7 +232,7 @@ async def test_solve_minizinc_model_tool_is_listed() -> None:
 
     tool = next(t for t in tools if t.name == "solve_minizinc_model")
     properties = tool.inputSchema.get("properties", {})
-    assert {"model", "solver", "timeout_ms"} <= set(properties.keys())
+    assert {"model", "data", "solver", "timeout_ms"} <= set(properties.keys())
 
 
 @pytest.mark.asyncio
@@ -221,6 +258,26 @@ async def test_solve_minizinc_model_happy_path(
     structured = _structured(result)
     assert structured["status"] == "optimal"
     assert structured["solver"] == "cp-sat"
+
+
+@pytest.mark.asyncio
+async def test_solve_minizinc_model_threads_inline_data_to_runtime(
+    fake_minizinc_binary: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls = _record_data_run(
+        monkeypatch,
+        _FakeCompletedProcess(stdout="==========\n", stderr="", returncode=0),
+    )
+
+    mcp = create_server()
+    result = await mcp.call_tool(
+        "solve_minizinc_model",
+        {"model": "int: n;\nvar 1..n: x;\nconstraint x = n;\nsolve satisfy;", "data": "n = 3;"},
+    )
+
+    assert calls[0]["data_contents"] == "n = 3;"
+    assert _structured(result)["status"] == "optimal"
 
 
 @pytest.mark.asyncio
@@ -304,7 +361,7 @@ async def test_check_minizinc_model_tool_is_listed() -> None:
 
     tool = next(t for t in tools if t.name == "check_minizinc_model")
     properties = tool.inputSchema.get("properties", {})
-    assert {"model", "solver", "timeout_ms"} <= set(properties.keys())
+    assert {"model", "data", "solver", "timeout_ms"} <= set(properties.keys())
 
 
 @pytest.mark.asyncio
@@ -326,6 +383,23 @@ async def test_check_minizinc_model_happy_path(
     structured = _structured(result)
     assert structured["status"] == "ok"
     assert structured["solver"] == "cp-sat"
+
+
+@pytest.mark.asyncio
+async def test_check_minizinc_model_threads_inline_data_to_runtime(
+    fake_minizinc_binary: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls = _record_data_run(monkeypatch, _FakeCompletedProcess(stdout="", stderr="", returncode=0))
+
+    mcp = create_server()
+    result = await mcp.call_tool(
+        "check_minizinc_model",
+        {"model": "int: n;\nvar 1..n: x;\nsolve satisfy;", "data": "n = 3;"},
+    )
+
+    assert calls[0]["data_contents"] == "n = 3;"
+    assert _structured(result)["status"] == "ok"
 
 
 @pytest.mark.asyncio
@@ -391,7 +465,7 @@ async def test_find_unsat_core_tool_is_listed() -> None:
 
     tool = next(t for t in tools if t.name == "find_unsat_core")
     properties = tool.inputSchema.get("properties", {})
-    assert {"model", "timeout_ms"} <= set(properties.keys())
+    assert {"model", "data", "timeout_ms"} <= set(properties.keys())
     assert "solver" not in properties
 
 
@@ -415,6 +489,26 @@ async def test_find_unsat_core_happy_path(
     structured = _structured(result)
     assert structured["status"] == "mus_found"
     assert len(structured["core"]) == 2
+
+
+@pytest.mark.asyncio
+async def test_find_unsat_core_threads_inline_data_to_runtime(
+    fake_minizinc_binary: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls = _record_data_run(
+        monkeypatch,
+        _FakeCompletedProcess(stdout=_UNSAT_CORE_STDOUT, stderr="", returncode=0),
+    )
+
+    mcp = create_server()
+    result = await mcp.call_tool(
+        "find_unsat_core",
+        {"model": _UNSAT_CORE_MODEL, "data": "lo = 5;"},
+    )
+
+    assert calls[0]["data_contents"] == "lo = 5;"
+    assert _structured(result)["status"] == "mus_found"
 
 
 @pytest.mark.asyncio

@@ -15,6 +15,7 @@ from .minizinc import (
     solve_model,
 )
 from .minizinc import find_unsat_core as _find_unsat_core
+from .prompts import SOLVE_CONSTRAINT_PROBLEM_PROMPT
 from .runtime import RuntimeMissingError, get_runtime_status
 from .schemas import (
     CheckResult,
@@ -23,98 +24,6 @@ from .schemas import (
     SolverList,
     UnsatCoreResult,
 )
-
-_SOLVE_CONSTRAINT_PROBLEM_PROMPT = """\
-You are the MCP client's reasoning model helping the user solve a
-constraint-programming or optimization problem using openconstraint-mcp.
-
-openconstraint-mcp itself does not call any LLM and does not embed agent
-frameworks. It only exposes MCP prompts and deterministic local tools that
-run MiniZinc on the user's machine. The division of labor is: you draft the
-model, the local managed MiniZinc runtime verifies and solves it.
-
-User problem:
-{problem}
-
-Do the following:
-
-1. Analyze the problem. Identify:
-   - decision variables and their domains,
-   - hard constraints,
-   - any objective (minimize / maximize), or "satisfy" if it is a pure
-     feasibility problem.
-
-2. If anything important is missing (sizes, bounds, the objective, tie-
-   breakers), ask the user at most a few concise clarifying questions before
-   drafting anything. Do not silently invent values.
-
-3. When you have enough information, draft a complete MiniZinc model. The
-   model must include:
-   - every variable and parameter declaration,
-   - every constraint,
-   - exactly one `solve` statement (`solve satisfy;`,
-     `solve minimize <expr>;`, or `solve maximize <expr>;`),
-   - an `output` block that prints the solution in a self-describing form.
-
-   Prefer `cp-sat` as the default solver unless the user has specified
-   otherwise.
-
-4. Validate the model before solving. If the tool `check_minizinc_model`
-   is available to you, call it on the drafted model first and branch on
-   the returned `status`. Never call `solve_minizinc_model` ahead of a
-   clean check. The recommended loop is:
-   `draft -> check_minizinc_model -> repair -> solve_minizinc_model -> explain`.
-   - `"ok"`: the model compiles. Proceed to solving. Do not solve until
-     the check returns `"ok"`.
-   - `"error"`: read the `stderr` diagnostics, repair the model, and
-     re-run `check_minizinc_model`. Loop until it returns `"ok"`; do not
-     solve while errors remain.
-   - `"timeout"`: validation itself — not the solve — timed out. Do not
-     automatically solve. Explain this to the user and ask how they want
-     to proceed: simplify the model, raise `timeout_ms`, or try solving
-     anyway. Continue only per the user's choice.
-
-5. Execute the model:
-   - If the tool `solve_minizinc_model` is available to you, call it with
-     the drafted MiniZinc model and let the local managed MiniZinc runtime
-     do the solving. Use exactly that tool name; do not invent a different
-     one or invent additional arguments.
-   - If `solve_minizinc_model` is not available to you yet, do not
-     fabricate a tool call, and do not tell the user to run a bare
-     `minizinc` from their PATH — that bypasses the managed runtime and
-     can pick up a different MiniZinc version with different solvers.
-     Instead, walk the user through the openconstraint-mcp CLI:
-       a. Have them run `openconstraint-mcp check-runtime` to confirm
-          the managed runtime is installed and to read the exact path
-          of its `minizinc` binary.
-       b. If `check-runtime` reports the runtime as missing, have them
-          either run `openconstraint-mcp install-runtime` to download
-          the managed bundle, or run
-          `openconstraint-mcp configure-runtime --runtime-dir <path>`
-          (equivalently, set `OPENCONSTRAINT_MCP_RUNTIME_DIR=<path>`)
-          to point at an existing MiniZinc install, then re-run
-          `check-runtime`.
-       c. Present the complete MiniZinc model as a code block and have
-          them solve it by invoking that exact managed `minizinc`
-          binary (the path printed by `check-runtime`) with the chosen
-          solver flag, e.g. `--solver cp-sat`.
-
-6. If MiniZinc reports a syntax, type, or solver error, revise the model
-   and retry — but only retry through `solve_minizinc_model` when that
-   tool is actually available. Never fabricate solver output.
-
-7. Once you have a result, explain it to the user in plain language: what
-   the decision variables ended up as, whether the solution is optimal or
-   only feasible, and any caveats worth noting.
-
-Boundary reminders:
-- You draft the MiniZinc model; openconstraint-mcp does not.
-- openconstraint-mcp does not own LLM credentials and does not invoke a
-  generative model.
-- All solving runs locally on the user's machine through the managed
-  MiniZinc runtime — no remote backends, no uploads, no hidden network
-  calls.
-"""
 
 
 def create_server() -> FastMCP:
@@ -141,18 +50,22 @@ def create_server() -> FastMCP:
             "Run a complete MiniZinc model through the managed local MiniZinc "
             "runtime. The `model` argument must be complete MiniZinc source — "
             "declarations, constraints, exactly one `solve` statement, and an "
-            "`output` block. Returns a SolveResult with the run's status plus "
-            "the runtime's raw stdout and stderr so the caller can revise and "
-            "retry on MiniZinc errors."
+            "`output` block. The optional `data` argument supplies MiniZinc "
+            "data (`.dzn` contents) as text, supplied to the runtime as a data "
+            "file alongside the model; omit it for models that need no external "
+            "data. Returns a SolveResult "
+            "with the run's status plus the runtime's raw stdout and stderr so "
+            "the caller can revise and retry on MiniZinc errors."
         )
     )
     def solve_minizinc_model(
         model: str,
+        data: str | None = None,
         solver: str = DEFAULT_SOLVER,
         timeout_ms: int = DEFAULT_SOLVE_TIMEOUT_MS,
     ) -> SolveResult:
         try:
-            return solve_model(model, solver=solver, timeout_ms=timeout_ms)
+            return solve_model(model, solver=solver, data=data, timeout_ms=timeout_ms)
         except (RuntimeMissingError, MiniZincExecutionError, ValueError) as exc:
             raise RuntimeError(str(exc)) from exc
 
@@ -164,17 +77,23 @@ def create_server() -> FastMCP:
             "missing-include, invalid-domain, and unsupported-construct errors "
             "— and returns a CheckResult with the check's status plus the "
             "runtime's raw stdout and stderr, so the caller can repair the "
-            "model before calling `solve_minizinc_model`. A status of `ok` "
-            "means the model compiles, not that it is satisfiable."
+            "model before calling `solve_minizinc_model`. The optional `data` "
+            "argument supplies MiniZinc data (`.dzn` contents) as text, supplied "
+            "as a data file alongside the model; a parameterized model needs it "
+            "to flatten, so pass the same `data` you will pass to "
+            "`solve_minizinc_model`. Omit it "
+            "for models that need no external data. A status of `ok` means the "
+            "model compiles, not that it is satisfiable."
         )
     )
     def check_minizinc_model(
         model: str,
+        data: str | None = None,
         solver: str = DEFAULT_SOLVER,
         timeout_ms: int = DEFAULT_CHECK_TIMEOUT_MS,
     ) -> CheckResult:
         try:
-            return check_model(model, solver=solver, timeout_ms=timeout_ms)
+            return check_model(model, solver=solver, data=data, timeout_ms=timeout_ms)
         except (RuntimeMissingError, MiniZincExecutionError, ValueError) as exc:
             raise RuntimeError(str(exc)) from exc
 
@@ -184,22 +103,30 @@ def create_server() -> FastMCP:
             "minimal unsatisfiable subset (MUS) of its constraints via the "
             "managed runtime's findMUS tool (org.minizinc.findmus). Use it when "
             "solve_minizinc_model returns status 'unsatisfiable' to localize the "
-            "conflict. Returns an UnsatCoreResult whose status is 'mus_found', "
+            "conflict. The optional `data` argument supplies MiniZinc data "
+            "(`.dzn` contents) as text, supplied as a data file alongside the "
+            "model; pass the SAME `data` you passed to the solve that proved "
+            "unsat, or a parameterized model cannot flatten. Omit it for models "
+            "that need no external data. "
+            "Returns an UnsatCoreResult whose status is 'mus_found', "
             "'no_core' (findMUS finished without reporting a MUS), 'error' (see "
             "stderr), or 'timeout'. `core` is a best-effort structured list of the "
             "conflicting constraints (source span + text) resolved from the "
-            "submitted model; `stdout` preserves findMUS's raw output verbatim. "
-            "The reported subset is MINIMAL — no constraint can be dropped while "
-            "staying unsatisfiable — but NOT necessarily the globally smallest, "
-            "and a model may have several."
+            "MODEL FILE only; `stdout` preserves findMUS's raw output verbatim and "
+            "is authoritative (a decision variable assigned in `data` acts as a "
+            "constraint, so a MUS member can originate in the data file and appear "
+            "in stdout but not in `core`). The reported subset is MINIMAL — no "
+            "constraint can be dropped while staying unsatisfiable — but NOT "
+            "necessarily the globally smallest, and a model may have several."
         )
     )
     def find_unsat_core(
         model: str,
+        data: str | None = None,
         timeout_ms: int = DEFAULT_UNSAT_CORE_TIMEOUT_MS,
     ) -> UnsatCoreResult:
         try:
-            return _find_unsat_core(model, timeout_ms=timeout_ms)
+            return _find_unsat_core(model, data=data, timeout_ms=timeout_ms)
         except (RuntimeMissingError, MiniZincExecutionError, ValueError) as exc:
             raise RuntimeError(str(exc)) from exc
 
@@ -215,7 +142,7 @@ def create_server() -> FastMCP:
         ),
     )
     def solve_constraint_problem(problem: str) -> str:
-        return _SOLVE_CONSTRAINT_PROBLEM_PROMPT.format(problem=problem)
+        return SOLVE_CONSTRAINT_PROBLEM_PROMPT.format(problem=problem)
 
     return mcp
 

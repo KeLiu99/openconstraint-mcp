@@ -242,9 +242,7 @@ def test_download_archive_http_404(
 @pytest.fixture
 def stub_linux_x86_64(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr("openconstraint_mcp.runtime_install.sys.platform", "linux")
-    monkeypatch.setattr(
-        "openconstraint_mcp.runtime_install.platform.machine", lambda: "x86_64"
-    )
+    monkeypatch.setattr("openconstraint_mcp.runtime_install.platform.machine", lambda: "x86_64")
 
 
 @pytest.fixture
@@ -257,15 +255,11 @@ def stub_download_with_fixture(
     (or that it was not called at all)."""
     calls: list[Path] = []
 
-    def _fake_download(
-        url: str, dest: Path, expected_sha256: str, console: Console
-    ) -> None:
+    def _fake_download(url: str, dest: Path, expected_sha256: str, console: Console) -> None:
         calls.append(dest)
         shutil.copy(fake_minizinc_tarball, dest)
 
-    monkeypatch.setattr(
-        "openconstraint_mcp.runtime_install._download_archive", _fake_download
-    )
+    monkeypatch.setattr("openconstraint_mcp.runtime_install._download_archive", _fake_download)
     return calls
 
 
@@ -305,9 +299,7 @@ def test_install_rejects_unsupported_platform(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr("openconstraint_mcp.runtime_install.sys.platform", "darwin")
-    monkeypatch.setattr(
-        "openconstraint_mcp.runtime_install.platform.machine", lambda: "x86_64"
-    )
+    monkeypatch.setattr("openconstraint_mcp.runtime_install.platform.machine", lambda: "x86_64")
     with pytest.raises(RuntimeInstallError) as exc_info:
         install_managed_runtime(tmp_path / "runtime", console=_quiet_console())
     assert "Linux x86_64" in str(exc_info.value)
@@ -318,9 +310,7 @@ def test_install_rejects_unsupported_arch(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr("openconstraint_mcp.runtime_install.sys.platform", "linux")
-    monkeypatch.setattr(
-        "openconstraint_mcp.runtime_install.platform.machine", lambda: "aarch64"
-    )
+    monkeypatch.setattr("openconstraint_mcp.runtime_install.platform.machine", lambda: "aarch64")
     with pytest.raises(RuntimeInstallError) as exc_info:
         install_managed_runtime(tmp_path / "runtime", console=_quiet_console())
     assert "Linux x86_64" in str(exc_info.value)
@@ -443,9 +433,7 @@ def test_install_smoke_check_failure_leaves_target_untouched(
     def _boom(binary: Path) -> None:
         raise RuntimeInstallError("smoke-check failed")
 
-    monkeypatch.setattr(
-        "openconstraint_mcp.runtime_install._smoke_check_binary", _boom
-    )
+    monkeypatch.setattr("openconstraint_mcp.runtime_install._smoke_check_binary", _boom)
 
     target = tmp_path / "runtime"
     with pytest.raises(RuntimeInstallError):

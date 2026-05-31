@@ -116,17 +116,11 @@ def test_install_runtime_succeeds_when_config_write_fails(
     def _fail_write(_runtime_dir: Path) -> None:
         raise PermissionError(13, "Permission denied", str(isolated_config_dir))
 
-    monkeypatch.setattr(
-        "openconstraint_mcp.runtime_install.install_managed_runtime", _fake_install
-    )
-    monkeypatch.setattr(
-        "openconstraint_mcp.runtime.write_install_config", _fail_write
-    )
+    monkeypatch.setattr("openconstraint_mcp.runtime_install.install_managed_runtime", _fake_install)
+    monkeypatch.setattr("openconstraint_mcp.runtime.write_install_config", _fail_write)
 
     target = tmp_path / "runtime"
-    result = runner.invoke(
-        app, ["install-runtime", "--runtime-dir", str(target), "--yes"]
-    )
+    result = runner.invoke(app, ["install-runtime", "--runtime-dir", str(target), "--yes"])
     # The runtime is on disk, so the command exits 0 with a yellow warning
     # pointing the user at the env-var workaround.
     assert result.exit_code == 0, result.output
@@ -148,14 +142,10 @@ def test_install_runtime_warns_on_corrupt_config(
     def _fake(target: Path, *, yes: bool, console: object) -> Path:
         return _fake_install_success(target)
 
-    monkeypatch.setattr(
-        "openconstraint_mcp.runtime_install.install_managed_runtime", _fake
-    )
+    monkeypatch.setattr("openconstraint_mcp.runtime_install.install_managed_runtime", _fake)
 
     target = tmp_path / "runtime"
-    result = runner.invoke(
-        app, ["install-runtime", "--runtime-dir", str(target), "--yes"]
-    )
+    result = runner.invoke(app, ["install-runtime", "--runtime-dir", str(target), "--yes"])
     assert result.exit_code == 0, result.output
     assert "corrupt" in result.stderr.lower()
 
@@ -171,9 +161,7 @@ def test_install_runtime_with_explicit_dir_and_yes(
         calls.append((target, yes))
         return _fake_install_success(target)
 
-    monkeypatch.setattr(
-        "openconstraint_mcp.runtime_install.install_managed_runtime", _fake
-    )
+    monkeypatch.setattr("openconstraint_mcp.runtime_install.install_managed_runtime", _fake)
 
     target = tmp_path / "runtime"
     result = runner.invoke(app, ["install-runtime", "--runtime-dir", str(target), "--yes"])
@@ -191,9 +179,7 @@ def test_install_runtime_without_runtime_dir_uses_default(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     default_target = tmp_path / "default-runtime"
-    monkeypatch.setattr(
-        "openconstraint_mcp.runtime.get_runtime_dir", lambda: default_target
-    )
+    monkeypatch.setattr("openconstraint_mcp.runtime.get_runtime_dir", lambda: default_target)
 
     received: list[Path] = []
 
@@ -201,9 +187,7 @@ def test_install_runtime_without_runtime_dir_uses_default(
         received.append(target)
         return _fake_install_success(target)
 
-    monkeypatch.setattr(
-        "openconstraint_mcp.runtime_install.install_managed_runtime", _fake
-    )
+    monkeypatch.setattr("openconstraint_mcp.runtime_install.install_managed_runtime", _fake)
 
     result = runner.invoke(app, ["install-runtime", "--yes"])
     assert result.exit_code == 0, result.output
@@ -222,9 +206,7 @@ def test_install_runtime_prompts_for_path_when_tty(
 ) -> None:
     custom_target = tmp_path / "custom"
     default_target = tmp_path / "default"
-    monkeypatch.setattr(
-        "openconstraint_mcp.runtime.get_runtime_dir", lambda: default_target
-    )
+    monkeypatch.setattr("openconstraint_mcp.runtime.get_runtime_dir", lambda: default_target)
     monkeypatch.setattr("openconstraint_mcp.cli._stdin_is_tty", lambda: True)
 
     received: list[Path] = []
@@ -233,9 +215,7 @@ def test_install_runtime_prompts_for_path_when_tty(
         received.append(target)
         return _fake_install_success(target)
 
-    monkeypatch.setattr(
-        "openconstraint_mcp.runtime_install.install_managed_runtime", _fake
-    )
+    monkeypatch.setattr("openconstraint_mcp.runtime_install.install_managed_runtime", _fake)
 
     result = runner.invoke(app, ["install-runtime"], input=f"{custom_target}\n")
     assert result.exit_code == 0, result.output
@@ -259,13 +239,9 @@ def test_install_runtime_overwrite_confirm_accepted(
         received_yes.append(yes)
         return _fake_install_success(t)
 
-    monkeypatch.setattr(
-        "openconstraint_mcp.runtime_install.install_managed_runtime", _fake
-    )
+    monkeypatch.setattr("openconstraint_mcp.runtime_install.install_managed_runtime", _fake)
 
-    result = runner.invoke(
-        app, ["install-runtime", "--runtime-dir", str(target)], input="y\n"
-    )
+    result = runner.invoke(app, ["install-runtime", "--runtime-dir", str(target)], input="y\n")
     assert result.exit_code == 0, result.output
     assert received_yes == [True]
 
@@ -288,13 +264,9 @@ def test_install_runtime_overwrite_confirm_declined(
         called["n"] += 1
         raise AssertionError("installer should not be called when user declines")
 
-    monkeypatch.setattr(
-        "openconstraint_mcp.runtime_install.install_managed_runtime", _fake
-    )
+    monkeypatch.setattr("openconstraint_mcp.runtime_install.install_managed_runtime", _fake)
 
-    result = runner.invoke(
-        app, ["install-runtime", "--runtime-dir", str(target)], input="n\n"
-    )
+    result = runner.invoke(app, ["install-runtime", "--runtime-dir", str(target)], input="n\n")
     assert result.exit_code == 0, result.output
     assert called["n"] == 0
     assert "aborted" in result.stdout.lower()
@@ -318,9 +290,7 @@ def test_install_runtime_overwrite_refused_in_non_tty(
         called["n"] += 1
         return target
 
-    monkeypatch.setattr(
-        "openconstraint_mcp.runtime_install.install_managed_runtime", _fake
-    )
+    monkeypatch.setattr("openconstraint_mcp.runtime_install.install_managed_runtime", _fake)
 
     result = runner.invoke(app, ["install-runtime", "--runtime-dir", str(target)])
     assert result.exit_code == 1
@@ -349,13 +319,9 @@ def test_install_runtime_unmanaged_nonempty_refused_with_yes(
         return target
 
     monkeypatch.setattr("click.termui.visible_prompt_func", _prompt)
-    monkeypatch.setattr(
-        "openconstraint_mcp.runtime_install.install_managed_runtime", _fake
-    )
+    monkeypatch.setattr("openconstraint_mcp.runtime_install.install_managed_runtime", _fake)
 
-    result = runner.invoke(
-        app, ["install-runtime", "--runtime-dir", str(target), "--yes"]
-    )
+    result = runner.invoke(app, ["install-runtime", "--runtime-dir", str(target), "--yes"])
     assert result.exit_code == 1
     assert prompt_calls["n"] == 0
     assert install_calls["n"] == 0
@@ -381,9 +347,7 @@ def test_install_runtime_refuses_target_that_is_a_regular_file(
         prompt_calls["n"] += 1
         raise AssertionError("must not prompt when target is a regular file")
 
-    monkeypatch.setattr(
-        "openconstraint_mcp.runtime_install.install_managed_runtime", _fake
-    )
+    monkeypatch.setattr("openconstraint_mcp.runtime_install.install_managed_runtime", _fake)
     monkeypatch.setattr("click.termui.visible_prompt_func", _prompt)
 
     result = runner.invoke(app, ["install-runtime", "--runtime-dir", str(target), "--yes"])
@@ -403,9 +367,7 @@ def test_install_runtime_unsupported_platform_rejected_before_prompt(
             "openconstraint-mcp install-runtime currently supports Linux x86_64 only."
         )
 
-    monkeypatch.setattr(
-        "openconstraint_mcp.runtime_install.check_supported_platform", _raise
-    )
+    monkeypatch.setattr("openconstraint_mcp.runtime_install.check_supported_platform", _raise)
 
     install_calls = {"n": 0}
     prompt_calls = {"n": 0}
@@ -418,9 +380,7 @@ def test_install_runtime_unsupported_platform_rejected_before_prompt(
         prompt_calls["n"] += 1
         return ""
 
-    monkeypatch.setattr(
-        "openconstraint_mcp.runtime_install.install_managed_runtime", _fake
-    )
+    monkeypatch.setattr("openconstraint_mcp.runtime_install.install_managed_runtime", _fake)
     monkeypatch.setattr("click.termui.visible_prompt_func", _prompt)
 
     result = runner.invoke(app, ["install-runtime"])
@@ -438,9 +398,7 @@ def test_install_runtime_installer_error_surfaces(
     def _fake(*args: object, **kwargs: object) -> Path:
         raise RuntimeInstallError("simulated failure")
 
-    monkeypatch.setattr(
-        "openconstraint_mcp.runtime_install.install_managed_runtime", _fake
-    )
+    monkeypatch.setattr("openconstraint_mcp.runtime_install.install_managed_runtime", _fake)
 
     target = tmp_path / "runtime"
     result = runner.invoke(app, ["install-runtime", "--runtime-dir", str(target), "--yes"])
@@ -458,9 +416,7 @@ def test_install_runtime_filesystem_error_surfaces_cleanly(
     def _fake(*args: object, **kwargs: object) -> Path:
         raise PermissionError(13, "Permission denied", str(tmp_path / "runtime"))
 
-    monkeypatch.setattr(
-        "openconstraint_mcp.runtime_install.install_managed_runtime", _fake
-    )
+    monkeypatch.setattr("openconstraint_mcp.runtime_install.install_managed_runtime", _fake)
 
     target = tmp_path / "runtime"
     result = runner.invoke(app, ["install-runtime", "--runtime-dir", str(target), "--yes"])
@@ -493,9 +449,7 @@ def test_configure_runtime_persists_path(
     isolated_config_dir: Path,
 ) -> None:
     target = _fake_external_minizinc(tmp_path / "existing-minizinc")
-    result = runner.invoke(
-        app, ["configure-runtime", "--runtime-dir", str(target)]
-    )
+    result = runner.invoke(app, ["configure-runtime", "--runtime-dir", str(target)])
     assert result.exit_code == 0, result.output
 
     config = read_install_config()
@@ -508,9 +462,7 @@ def test_configure_runtime_rejects_missing_dir(
     isolated_config_dir: Path,
 ) -> None:
     target = tmp_path / "does-not-exist"
-    result = runner.invoke(
-        app, ["configure-runtime", "--runtime-dir", str(target)]
-    )
+    result = runner.invoke(app, ["configure-runtime", "--runtime-dir", str(target)])
     assert result.exit_code == 1
     assert "Not a directory" in result.stdout
     assert read_install_config() is None
@@ -522,9 +474,7 @@ def test_configure_runtime_rejects_dir_without_minizinc_binary(
 ) -> None:
     target = tmp_path / "empty-dir"
     target.mkdir()
-    result = runner.invoke(
-        app, ["configure-runtime", "--runtime-dir", str(target)]
-    )
+    result = runner.invoke(app, ["configure-runtime", "--runtime-dir", str(target)])
     assert result.exit_code == 1
     # rich may wrap long tmp paths, including inside words around line breaks.
     assert "does not look like a MiniZinc install" in " ".join(result.stdout.split())
@@ -544,9 +494,7 @@ def test_configure_runtime_rejects_non_executable_binary(
     binary.write_text("#!/bin/sh\n")
     # Deliberately no chmod +x.
 
-    result = runner.invoke(
-        app, ["configure-runtime", "--runtime-dir", str(target)]
-    )
+    result = runner.invoke(app, ["configure-runtime", "--runtime-dir", str(target)])
     assert result.exit_code == 1
     assert "not executable" in result.stdout
     assert read_install_config() is None
@@ -562,13 +510,9 @@ def test_configure_runtime_config_write_failure_surfaces_cleanly(
     def _fail_write(_runtime_dir: Path) -> None:
         raise PermissionError(13, "Permission denied", str(isolated_config_dir))
 
-    monkeypatch.setattr(
-        "openconstraint_mcp.runtime.write_install_config", _fail_write
-    )
+    monkeypatch.setattr("openconstraint_mcp.runtime.write_install_config", _fail_write)
 
-    result = runner.invoke(
-        app, ["configure-runtime", "--runtime-dir", str(target)]
-    )
+    result = runner.invoke(app, ["configure-runtime", "--runtime-dir", str(target)])
     assert result.exit_code == 1
     flat = result.stdout.replace("\n", "")
     assert "Permission denied" in flat
