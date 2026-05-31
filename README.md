@@ -143,6 +143,14 @@ execution tool, and an unsat-core diagnostic tool:
   fraction of a solve. Arguments:
 
   - `model: str` — the complete MiniZinc source. Must not be empty.
+  - `data: str | None = None` — optional inline MiniZinc data (`.dzn`
+    contents — any data assignments, not parameter-only) provided directly
+    as text; omit (or pass `null`) for models that need no external data.
+    It is written to a private temp file alongside the model and passed to
+    the managed runtime as a positional `.dzn` data file (MiniZinc's
+    `model.mzn data.dzn` order) — never a client-supplied path. A
+    parameterized model needs its data to flatten, so check it with the same
+    `data` you intend to pass to `solve_minizinc_model`.
   - `solver: str = "cp-sat"` — passed through verbatim to MiniZinc's
     `--solver` flag. The compile is solver-aware, so a model that
     compiles for one solver may not for another — check against the
@@ -181,13 +189,21 @@ execution tool, and an unsat-core diagnostic tool:
   **draft → check → repair → solve → explain**: draft a model, check it,
   repair on `status="error"` and re-check until `"ok"`, then hand the clean
   model to `solve_minizinc_model`. Validating first turns a class of
-  failures into cheap compile errors instead of spent solve attempts.
+  failures into cheap compile errors instead of spent solve attempts. When
+  the model uses inline data, pass the **same** `data` to both the check and
+  the solve call so you validate and solve the same instance.
 
 - **`solve_minizinc_model`** — run a complete MiniZinc model through the
   managed local runtime. Arguments:
 
   - `model: str` — the complete MiniZinc source (declarations, constraints,
     exactly one `solve` statement, and an `output` block). Must not be empty.
+  - `data: str | None = None` — optional inline MiniZinc data (`.dzn`
+    contents — any data assignments, not parameter-only) provided directly
+    as text; omit (or pass `null`) for models that need no external data.
+    It is written to a private temp file alongside the model and passed to
+    the managed runtime as a positional `.dzn` data file (MiniZinc's
+    `model.mzn data.dzn` order) — never a client-supplied path.
   - `solver: str = "cp-sat"` — passed through verbatim to MiniZinc's
     `--solver` flag.
   - `timeout_ms: int = 30000` — solving budget in milliseconds. Must be
@@ -224,9 +240,17 @@ execution tool, and an unsat-core diagnostic tool:
   wrapping findMUS (`org.minizinc.findmus`) through the managed runtime.
   This complements the solve loop: when `solve_minizinc_model` returns
   `status="unsatisfiable"`, call `find_unsat_core` to localize the conflict.
-  Arguments:
+  Pass the **same** `data` you passed to that solve: a parameterized model
+  needs it to flatten at all, and diagnosing a different instance than the
+  one that proved unsat is meaningless. Arguments:
 
   - `model: str` — the complete MiniZinc source. Must not be empty.
+  - `data: str | None = None` — optional inline MiniZinc data (`.dzn`
+    contents — any data assignments, not parameter-only) provided directly
+    as text; omit (or pass `null`) for models that need no external data.
+    It is written to a private temp file alongside the model and passed to
+    the managed runtime as a positional `.dzn` data file (MiniZinc's
+    `model.mzn data.dzn` order) — never a client-supplied path.
   - `timeout_ms: int = 30000` — findMUS budget in milliseconds. Must be
     strictly positive. `0` is a validation error, not "no timeout".
 
@@ -247,6 +271,14 @@ execution tool, and an unsat-core diagnostic tool:
   constraints that are jointly unsatisfiable and from which none can be
   removed while staying unsatisfiable. Minimal does **not** mean globally
   smallest, and a model may have several MUSes.
+
+  **Model-only `core`.** The structured `core` is **best-effort** and
+  resolves **model-file** spans only; raw `stdout` is authoritative. A
+  `.dzn` cannot contain `constraint` items, but assigning a *decision
+  variable* in data is equivalent to a constraint, so if the client does
+  that, a MUS member can originate in the data file — it appears in raw
+  `stdout` but is **not** added to `core`. Do not treat `core` as a
+  complete enumeration of the conflict.
 
   **Conservative `no_core`.** `status="no_core"` means findMUS completed
   without reporting a MUS, **not** that the model is satisfiable. A tight

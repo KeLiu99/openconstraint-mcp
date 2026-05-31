@@ -97,9 +97,7 @@ def install_runtime(
     # exact directory install_managed_runtime will operate on (it resolves too).
     target_resolved = target.expanduser().resolve()
     if target_resolved.exists() and not target_resolved.is_dir():
-        _console.print(
-            f"[red]Target exists but is not a directory: {target_resolved}[/red]"
-        )
+        _console.print(f"[red]Target exists but is not a directory: {target_resolved}[/red]")
         raise typer.Exit(code=1)
 
     effective_yes = yes
@@ -132,9 +130,7 @@ def install_runtime(
             raise typer.Exit(code=1)
 
     try:
-        installed = install_managed_runtime(
-            target_resolved, yes=effective_yes, console=_console
-        )
+        installed = install_managed_runtime(target_resolved, yes=effective_yes, console=_console)
     except (RuntimeInstallError, OSError) as exc:
         _console.print(f"[red]{exc}[/red]")
         raise typer.Exit(code=1) from exc

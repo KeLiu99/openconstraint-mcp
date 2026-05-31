@@ -34,9 +34,7 @@ def isolated_config_dir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path
     real ``~/.config/openconstraint-mcp/install.json`` or shell env var.
     """
     config_path = tmp_path / "install.json"
-    monkeypatch.setattr(
-        "openconstraint_mcp.runtime._config_path", lambda: config_path
-    )
+    monkeypatch.setattr("openconstraint_mcp.runtime._config_path", lambda: config_path)
     monkeypatch.delenv("OPENCONSTRAINT_MCP_RUNTIME_DIR", raising=False)
     return config_path
 

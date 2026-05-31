@@ -20,6 +20,7 @@ dmypy.json
 .claude/
 .codex/
 .idea/
+.agents/
 
 # Local DB/store files
 *.db
@@ -36,3 +37,4 @@ dmypy.json
 # macOS
 .DS_Store
 ._*
+models/balanced_assignment/

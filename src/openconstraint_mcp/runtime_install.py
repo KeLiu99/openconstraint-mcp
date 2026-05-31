@@ -167,9 +167,7 @@ def _extract_bundle(archive: Path, dest: Path) -> None:
 
 def _smoke_check_binary(binary: Path) -> None:
     if not binary.is_file() or not os.access(binary, os.X_OK):
-        raise RuntimeInstallError(
-            f"staged MiniZinc binary is missing or not executable: {binary}"
-        )
+        raise RuntimeInstallError(f"staged MiniZinc binary is missing or not executable: {binary}")
     try:
         completed = subprocess.run(
             [str(binary), "--version"],
@@ -195,8 +193,7 @@ def _smoke_check_binary(binary: Path) -> None:
     output = (completed.stdout or "") + (completed.stderr or "")
     if "minizinc" not in output.lower():
         raise RuntimeInstallError(
-            f"staged MiniZinc binary did not identify itself as MiniZinc: "
-            f"{output.strip()!r}"
+            f"staged MiniZinc binary did not identify itself as MiniZinc: {output.strip()!r}"
         )
 
 
@@ -246,9 +243,7 @@ def install_managed_runtime(
 
     runtime_dir = runtime_dir.resolve()
     if runtime_dir.exists() and not runtime_dir.is_dir():
-        raise RuntimeInstallError(
-            f"target exists but is not a directory: {runtime_dir}"
-        )
+        raise RuntimeInstallError(f"target exists but is not a directory: {runtime_dir}")
 
     if runtime_dir.exists() and any(runtime_dir.iterdir()):
         if not is_managed_runtime_dir(runtime_dir):
@@ -322,7 +317,5 @@ def install_managed_runtime(
                 f"manually with `rm -rf {backup}`."
             )
 
-    console.print(
-        f"[green]Installed MiniZinc {MINIZINC_VERSION} at {runtime_dir}[/green]"
-    )
+    console.print(f"[green]Installed MiniZinc {MINIZINC_VERSION} at {runtime_dir}[/green]")
     return runtime_dir
