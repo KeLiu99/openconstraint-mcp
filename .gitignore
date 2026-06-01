@@ -38,3 +38,4 @@ dmypy.json
 .DS_Store
 ._*
 models/balanced_assignment/
+docs/plans
