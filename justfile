@@ -47,6 +47,10 @@ typecheck:
 # Full local gate: lint + typecheck + test.
 check: lint typecheck test
 
+# Build the sdist and wheel into dist/.
+build:
+    uv build
+
 # Stage explicit files, commit, and push the current branch.
 # Usage: just push "commit message" path/one path/two ...
 # Safer default — only the listed files end up staged.

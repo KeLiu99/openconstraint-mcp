@@ -1,5 +1,7 @@
 # openconstraint-mcp
 
+[![CI](https://github.com/KeLiu99/openconstraint-mcp/actions/workflows/ci.yml/badge.svg)](https://github.com/KeLiu99/openconstraint-mcp/actions/workflows/ci.yml)
+
 A local-first [Model Context Protocol](https://modelcontextprotocol.io) server for
 constraint programming and optimization. `openconstraint-mcp` gives an MCP client a
 deterministic way to compile-check and solve [MiniZinc](https://www.minizinc.org/)
