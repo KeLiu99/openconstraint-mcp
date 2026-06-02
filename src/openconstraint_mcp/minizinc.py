@@ -305,22 +305,66 @@ def _parse_unsat_core(
     return True, [_constraint_from_span(model, span) for span in unique_spans]
 
 
+# MiniZinc's `--statistics` flag prints `%%%mzn-stat: <key>=<value>` lines.
+# The `%%%mzn-stat-end` block sentinel does not match this prefix (it has no
+# trailing colon), so the prefix check below excludes it without a special case.
+_STAT_LINE_PREFIX = "%%%mzn-stat:"
+
+
+def _parse_statistics(stdout: str) -> dict[str, str]:
+    """Best-effort extraction of MiniZinc ``%%%mzn-stat:`` key/value pairs.
+
+    Keeps only ``%%%mzn-stat:`` lines, strips the prefix, splits on the first
+    ``=``, and stores the raw value token verbatim — quoted strings keep their
+    quotes, numbers stay strings; nothing is coerced.
+
+    The view is best-effort and never fails a solve:
+
+    - A line with no ``=`` (e.g. a timeout-truncated ``%%%mzn-stat: solveTi``)
+      is skipped, not recorded as a phantom empty-valued key.
+    - Duplicate keys across the compile/solve/per-solution blocks collapse
+      last-wins; raw ``stdout`` keeps the full trail.
+    - ``stdout`` is one unauthenticated stream, so a model ``output`` block can
+      print a stat-shaped line and it is included here. Raw ``stdout`` stays
+      authoritative; this dict is a convenience summary, not tamper-proof.
+    """
+    stats: dict[str, str] = {}
+    for raw_line in stdout.splitlines():
+        line = raw_line.strip()
+        if not line.startswith(_STAT_LINE_PREFIX):
+            continue  # plain comment, %%%mzn-stat-end sentinel, or output text
+        key, sep, value = line[len(_STAT_LINE_PREFIX) :].strip().partition("=")
+        if not sep:
+            continue  # no '=' → not a usable pair (skip, don't store empty)
+        stats[key.strip()] = value
+    return stats
+
+
 def _build_solve_result(outcome: _RunOutcome, *, solver: str) -> SolveResult:
     if outcome.timed_out:
+        # No real process return code exists once the outer subprocess timeout
+        # fires; expose None rather than the internal -1 sentinel. The captured
+        # stdout may be a mid-block truncation, which _parse_statistics tolerates.
         return SolveResult(
             status="timeout",
             solver=solver,
+            return_code=None,
+            timed_out=True,
             stdout=outcome.stdout,
             stderr=outcome.stderr,
             elapsed_ms=outcome.elapsed_ms,
+            statistics=_parse_statistics(outcome.stdout),
         )
     status = _parse_status(outcome.stdout, outcome.returncode, timed_out=False)
     return SolveResult(
         status=status,
         solver=solver,
+        return_code=outcome.returncode,
+        timed_out=False,
         stdout=outcome.stdout,
         stderr=outcome.stderr,
         elapsed_ms=outcome.elapsed_ms,
+        statistics=_parse_statistics(outcome.stdout),
     )
 
 
@@ -414,7 +458,7 @@ def solve_model(
     timeout_ms: int = DEFAULT_SOLVE_TIMEOUT_MS,
 ) -> SolveResult:
     outcome = _run_managed_minizinc(
-        model, solver=solver, timeout_ms=timeout_ms, extra_args=(), data=data
+        model, solver=solver, timeout_ms=timeout_ms, extra_args=("--statistics",), data=data
     )
     return _build_solve_result(outcome, solver=solver)
 
@@ -537,7 +581,7 @@ def solve_model_path(
         model_path,
         solver=solver,
         timeout_ms=timeout_ms,
-        extra_args=(),
+        extra_args=("--statistics",),
         data_path=data_path,
     )
     return _build_solve_result(outcome, solver=solver)

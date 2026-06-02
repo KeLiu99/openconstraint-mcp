@@ -14,6 +14,7 @@ from openconstraint_mcp.minizinc import (
     DEFAULT_UNSAT_CORE_TIMEOUT_MS,
     FINDMUS_SOLVER,
     MiniZincExecutionError,
+    _parse_statistics,
     _parse_status,
     _parse_unsat_core,
     _slice_source,
@@ -163,17 +164,25 @@ def test_solve_result_round_trips() -> None:
     result = SolveResult(
         status="optimal",
         solver="cp-sat",
+        return_code=0,
+        timed_out=False,
         stdout="x = 3;\n----------\n==========\n",
         stderr="",
         elapsed_ms=42,
+        # Raw value tokens: a numeric stat and a quoted-string stat whose
+        # literal quotes are kept verbatim, not coerced/stripped.
+        statistics={"failures": "19", "method": '"satisfy"'},
     )
     dumped = result.model_dump()
     assert dumped == {
         "status": "optimal",
         "solver": "cp-sat",
+        "return_code": 0,
+        "timed_out": False,
         "stdout": "x = 3;\n----------\n==========\n",
         "stderr": "",
         "elapsed_ms": 42,
+        "statistics": {"failures": "19", "method": '"satisfy"'},
     }
 
 
@@ -182,6 +191,8 @@ def test_solve_result_rejects_unknown_status() -> None:
         SolveResult(
             status="bogus",  # type: ignore[arg-type]
             solver="cp-sat",
+            return_code=0,
+            timed_out=False,
             stdout="",
             stderr="",
             elapsed_ms=0,
@@ -372,6 +383,72 @@ def test_parse_status_ignores_markers_embedded_in_output_lines(
     assert _parse_status(stdout, returncode=0, timed_out=False) == expected
 
 
+# A representative `--statistics` stdout: a compile/flatten block before the
+# solution and a solve block after the `----------` marker, each closed by the
+# `%%%mzn-stat-end` sentinel (verified shape on MiniZinc 2.9.7 / cp-sat).
+_STATS_STDOUT = (
+    "% Generated FlatZinc statistics:\n"
+    "%%%mzn-stat: flatIntVars=8\n"
+    '%%%mzn-stat: method="satisfy"\n'
+    "%%%mzn-stat: flatTime=0.0652244\n"
+    "%%%mzn-stat-end\n"
+    "q = [1, 5, 8, 6, 3, 7, 2, 4]\n"
+    "----------\n"
+    "%%%mzn-stat: failures=19\n"
+    "%%%mzn-stat: solveTime=0.0107676\n"
+    "%%%mzn-stat: nSolutions=1\n"
+    "%%%mzn-stat-end\n"
+)
+
+
+def test_parse_statistics_extracts_pairs_from_blocks() -> None:
+    # Both blocks contribute; the human "% Generated..." comment and the
+    # `%%%mzn-stat-end` sentinel are not keys, and the quoted-string value keeps
+    # its literal quotes (raw token, not coerced).
+    assert _parse_statistics(_STATS_STDOUT) == {
+        "flatIntVars": "8",
+        "method": '"satisfy"',
+        "flatTime": "0.0652244",
+        "failures": "19",
+        "solveTime": "0.0107676",
+        "nSolutions": "1",
+    }
+
+
+def test_parse_statistics_without_stat_lines_returns_empty() -> None:
+    assert _parse_statistics("x = 3;\n----------\n==========\n") == {}
+
+
+def test_parse_statistics_skips_line_without_equals() -> None:
+    # A timeout can cut a block mid-line: `%%%mzn-stat: solveTi` has no `=`, so
+    # it must be dropped rather than recorded as a phantom empty-valued key.
+    stats = _parse_statistics("%%%mzn-stat: failures=19\n%%%mzn-stat: solveTi\n")
+    assert stats == {"failures": "19"}
+    assert "solveTi" not in stats
+
+
+def test_parse_statistics_duplicate_key_last_wins() -> None:
+    # Optimization re-emits `objective=` per improved solution; the flat dict
+    # keeps only the last value while raw stdout retains the full trail.
+    stats = _parse_statistics(
+        "%%%mzn-stat: objective=10\n%%%mzn-stat: objective=7\n%%%mzn-stat: objective=4\n"
+    )
+    assert stats == {"objective": "4"}
+
+
+def test_parse_statistics_includes_model_printed_lookalike() -> None:
+    # stdout is one unauthenticated stream, so a model `output` block can print
+    # a stat-shaped line. The positional parser includes it — pinned here as
+    # documented behavior, not defended against.
+    stats = _parse_statistics(
+        "%%%mzn-stat: solveTime=0.01\n"
+        "%%%mzn-stat-end\n"
+        '%%%mzn-stat: injected="by-model-output"\n'
+        "----------\n"
+    )
+    assert stats["injected"] == '"by-model-output"'
+
+
 class _FakeCompletedProcess:
     def __init__(self, stdout: str, stderr: str, returncode: int) -> None:
         self.stdout = stdout
@@ -429,6 +506,8 @@ def test_solve_model_happy_path_returns_optimal(
     assert isinstance(result, SolveResult)
     assert result.status == "optimal"
     assert result.solver == "cp-sat"
+    assert result.return_code == 0
+    assert result.timed_out is False
     assert result.stdout == stdout
     assert result.stderr == ""
     assert result.elapsed_ms >= 0
@@ -454,6 +533,8 @@ def test_solve_model_command_shape(
     assert cmd[solver_idx + 1] == "cp-sat"
     timeout_idx = cmd.index("--time-limit")
     assert cmd[timeout_idx + 1] == "30000"
+    # Solve runs request statistics so the result can surface them.
+    assert "--statistics" in cmd
 
     model_path = Path(cmd[-1])
     assert model_path.suffix == ".mzn"
@@ -623,6 +704,8 @@ def test_solve_model_returns_structured_result_for_minizinc_compile_error(
     result = solve_model("solv satisfy;")
 
     assert result.status == "error"
+    assert result.return_code == 1
+    assert result.timed_out is False
     assert "syntax error" in result.stderr
 
 
@@ -638,6 +721,71 @@ def test_solve_model_returns_structured_result_for_unsatisfiable(
     result = solve_model("constraint false;\nsolve satisfy;")
 
     assert result.status == "unsatisfiable"
+
+
+@pytest.mark.parametrize(
+    ("stdout", "expected_status"),
+    [
+        pytest.param(
+            "% Generated FlatZinc statistics:\n"
+            '%%%mzn-stat: method="satisfy"\n'
+            "%%%mzn-stat-end\n"
+            "x = 3;\n"
+            "----------\n"
+            "==========\n"
+            "%%%mzn-stat: solveTime=0.01\n"
+            "%%%mzn-stat-end\n",
+            "optimal",
+            id="optimal-with-stats",
+        ),
+        pytest.param(
+            "% Generated FlatZinc statistics:\n"
+            "%%%mzn-stat: flatIntVars=2\n"
+            "%%%mzn-stat-end\n"
+            "=====UNSATISFIABLE=====\n",
+            "unsatisfiable",
+            id="unsat-with-stats",
+        ),
+    ],
+)
+def test_solve_model_status_unaffected_by_stat_lines(
+    stdout: str,
+    expected_status: SolveStatus,
+    fake_minizinc_binary: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # The injected `%`-comment stat lines must not collide with _parse_status's
+    # whole-line marker matching: status is classified from the FlatZinc markers
+    # exactly as without --statistics, and the stat block is still captured.
+    _record_subprocess(monkeypatch, _FakeCompletedProcess(stdout=stdout, stderr="", returncode=0))
+
+    result = solve_model("solve satisfy;")
+
+    assert result.status == expected_status
+    assert result.statistics  # the stat block was parsed despite the markers
+
+
+def test_solve_model_tolerates_truncated_stat_block(
+    fake_minizinc_binary: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # A truncated final stat line (no `=`) must not raise, must not inject a
+    # phantom key, and must not change the classified status.
+    stdout = (
+        "x = 3;\n"
+        "----------\n"
+        "==========\n"
+        "%%%mzn-stat: failures=19\n"
+        "%%%mzn-stat: solveTi"  # truncated mid-line, no '='
+    )
+    _record_subprocess(monkeypatch, _FakeCompletedProcess(stdout=stdout, stderr="", returncode=0))
+
+    result = solve_model("solve satisfy;")
+
+    assert isinstance(result, SolveResult)
+    assert result.status == "optimal"
+    assert result.statistics == {"failures": "19"}
+    assert "solveTi" not in result.statistics
 
 
 def test_solve_model_timeout_with_bytes_payload_decodes(
@@ -657,6 +805,8 @@ def test_solve_model_timeout_with_bytes_payload_decodes(
     result = solve_model("solve satisfy;")
 
     assert result.status == "timeout"
+    assert result.return_code is None
+    assert result.timed_out is True
     assert result.stdout == "partial"
     assert result.stderr == ""
     assert result.elapsed_ms >= 0
@@ -770,6 +920,8 @@ def test_check_model_command_shape(
     timeout_idx = cmd.index("--time-limit")
     assert cmd[timeout_idx + 1] == "30000"
     assert "-c" in cmd
+    # Statistics is solve-only; a compile-check must not request it.
+    assert "--statistics" not in cmd
 
     model_path = Path(cmd[-1])
     assert model_path.suffix == ".mzn"
@@ -981,6 +1133,8 @@ def test_find_unsat_core_command_shape(
     assert cmd[solver_idx + 1] == FINDMUS_SOLVER
     assert cmd[timeout_idx + 1] == str(DEFAULT_UNSAT_CORE_TIMEOUT_MS)
     assert "-c" not in cmd
+    # Statistics is solve-only; the findMUS path must not request it.
+    assert "--statistics" not in cmd
     assert calls[0]["model_path_existed"]
     assert calls[0]["model_contents"] == _UNSAT_CORE_MODEL
     assert kwargs["cwd"] == str(model_path.parent)

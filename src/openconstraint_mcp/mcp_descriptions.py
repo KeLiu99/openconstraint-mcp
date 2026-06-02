@@ -4,6 +4,21 @@ These are protocol-contract texts — what MCP clients see as tool/prompt
 documentation.  Keeping them here lets server.py focus on wiring.
 """
 
+MCP_SERVER_INSTRUCTIONS = (
+    "Use this MCP server for local constraint programming and optimization: "
+    "MiniZinc and CP-SAT models for scheduling, rostering, knapsack, "
+    "allocation, assignment, routing, bin-packing, SAT/UNSAT analysis, model "
+    "validation, and solver statistics. For natural-language problems, prefer "
+    "the solve_constraint_problem prompt when the client supports MCP prompts; "
+    "otherwise draft MiniZinc in the client LLM, check it with "
+    "check_minizinc_model, solve with solve_minizinc_model, then lead with "
+    "the result: a plain-language status, the stdout solution stated in the "
+    "terms of the user's problem (not the raw JSON SolveResult), and a brief "
+    "statistics summary when present. All execution must use the managed "
+    "local MiniZinc runtime; do not use remote solvers or a bare PATH "
+    "minizinc."
+)
+
 CHECK_RUNTIME_DESC = "Report whether the managed MiniZinc runtime is installed."
 
 LIST_AVAILABLE_SOLVERS_DESC = "List solvers available in the managed MiniZinc runtime."
@@ -15,9 +30,14 @@ SOLVE_MINIZINC_MODEL_DESC = (
     "`output` block. The optional `data` argument supplies MiniZinc "
     "data (`.dzn` contents) as text, supplied to the runtime as a data "
     "file alongside the model; omit it for models that need no external "
-    "data. Returns a SolveResult "
-    "with the run's status plus the runtime's raw stdout and stderr so "
-    "the caller can revise and retry on MiniZinc errors."
+    "data. Returns a SolveResult with the run's `status`, the requested "
+    "`solver`, the subprocess `return_code` (null on a subprocess timeout) "
+    "and a `timed_out` flag, the runtime's raw `stdout` and `stderr` (so "
+    "the caller can revise and retry on MiniZinc errors), `elapsed_ms`, and "
+    "a best-effort `statistics` map of `%%%mzn-stat:` key/value pairs parsed "
+    "from `stdout` — may be empty, keys are solver- and version-defined, and "
+    "raw `stdout` stays authoritative (enabling statistics adds `%`-comment "
+    "stat lines to `stdout`)."
 )
 
 CHECK_MINIZINC_MODEL_DESC = (
@@ -90,8 +110,8 @@ SOLVE_MINIZINC_FILES_DESC = (
     "runtime — the path-based sibling of `solve_minizinc_model`. "
     + _FILE_TOOL_SHARED_DESC
     + " Returns a SolveResult with the same "
-    "shape as `solve_minizinc_model` (`status`, `solver`, `stdout`, "
-    "`stderr`, `elapsed_ms`)."
+    "shape as `solve_minizinc_model` (`status`, `solver`, `return_code`, "
+    "`timed_out`, `stdout`, `stderr`, `elapsed_ms`, `statistics`)."
 )
 
 FIND_UNSAT_CORE_FILES_DESC = (

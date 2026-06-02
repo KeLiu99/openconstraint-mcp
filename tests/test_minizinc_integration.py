@@ -102,6 +102,25 @@ def test_solve_model_honors_inline_data() -> None:
     assert "x=4" in result.stdout
 
 
+# Keys observed in `--statistics` output on the pinned runtime
+# (MiniZinc 2.9.7 / cp-sat). The exact key set is solver- and version-defined,
+# so accept any one of a small set rather than hardcode a single key a patch
+# release might rename (compile-stat keys like `flatIntVars` also vary by run).
+_ACCEPTED_STAT_KEYS = {"flatTime", "method", "paths", "solveTime", "failures"}
+
+
+def test_solve_model_emits_statistics() -> None:
+    result = solve_model("var 1..5: x;\nconstraint x > 2;\nsolve satisfy;")
+
+    # Status is still classified correctly despite the injected stat lines.
+    assert result.status in {"satisfied", "optimal"}
+    # `--statistics` took effect and the runner did not strip the lines out.
+    assert "%%%mzn-stat:" in result.stdout
+    # The stat block parsed into the structured view with a recognizable key.
+    assert result.statistics
+    assert _ACCEPTED_STAT_KEYS & result.statistics.keys()
+
+
 def test_check_model_honors_inline_data() -> None:
     # Without data, `var 1..n` has an unbound domain and the model cannot
     # flatten — a clean `ok` proves the data file was read.

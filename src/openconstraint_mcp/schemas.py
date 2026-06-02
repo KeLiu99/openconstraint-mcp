@@ -38,9 +38,12 @@ SolveStatus = Literal[
 class SolveResult(BaseModel):
     status: SolveStatus
     solver: str
+    return_code: int | None
+    timed_out: bool
     stdout: str
     stderr: str
     elapsed_ms: int
+    statistics: dict[str, str] = Field(default_factory=dict)
 
 
 CheckStatus = Literal[

@@ -78,6 +78,12 @@ After installing the package above:
    checkout, or install the package on your `PATH` and run `openconstraint-mcp stdio`.
    Restart your MCP client; `check_runtime` and `list_available_solvers` tools should appear.
 
+   Codex also reads the project-scoped `.codex/config.toml` in this checkout, so
+   `openconstraint-mcp` is visible to Codex only while working in this repository.
+   That config launches `uv run --no-sync openconstraint-mcp stdio` to avoid
+   implicit dependency installs or network access on Codex startup; run
+   `uv sync --all-groups` first if the server is not available.
+
 ## CLI
 
 The package exposes five commands:
@@ -220,11 +226,26 @@ in an **inline-source** form (below) and a **path-based file** sibling
     `"unbounded"`, `"unsat_or_unbounded"`, `"unknown"`, `"optimal"`,
     `"satisfied"` (precedence in that order — see the source for details).
   - `solver: str` — the solver name that ran, echoed from the request.
+  - `returncode: int | None` — the managed binary's subprocess return code,
+    or `null` when the outer subprocess timeout fired before a real return
+    code existed (so `null` on `status="timeout"`).
+  - `timed_out: bool` — `true` when the subprocess wall-clock cap fired. This
+    is explicit process-timeout metadata; today it is redundant with
+    `status="timeout"`, not a new independent solver signal.
   - `stdout: str` — the runtime's raw stdout (solution lines and separator
-    markers from the model's `output` block).
+    markers from the model's `output` block). Solve runs pass MiniZinc's
+    `--statistics`, so `stdout` also carries `%`-comment `%%%mzn-stat:` lines
+    that a baseline run would not emit.
   - `stderr: str` — the runtime's raw stderr (compile, type, and solver
     errors land here).
   - `elapsed_ms: int` — wall-clock duration of the subprocess call.
+  - `statistics: dict[str, str]` — best-effort raw `%%%mzn-stat:` key/value
+    pairs parsed from `stdout` (values kept verbatim, not coerced). May be
+    `{}` when none were emitted; the key set is solver- and version-defined,
+    **not** a stable contract; raw `stdout` stays authoritative. It is a
+    **non-authenticated** view: `stdout` is one stream, so a model's `output`
+    block can print `%%%mzn-stat:`-shaped lines that land in this dict — do
+    not treat it as tamper-proof.
 
   **Division of labor.** The `solve_constraint_problem` MCP prompt (below)
   guides the client LLM to draft a MiniZinc model; `solve_minizinc_model`
@@ -382,8 +403,20 @@ The stdio server also exposes one MCP prompt for client-side LLMs to use:
      and have them invoke that exact managed binary on the drafted
      model. The prompt explicitly forbids recommending a bare
      PATH-based `minizinc` invocation.
-  6. Revise the model if MiniZinc reports an error, and explain the final
-     result in plain language.
+  6. Revise the model if MiniZinc reports an error, and present the final
+     result to the user as a short, structured summary that leads with the
+     result: a plain-language `status`, the solution quoted verbatim from
+     `stdout` (only when the status carries one, with a concise selected-item
+     table when the data is item-like), and a brief `statistics` summary
+     whenever the `statistics` map is non-empty. Each section heading appears
+     at most once, and the explanation stays focused on verifying the result
+     rather than adding speculative algorithm commentary by default.
+
+  When the user already has the model on disk as `.mzn`/`.dzn` files, the
+  prompt skips drafting and routes the same validate → solve → present loop
+  through the path-based `check_minizinc_files` and `solve_minizinc_files`
+  tools (passing `model_path`/`data_path`), which return the same
+  `CheckResult`/`SolveResult` shapes.
 
   The openconstraint-mcp server itself does **not** call an LLM and does
   not embed any agent framework. The prompt only structures how the
@@ -458,6 +491,20 @@ the runtime directory itself. Future `install-runtime` invocations check that
 marker before overwriting: an unmanaged non-empty directory is refused
 regardless of `--yes`, which makes `--runtime-dir $HOME --yes` (or similar)
 safe — your home directory cannot be wiped by a fat-finger.
+
+### Startup diagnostic
+
+On startup the MCP server prints a short three-line diagnostic to **stderr**:
+the server version, the resolved runtime directory, and whether the managed
+runtime is installed (with an `install-runtime` hint when it is absent). This
+banner is **stderr-only by design** — over the stdio transport, `stdout` is the
+JSON-RPC protocol channel, so the diagnostic never touches it. The banner only
+*reads* the already-resolved runtime status; it never downloads or installs
+anything. MCP clients that hide server stderr simply will not show it.
+
+The server also advertises its project `Homepage` to MCP clients via the
+`website_url` field, sourced from the package metadata (single source of truth:
+`[project.urls]` in `pyproject.toml`).
 
 ## v0 limitations
 
