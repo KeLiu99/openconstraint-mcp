@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+from mcp.types import CallToolResult
 
 from openconstraint_mcp.server import (
     _homepage_url,
@@ -89,12 +90,15 @@ def test_mcp_server_instructions_present_solution_in_problem_terms() -> None:
 
     # The non-prompt fallback path must carry the same presentation contract as
     # the solve_constraint_problem prompt: state the solution in the terms of
-    # the user's problem rather than dumping the raw JSON SolveResult, plus a
-    # statistics summary.
+    # the user's problem rather than dumping the raw JSON SolveResult, plus the
+    # complete Statistics section when present.
     lower = instructions.lower()
     assert "terms of the user's problem" in lower
     assert "json" in lower
+    assert "item table" in lower
     assert "statistics" in lower
+    assert "complete" in lower
+    assert "condense" in lower
 
 
 async def _get_prompt_text(prompt_name: str, arguments: dict[str, str]) -> str:
@@ -313,11 +317,9 @@ async def test_solve_constraint_problem_prompt_leads_with_result_not_workflow_na
 async def test_solve_constraint_problem_prompt_requires_statistics_when_present() -> None:
     text = await _get_prompt_text("solve_constraint_problem", {"problem": SAMPLE_PROBLEM})
 
-    # A real client (Codex) dropped the statistics summary because the prompt
-    # framed it as a soft, best-effort nicety. The directive must make a stats
-    # summary non-optional whenever the `statistics` map is non-empty. Pin the
-    # requirement on a single line so the soft "may be empty" caveat cannot
-    # satisfy it.
+    # Real clients dropped or compressed the statistics summary when the prompt
+    # framed it as a soft, best-effort nicety. The directive must make the full
+    # Statistics section non-optional whenever the `statistics` map is non-empty.
     stats_required_lines = [
         line
         for line in text.splitlines()
@@ -325,8 +327,21 @@ async def test_solve_constraint_problem_prompt_requires_statistics_when_present(
         and ("required" in line.lower() or "do not omit" in line.lower())
     ]
     assert stats_required_lines, (
-        "explain step should require a statistics summary when the map is non-empty"
+        "explain step should require the Statistics section when the map is non-empty"
     )
+    lower = text.lower()
+    assert "copy the full section" in lower
+    assert "selected fields" in lower
+
+
+@pytest.mark.asyncio
+async def test_solve_constraint_problem_prompt_forbids_compressed_statistics() -> None:
+    text = await _get_prompt_text("solve_constraint_problem", {"problem": SAMPLE_PROBLEM})
+
+    statistics_lines = [line.lower() for line in text.splitlines() if "statistics" in line.lower()]
+    assert statistics_lines
+    assert all("brief" not in line and "few" not in line for line in statistics_lines)
+    assert "summarize it" in text.lower()
 
 
 @pytest.mark.asyncio
@@ -363,18 +378,22 @@ async def test_solve_constraint_problem_prompt_avoids_speculative_commentary() -
 
 
 @pytest.mark.asyncio
-async def test_solve_constraint_problem_prompt_offers_item_table_when_applicable() -> None:
+async def test_solve_constraint_problem_prompt_requires_item_table_when_applicable() -> None:
     text = await _get_prompt_text("solve_constraint_problem", {"problem": SAMPLE_PROBLEM})
 
     # When the user problem supplies item-like data and the solution selects
-    # among it, the client should render a concise table/list of chosen items.
+    # among it, the client should render a compact table, not degrade to a
+    # prose-only list. Small item sets should show all item rows.
     table_lines = [line for line in text.splitlines() if "table" in line.lower()]
-    assert table_lines, "presentation guidance should allow a table-style item summary"
+    assert table_lines, "presentation guidance should require a table-style item summary"
 
     lower = text.lower()
     assert "item-like" in lower or "selected-item" in lower, (
         "the item-table guidance should be conditioned on item-like data"
     )
+    assert "prose-only list" in lower
+    assert "one row per item" in lower
+    assert "selected/count" in lower
 
 
 class _FakeCompletedProcess:
@@ -387,10 +406,22 @@ class _FakeCompletedProcess:
 def _structured(result: Any) -> dict[str, Any]:
     """Extract the structured-content dict from a FastMCP call_tool result.
 
-    FastMCP returns a tuple of ``(content_blocks, structured_content)`` from
-    ``call_tool``; the structured payload is the second element.
+    FastMCP returns direct ``CallToolResult`` objects for tools that control
+    their own model-visible content, and a tuple of
+    ``(content_blocks, structured_content)`` for ordinary structured returns.
     """
+    if isinstance(result, CallToolResult):
+        assert result.structuredContent is not None
+        return result.structuredContent
     return result[1]
+
+
+def _content_text(result: Any) -> str:
+    if isinstance(result, CallToolResult):
+        content = result.content
+    else:
+        content = result[0]
+    return "\n".join(block.text for block in content if hasattr(block, "text"))
 
 
 def _record_data_run(
@@ -457,6 +488,19 @@ async def test_solve_minizinc_model_happy_path(
     # Parsed %%%mzn-stat: pairs flow through FastMCP structured content.
     assert structured["statistics"] == {"solveTime": "0.01"}
 
+    # The model-visible default content also highlights non-empty statistics,
+    # instead of relying on clients to notice them inside raw JSON.
+    text = _content_text(result)
+    lower_text = text.lower()
+    assert "Final answer requirement" in text
+    assert "entire Statistics section" in text
+    assert "do not omit" in lower_text
+    assert "summarize" in lower_text
+    assert "selected fields" in lower_text
+    assert "Statistics:" in text
+    assert "- solveTime: 0.01" in text
+    assert '"statistics"' not in text
+
 
 @pytest.mark.asyncio
 async def test_solve_minizinc_model_threads_inline_data_to_runtime(
@@ -476,6 +520,29 @@ async def test_solve_minizinc_model_threads_inline_data_to_runtime(
 
     assert calls[0]["data_contents"] == "n = 3;"
     assert _structured(result)["status"] == "optimal"
+
+
+@pytest.mark.asyncio
+async def test_solve_minizinc_model_omits_visible_statistics_when_empty(
+    fake_minizinc_binary: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def _fake_run(*args: object, **kwargs: object) -> _FakeCompletedProcess:
+        return _FakeCompletedProcess(
+            stdout="x = 3;\n----------\n==========\n", stderr="", returncode=0
+        )
+
+    monkeypatch.setattr("openconstraint_mcp.minizinc.subprocess.run", _fake_run)
+
+    mcp = create_mcp_server()
+    result = await mcp.call_tool(
+        "solve_minizinc_model",
+        {"model": "var 1..5: x;\nconstraint x > 2;\nsolve satisfy;"},
+    )
+
+    assert _structured(result)["statistics"] == {}
+    assert "Final answer requirement" not in _content_text(result)
+    assert "Statistics:" not in _content_text(result)
 
 
 @pytest.mark.asyncio
@@ -815,6 +882,39 @@ async def test_solve_minizinc_files_happy_path(
     assert structured["timed_out"] is False
     # The statistics field is exposed even when no stat lines were emitted.
     assert structured["statistics"] == {}
+    assert "Statistics:" not in _content_text(result)
+
+
+@pytest.mark.asyncio
+async def test_solve_minizinc_files_visible_content_includes_statistics(
+    tmp_path: Path,
+    fake_minizinc_binary: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    model_path = tmp_path / "model.mzn"
+    model_path.write_text(_FILE_MODEL_SRC)
+    _record_run_capturing_cwd(
+        monkeypatch,
+        _FakeCompletedProcess(
+            stdout="x = 3;\n----------\n==========\n%%%mzn-stat: failures=2\n%%%mzn-stat-end\n",
+            stderr="",
+            returncode=0,
+        ),
+    )
+
+    mcp = create_mcp_server()
+    result = await mcp.call_tool("solve_minizinc_files", {"model_path": str(model_path)})
+
+    assert _structured(result)["statistics"] == {"failures": "2"}
+    text = _content_text(result)
+    lower_text = text.lower()
+    assert "Final answer requirement" in text
+    assert "entire Statistics section" in text
+    assert "do not omit" in lower_text
+    assert "summarize" in lower_text
+    assert "selected fields" in lower_text
+    assert "Statistics:" in text
+    assert "- failures: 2" in text
 
 
 @pytest.mark.asyncio

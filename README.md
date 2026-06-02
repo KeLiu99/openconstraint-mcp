@@ -226,7 +226,7 @@ in an **inline-source** form (below) and a **path-based file** sibling
     `"unbounded"`, `"unsat_or_unbounded"`, `"unknown"`, `"optimal"`,
     `"satisfied"` (precedence in that order — see the source for details).
   - `solver: str` — the solver name that ran, echoed from the request.
-  - `returncode: int | None` — the managed binary's subprocess return code,
+  - `return_code: int | None` — the managed binary's subprocess return code,
     or `null` when the outer subprocess timeout fired before a real return
     code existed (so `null` on `status="timeout"`).
   - `timed_out: bool` — `true` when the subprocess wall-clock cap fired. This
@@ -246,6 +246,13 @@ in an **inline-source** form (below) and a **path-based file** sibling
     **non-authenticated** view: `stdout` is one stream, so a model's `output`
     block can print `%%%mzn-stat:`-shaped lines that land in this dict — do
     not treat it as tamper-proof.
+
+  The MCP response also includes model-visible text content with status,
+  solver metadata, raw stdout/stderr, and a `Statistics:` section whenever
+  the parsed `statistics` map is non-empty. That text includes an explicit
+  final-answer requirement telling the client's LLM not to omit the section.
+  `structuredContent` still carries the complete validated `SolveResult` for
+  clients that consume structured output directly.
 
   **Division of labor.** The `solve_constraint_problem` MCP prompt (below)
   guides the client LLM to draft a MiniZinc model; `solve_minizinc_model`
@@ -406,11 +413,14 @@ The stdio server also exposes one MCP prompt for client-side LLMs to use:
   6. Revise the model if MiniZinc reports an error, and present the final
      result to the user as a short, structured summary that leads with the
      result: a plain-language `status`, the solution quoted verbatim from
-     `stdout` (only when the status carries one, with a concise selected-item
-     table when the data is item-like), and a brief `statistics` summary
-     whenever the `statistics` map is non-empty. Each section heading appears
-     at most once, and the explanation stays focused on verifying the result
-     rather than adding speculative algorithm commentary by default.
+     `stdout` (only when the status carries one), a compact table rather than
+     a prose-only list when the data is item-like (one row per item for small
+     item sets, with relevant attributes and the selected/count value), and
+     the complete model-visible `Statistics:` section whenever the
+     `statistics` map is non-empty. Do not condense that section to selected
+     fields such as `solveTime` and `objectiveBound`. Each section heading
+     appears at most once, and the explanation stays focused on verifying the
+     result rather than adding speculative algorithm commentary by default.
 
   When the user already has the model on disk as `.mzn`/`.dzn` files, the
   prompt skips drafting and routes the same validate → solve → present loop
