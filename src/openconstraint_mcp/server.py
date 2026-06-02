@@ -5,9 +5,10 @@ from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from importlib import metadata
 from pathlib import Path
-from typing import Any
+from typing import Annotated, Any
 
 from mcp.server.fastmcp import FastMCP
+from mcp.types import CallToolResult, TextContent
 
 from .mcp_descriptions import (
     CHECK_MINIZINC_FILES_DESC,
@@ -46,6 +47,19 @@ from .schemas import (
 )
 
 _PACKAGE_NAME = "openconstraint-mcp"
+_PREFERRED_STAT_KEYS = (
+    "objective",
+    "objectiveBound",
+    "nSolutions",
+    "failures",
+    "propagations",
+    "solveTime",
+)
+_STATS_PRESENTATION_REQUIREMENT = (
+    "Final answer requirement: copy the entire Statistics section below into "
+    "the user-facing answer. Do not omit it, summarize it, or replace it with "
+    "only selected fields."
+)
 
 
 def _homepage_url() -> str | None:
@@ -96,6 +110,44 @@ def _log_boot_diagnostic() -> None:
     print("\n".join(lines), file=sys.stderr, flush=True)
 
 
+def _format_solve_result_content(result: SolveResult) -> str:
+    """Return model-visible solve output that leads with the solution, stats last."""
+    lines = [
+        f"Status: {result.status}",
+        f"Solver: {result.solver}",
+        f"Return code: {result.return_code}",
+        f"Timed out: {str(result.timed_out).lower()}",
+        f"Elapsed: {result.elapsed_ms} ms",
+    ]
+
+    if result.stdout:
+        lines.extend(["", "Stdout:", result.stdout.rstrip()])
+    if result.stderr:
+        lines.extend(["", "Stderr:", result.stderr.rstrip()])
+
+    if result.statistics:
+        lines.extend(["", _STATS_PRESENTATION_REQUIREMENT, "Statistics:"])
+        seen: set[str] = set()
+        for key in _PREFERRED_STAT_KEYS:
+            value = result.statistics.get(key)
+            if value is not None:
+                lines.append(f"- {key}: {value}")
+                seen.add(key)
+        for key, value in result.statistics.items():
+            if key not in seen:
+                lines.append(f"- {key}: {value}")
+
+    return "\n".join(lines)
+
+
+def _solve_call_result(result: SolveResult) -> CallToolResult:
+    """Wrap a SolveResult as prose text content plus the full structured output."""
+    return CallToolResult(
+        content=[TextContent(type="text", text=_format_solve_result_content(result))],
+        structuredContent=result.model_dump(mode="json"),
+    )
+
+
 @asynccontextmanager
 async def _lifespan(server: FastMCP[Any]) -> AsyncIterator[None]:
     """Server lifespan: emit the boot diagnostic on startup; no teardown."""
@@ -134,9 +186,11 @@ def create_mcp_server() -> FastMCP:
         data: str | None = None,
         solver: str = DEFAULT_SOLVER,
         timeout_ms: int = DEFAULT_SOLVE_TIMEOUT_MS,
-    ) -> SolveResult:
+    ) -> Annotated[CallToolResult, SolveResult]:
         try:
-            return solve_model(model, solver=solver, data=data, timeout_ms=timeout_ms)
+            return _solve_call_result(
+                solve_model(model, solver=solver, data=data, timeout_ms=timeout_ms)
+            )
         except (RuntimeMissingError, MiniZincExecutionError, ValueError) as exc:
             raise RuntimeError(str(exc)) from exc
 
@@ -186,13 +240,15 @@ def create_mcp_server() -> FastMCP:
         data_path: str | None = None,
         solver: str = DEFAULT_SOLVER,
         timeout_ms: int = DEFAULT_SOLVE_TIMEOUT_MS,
-    ) -> SolveResult:
+    ) -> Annotated[CallToolResult, SolveResult]:
         try:
-            return solve_model_path(
-                Path(model_path),
-                solver=solver,
-                data_path=Path(data_path) if data_path is not None else None,
-                timeout_ms=timeout_ms,
+            return _solve_call_result(
+                solve_model_path(
+                    Path(model_path),
+                    solver=solver,
+                    data_path=Path(data_path) if data_path is not None else None,
+                    timeout_ms=timeout_ms,
+                )
             )
         except (RuntimeMissingError, MiniZincExecutionError, ValueError) as exc:
             raise RuntimeError(str(exc)) from exc

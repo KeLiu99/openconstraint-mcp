@@ -17,10 +17,11 @@ MCP_SERVER_INSTRUCTIONS = (
     "into the string tools — the path-based tools run from the model's own "
     "directory, so a relative `include` resolves. Either way, lead with the "
     "result: a plain-language status, the stdout solution stated in the "
-    "terms of the user's problem (not the raw JSON SolveResult), and a brief "
-    "statistics summary when present. All execution must use the managed "
-    "local MiniZinc runtime; do not use remote solvers or a bare PATH "
-    "minizinc."
+    "terms of the user's problem (not the raw JSON SolveResult), a compact "
+    "item table when the problem supplies item-like data, and the complete "
+    "model-visible `Statistics:` section when present. Do not condense it to "
+    "selected fields. All execution must use the managed local MiniZinc "
+    "runtime; do not use remote solvers or a bare PATH minizinc."
 )
 
 CHECK_RUNTIME_DESC = "Report whether the managed MiniZinc runtime is installed."
@@ -36,7 +37,12 @@ SOLVE_MINIZINC_MODEL_DESC = (
     "(null on a subprocess timeout), `timed_out`, raw `stdout`/`stderr` (so "
     "you can revise and retry on errors), `elapsed_ms`, and a best-effort "
     "`statistics` map parsed from `%%%mzn-stat:` lines (may be empty; keys "
-    "are solver-defined; raw `stdout` stays authoritative)."
+    "are solver-defined; raw `stdout` stays authoritative). The model-visible "
+    "text content includes a `Statistics:` section whenever that map is "
+    "non-empty, with an explicit final-answer requirement not to omit it; "
+    "copy that entire section into the user-facing answer rather than "
+    "summarizing selected fields. `structuredContent` carries the complete "
+    "SolveResult."
 )
 
 CHECK_MINIZINC_MODEL_DESC = (
@@ -97,7 +103,9 @@ SOLVE_MINIZINC_FILES_DESC = (
     + _FILE_TOOL_SHARED_DESC
     + " Returns the same SolveResult shape (`status`, `solver`, "
     "`return_code`, `timed_out`, `stdout`, `stderr`, `elapsed_ms`, "
-    "`statistics`)."
+    "`statistics`) and the same model-visible `Statistics:` summary whenever "
+    "the parsed map is non-empty, with an explicit final-answer requirement "
+    "to copy the entire section rather than summarizing selected fields."
 )
 
 FIND_UNSAT_CORE_FILES_DESC = (

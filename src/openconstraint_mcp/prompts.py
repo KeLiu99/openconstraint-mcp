@@ -102,16 +102,18 @@ Otherwise:
      `output` block text is authoritative, so do not restate the values
      yourself. When the problem supplies item-like data (items with
      weights/values, tasks, shifts, etc.) and the solution selects among it,
-     add a concise selected-item table or list of the chosen elements and
-     their totals.
+     include a compact table rather than a prose-only list. For small item
+     sets (roughly 20 rows or fewer), show one row per item with the item
+     index/name, relevant attributes, and the selected/count value; for larger
+     sets, show a compact table of selected items plus totals.
      An `unsatisfiable`, `error`, or `timeout` result has no solution to
      show: say so plainly, and for `error` point at `stderr`.
-   - a `statistics` summary is required whenever the `statistics` map is
-     non-empty — do not omit it. Surface a few `%%%mzn-stat:` figures,
-     preferring `objective`, `objectiveBound`, `nSolutions`, `failures`,
-     `propagations`, and `solveTime`. If the map is empty, say nothing of
-     it; its keys vary by solver and are reported best-effort, not
-     independently verified.
+   - the complete model-visible `Statistics:` section is required whenever the
+     `statistics` map is non-empty — do not omit it, summarize it, or replace
+     it with only selected fields such as `solveTime` and `objectiveBound`.
+     Copy the full section from the solve tool's text content into the
+     user-facing answer. If the map is empty, say nothing of it; its keys vary
+     by solver and are reported best-effort, not independently verified.
 
    Keep it tight: use each heading at most once (do not repeat one such as
    "Solver statistics"); by default do not add speculative algorithm
