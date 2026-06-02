@@ -1,5 +1,9 @@
 from __future__ import annotations
 
+import sys
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
+from importlib import metadata
 from pathlib import Path
 from typing import Any
 
@@ -12,6 +16,7 @@ from .mcp_descriptions import (
     FIND_UNSAT_CORE_DESC,
     FIND_UNSAT_CORE_FILES_DESC,
     LIST_AVAILABLE_SOLVERS_DESC,
+    MCP_SERVER_INSTRUCTIONS,
     SOLVE_CONSTRAINT_PROBLEM_PROMPT_DESC,
     SOLVE_MINIZINC_FILES_DESC,
     SOLVE_MINIZINC_MODEL_DESC,
@@ -40,10 +45,72 @@ from .schemas import (
     UnsatCoreResult,
 )
 
+_PACKAGE_NAME = "openconstraint-mcp"
+
+
+def _homepage_url() -> str | None:
+    """Return the project ``Homepage`` URL from package metadata, or ``None``.
+
+    The build populates ``Project-URL`` entries from ``pyproject.toml``'s
+    ``[project.urls]``, each formatted ``"<label>, <url>"`` — so the value
+    carries a leading space after the comma that must be stripped. Single
+    source of truth: switching to a dedicated site is a ``pyproject.toml`` edit
+    only. Returns ``None`` if the package metadata is absent (cosmetic field;
+    must not crash boot).
+    """
+    try:
+        entries = metadata.metadata(_PACKAGE_NAME).get_all("Project-URL") or []
+    except metadata.PackageNotFoundError:
+        return None
+    for entry in entries:
+        label, _, url = entry.partition(",")
+        if label.strip().lower() == "homepage":
+            return url.strip()
+    return None
+
+
+def _server_version() -> str:
+    """Return the installed package version, or ``"unknown"`` if unavailable."""
+    try:
+        return metadata.version(_PACKAGE_NAME)
+    except metadata.PackageNotFoundError:
+        return "unknown"
+
+
+def _log_boot_diagnostic() -> None:
+    """Print a one-time startup banner (version, runtime dir, install state).
+
+    Writes to ``stderr`` only: over stdio, ``stdout`` is the JSON-RPC channel,
+    so any stray write there corrupts the protocol. This only *reads* the
+    already-resolved runtime status — it never downloads or installs anything.
+    """
+    status = get_runtime_status()
+    lines = [
+        f"{_PACKAGE_NAME} {_server_version()}",
+        f"runtime dir: {status.runtime_dir}",
+    ]
+    if status.installed:
+        lines.append(f"runtime: installed ({status.minizinc_binary})")
+    else:
+        lines.append(f"runtime: NOT installed → run `{_PACKAGE_NAME} install-runtime`")
+    print("\n".join(lines), file=sys.stderr, flush=True)
+
+
+@asynccontextmanager
+async def _lifespan(server: FastMCP[Any]) -> AsyncIterator[None]:
+    """Server lifespan: emit the boot diagnostic on startup; no teardown."""
+    _log_boot_diagnostic()
+    yield
+
 
 def create_mcp_server() -> FastMCP:
     """Build a fresh FastMCP server and register all tools and prompts."""
-    mcp: FastMCP[Any] = FastMCP("openconstraint-mcp")
+    mcp: FastMCP[Any] = FastMCP(
+        "openconstraint-mcp",
+        instructions=MCP_SERVER_INSTRUCTIONS,
+        website_url=_homepage_url(),
+        lifespan=_lifespan,
+    )
 
     @mcp.tool(description=CHECK_RUNTIME_DESC)
     def check_runtime() -> RuntimeStatus:

@@ -1,12 +1,18 @@
 from __future__ import annotations
 
 import subprocess
+from importlib import metadata
 from pathlib import Path
 from typing import Any
 
 import pytest
 
-from openconstraint_mcp.server import create_mcp_server
+from openconstraint_mcp.server import (
+    _homepage_url,
+    _lifespan,
+    _server_version,
+    create_mcp_server,
+)
 
 
 @pytest.mark.asyncio
@@ -56,6 +62,37 @@ _UNSAT_CORE_STDOUT = (
     "Traces: model.mzn|4|12|4|20|;model.mzn|5|12|5|20|;"
     "redefinitions.mzn|10|1|10|5|\n"
 )
+
+
+def test_mcp_server_instructions_route_constraint_tasks() -> None:
+    mcp = create_mcp_server()
+    instructions = mcp.instructions or ""
+
+    for substring in (
+        "constraint programming",
+        "optimization",
+        "knapsack",
+        "solve_constraint_problem",
+        "check_minizinc_model",
+        "solve_minizinc_model",
+        "managed local MiniZinc runtime",
+        "bare PATH minizinc",
+    ):
+        assert substring in instructions
+
+
+def test_mcp_server_instructions_present_solution_in_problem_terms() -> None:
+    mcp = create_mcp_server()
+    instructions = mcp.instructions or ""
+
+    # The non-prompt fallback path must carry the same presentation contract as
+    # the solve_constraint_problem prompt: state the solution in the terms of
+    # the user's problem rather than dumping the raw JSON SolveResult, plus a
+    # statistics summary.
+    lower = instructions.lower()
+    assert "terms of the user's problem" in lower
+    assert "json" in lower
+    assert "statistics" in lower
 
 
 async def _get_prompt_text(prompt_name: str, arguments: dict[str, str]) -> str:
@@ -173,6 +210,23 @@ async def test_solve_constraint_problem_prompt_notes_inline_data_for_check_and_s
 
 
 @pytest.mark.asyncio
+async def test_solve_constraint_problem_prompt_routes_existing_files_to_file_tools() -> None:
+    text = await _get_prompt_text("solve_constraint_problem", {"problem": SAMPLE_PROBLEM})
+
+    # When the user already has MiniZinc files (.mzn + optional .dzn) on disk,
+    # the prompt should route to the path-based tools and pass paths — not the
+    # pasted file contents, which would break relative `include`s — validating
+    # before solving.
+    assert "check_minizinc_files" in text
+    assert "solve_minizinc_files" in text
+    assert "model_path" in text
+    assert ".dzn" in text or "data_path" in text
+    assert text.index("check_minizinc_files") < text.index("solve_minizinc_files"), (
+        "the file branch should check before it solves"
+    )
+
+
+@pytest.mark.asyncio
 async def test_solve_constraint_problem_prompt_timeout_branch_does_not_auto_solve() -> None:
     text = await _get_prompt_text("solve_constraint_problem", {"problem": SAMPLE_PROBLEM})
 
@@ -181,6 +235,144 @@ async def test_solve_constraint_problem_prompt_timeout_branch_does_not_auto_solv
     # user rather than exact prose: simplify, raise timeout_ms, or solve anyway.
     for keyword in ("timeout_ms", "simplify", "anyway"):
         assert keyword in text, f"timeout branch missing guidance: {keyword!r}"
+
+
+@pytest.mark.asyncio
+async def test_solve_constraint_problem_prompt_explains_result_fields() -> None:
+    text = await _get_prompt_text("solve_constraint_problem", {"problem": SAMPLE_PROBLEM})
+
+    # The explain step must guide the LLM to read the new deterministic fields.
+    # Keyword presence, not exact wording, to avoid brittleness. `timed_out` and
+    # `return_code` are new to the prompt, so they pin the new caveat rather than
+    # the pre-existing "timeout" mention in the validation branch.
+    assert "statistics" in text
+    assert "stdout" in text
+    assert any(keyword in text for keyword in ("timed_out", "return_code")), (
+        "explain step should note a timeout/return-code caveat"
+    )
+
+
+@pytest.mark.asyncio
+async def test_solve_constraint_problem_prompt_instructs_structured_result_presentation() -> None:
+    text = await _get_prompt_text("solve_constraint_problem", {"problem": SAMPLE_PROBLEM})
+
+    # The explain step must frame the final answer as a structured summary the
+    # client presents to the user, not just "interpret these fields". Pin the
+    # framing on a single line that names both presenting and structure, so the
+    # pre-existing "Present the complete MiniZinc model" line cannot satisfy it.
+    presentation_lines = [
+        line
+        for line in text.splitlines()
+        if "present" in line.lower() and "structured" in line.lower()
+    ]
+    assert presentation_lines, (
+        "explain step should instruct presenting a structured result summary"
+    )
+
+
+@pytest.mark.asyncio
+async def test_solve_constraint_problem_prompt_solution_block_is_status_conditioned() -> None:
+    text = await _get_prompt_text("solve_constraint_problem", {"problem": SAMPLE_PROBLEM})
+
+    # The solution must be shown as a block read verbatim from stdout, never
+    # paraphrased or inferred by the model.
+    assert "verbatim" in text
+
+    # Showing a solution is conditional on a solution-bearing status. The
+    # unsatisfiable/error/timeout branch must say there is no solution to show
+    # rather than fabricating one, so a line ties the two together.
+    no_solution_lines = [
+        line
+        for line in text.splitlines()
+        if "unsatisfiable" in line and "solution" in line
+    ]
+    assert no_solution_lines, (
+        "explain step should note unsat/error/timeout have no solution block to show"
+    )
+
+
+@pytest.mark.asyncio
+async def test_solve_constraint_problem_prompt_leads_with_result_not_workflow_narration() -> None:
+    text = await _get_prompt_text("solve_constraint_problem", {"problem": SAMPLE_PROBLEM})
+
+    # The user-facing answer must open with the result, not with MCP prompt,
+    # workflow, or tool names. Pin the directive on a single "lead with" line.
+    lead_lines = [line for line in text.splitlines() if "lead with" in line.lower()]
+    assert lead_lines, "explain step should tell the client to lead with the result"
+
+    lower = text.lower()
+    # The "do not narrate internal names" instruction and its escape hatch.
+    assert "narrat" in lower
+    assert "workflow" in lower
+    assert "implementation details" in lower
+
+
+@pytest.mark.asyncio
+async def test_solve_constraint_problem_prompt_requires_statistics_when_present() -> None:
+    text = await _get_prompt_text("solve_constraint_problem", {"problem": SAMPLE_PROBLEM})
+
+    # A real client (Codex) dropped the statistics summary because the prompt
+    # framed it as a soft, best-effort nicety. The directive must make a stats
+    # summary non-optional whenever the `statistics` map is non-empty. Pin the
+    # requirement on a single line so the soft "may be empty" caveat cannot
+    # satisfy it.
+    stats_required_lines = [
+        line
+        for line in text.splitlines()
+        if "statistics" in line.lower()
+        and ("required" in line.lower() or "do not omit" in line.lower())
+    ]
+    assert stats_required_lines, (
+        "explain step should require a statistics summary when the map is non-empty"
+    )
+
+
+@pytest.mark.asyncio
+async def test_solve_constraint_problem_prompt_avoids_repeated_headings() -> None:
+    text = await _get_prompt_text("solve_constraint_problem", {"problem": SAMPLE_PROBLEM})
+
+    # A real client (Claude Code) emitted the "Solver statistics" heading twice.
+    # The prompt must tell the client to use each heading at most once.
+    heading_lines = [
+        line
+        for line in text.splitlines()
+        if "heading" in line.lower()
+        and ("once" in line.lower() or "repeat" in line.lower())
+    ]
+    assert heading_lines, "presentation guidance should forbid repeating section headings"
+
+
+@pytest.mark.asyncio
+async def test_solve_constraint_problem_prompt_avoids_speculative_commentary() -> None:
+    text = await _get_prompt_text("solve_constraint_problem", {"problem": SAMPLE_PROBLEM})
+
+    # A real client (Claude Code) padded the default answer with value-density
+    # and greedy commentary. The prompt must discourage speculative algorithm
+    # commentary by default while leaving an escape hatch when the user asks.
+    commentary_lines = [
+        line
+        for line in text.splitlines()
+        if "commentary" in line.lower() or "speculat" in line.lower()
+    ]
+    assert commentary_lines, (
+        "presentation guidance should discourage speculative algorithm commentary"
+    )
+    assert "unless the user" in text.lower(), "the no-commentary default needs an escape hatch"
+
+
+@pytest.mark.asyncio
+async def test_solve_constraint_problem_prompt_offers_item_table_when_applicable() -> None:
+    text = await _get_prompt_text("solve_constraint_problem", {"problem": SAMPLE_PROBLEM})
+
+    # When the user problem supplies item-like data and the solution selects
+    # among it, the client should render a concise table/list of chosen items.
+    table_lines = [line for line in text.splitlines() if "table" in line.lower()]
+    assert table_lines, "presentation guidance should allow a table-style item summary"
+
+    lower = text.lower()
+    assert "item-like" in lower or "selected-item" in lower, (
+        "the item-table guidance should be conditioned on item-like data"
+    )
 
 
 class _FakeCompletedProcess:
@@ -242,7 +434,7 @@ async def test_solve_minizinc_model_happy_path(
 ) -> None:
     def _fake_run(*args: object, **kwargs: object) -> _FakeCompletedProcess:
         return _FakeCompletedProcess(
-            stdout="x = 3;\n----------\n==========\n",
+            stdout="x = 3;\n----------\n==========\n%%%mzn-stat: solveTime=0.01\n%%%mzn-stat-end\n",
             stderr="",
             returncode=0,
         )
@@ -258,6 +450,10 @@ async def test_solve_minizinc_model_happy_path(
     structured = _structured(result)
     assert structured["status"] == "optimal"
     assert structured["solver"] == "cp-sat"
+    assert structured["return_code"] == 0
+    assert structured["timed_out"] is False
+    # Parsed %%%mzn-stat: pairs flow through FastMCP structured content.
+    assert structured["statistics"] == {"solveTime": "0.01"}
 
 
 @pytest.mark.asyncio
@@ -611,7 +807,12 @@ async def test_solve_minizinc_files_happy_path(
     mcp = create_mcp_server()
     result = await mcp.call_tool("solve_minizinc_files", {"model_path": str(model_path)})
 
-    assert _structured(result)["status"] == "optimal"
+    structured = _structured(result)
+    assert structured["status"] == "optimal"
+    assert structured["return_code"] == 0
+    assert structured["timed_out"] is False
+    # The statistics field is exposed even when no stat lines were emitted.
+    assert structured["statistics"] == {}
 
 
 @pytest.mark.asyncio
@@ -705,3 +906,100 @@ async def test_solve_minizinc_files_runtime_missing_surfaces_actionable_error(
     message = str(exc_info.value)
     assert "install-runtime" in message
     assert "MiniZinc" in message
+
+
+# --- website_url metadata --------------------------------------------------
+
+
+def _expected_homepage_from_metadata() -> str | None:
+    """Parse the ``Homepage`` Project-URL the same way the server should.
+
+    Derived from live ``importlib.metadata`` so the test does not hardcode the
+    URL literal: when the dedicated homepage launches, only ``pyproject.toml``
+    changes and this expectation tracks it automatically.
+    """
+    for entry in metadata.metadata("openconstraint-mcp").get_all("Project-URL") or []:
+        label, _, url = entry.partition(",")
+        if label.strip().lower() == "homepage":
+            return url.strip()
+    return None
+
+
+def test_homepage_url_returns_declared_homepage() -> None:
+    url = _homepage_url()
+
+    assert url is not None
+    # Load-bearing: the comma-split leaves a leading space (' https://…'); this
+    # assertion fails if the parse forgets to strip, catching a shared bug.
+    assert url.startswith("https://")
+    assert url == _expected_homepage_from_metadata()
+
+
+def test_server_advertises_homepage_as_website_url() -> None:
+    assert create_mcp_server().website_url == _homepage_url()
+
+
+def test_homepage_url_none_when_metadata_missing(monkeypatch: pytest.MonkeyPatch) -> None:
+    def _raise(_name: str) -> object:
+        raise metadata.PackageNotFoundError("openconstraint-mcp")
+
+    monkeypatch.setattr("openconstraint_mcp.server.metadata.metadata", _raise)
+
+    assert _homepage_url() is None
+
+
+def test_server_version_unknown_when_metadata_missing(monkeypatch: pytest.MonkeyPatch) -> None:
+    def _raise(_name: str) -> str:
+        raise metadata.PackageNotFoundError("openconstraint-mcp")
+
+    monkeypatch.setattr("openconstraint_mcp.server.metadata.version", _raise)
+
+    assert _server_version() == "unknown"
+
+
+# --- lifespan boot diagnostic ----------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_boot_diagnostic_warns_when_runtime_missing(
+    fake_runtime_dir: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    async with _lifespan(create_mcp_server()):
+        pass
+
+    err = capsys.readouterr().err
+    assert _server_version() in err
+    assert str(fake_runtime_dir) in err
+    assert "NOT installed" in err
+    assert "install-runtime" in err
+
+
+@pytest.mark.asyncio
+async def test_boot_diagnostic_reports_installed_runtime(
+    fake_minizinc_binary: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    async with _lifespan(create_mcp_server()):
+        pass
+
+    err = capsys.readouterr().err
+    assert "installed" in err
+    assert str(fake_minizinc_binary) in err
+
+
+@pytest.mark.asyncio
+async def test_boot_diagnostic_writes_nothing_to_stdout(
+    fake_runtime_dir: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    # Over stdio, stdout is the JSON-RPC channel; the banner must never land
+    # there or it corrupts the protocol.
+    async with _lifespan(create_mcp_server()):
+        pass
+
+    assert capsys.readouterr().out == ""
+
+
+def test_lifespan_is_wired_into_server() -> None:
+    assert create_mcp_server().settings.lifespan is _lifespan

@@ -91,6 +91,9 @@ def test_solve_runs_real_path_from_parent(
 
     assert isinstance(result, SolveResult)
     assert result.status == "optimal"
+    # The path solve runner requests statistics too, symmetric with the inline
+    # solve_model (check/findMUS path runs assert its absence below).
+    assert "--statistics" in calls[0]["cmd"]
     # The managed binary ran on the resolved REAL path with cwd = its parent,
     # so a relative include resolves against the model's own directory.
     assert calls[0]["model_arg"] == str(model_path.resolve())
@@ -154,6 +157,7 @@ def test_check_passes_compile_flag_on_real_path(
     assert isinstance(result, CheckResult)
     assert result.status == "ok"
     assert "-c" in cmd
+    assert "--statistics" not in cmd
     assert cmd[-1] == str(model_path.resolve())
     assert calls[0]["kwargs"]["cwd"] == str(model_path.resolve().parent)
 
@@ -182,6 +186,7 @@ def test_find_unsat_core_filters_by_real_basename(
     cmd = calls[0]["cmd"]
     assert cmd[cmd.index("--solver") + 1] == FINDMUS_SOLVER
     assert "-c" not in cmd
+    assert "--statistics" not in cmd
     assert calls[0]["kwargs"]["cwd"] == str(model_path.resolve().parent)
 
 
