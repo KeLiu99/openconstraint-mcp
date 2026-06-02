@@ -75,6 +75,8 @@ def test_mcp_server_instructions_route_constraint_tasks() -> None:
         "solve_constraint_problem",
         "check_minizinc_model",
         "solve_minizinc_model",
+        "check_minizinc_files",
+        "solve_minizinc_files",
         "managed local MiniZinc runtime",
         "bare PATH minizinc",
     ):
