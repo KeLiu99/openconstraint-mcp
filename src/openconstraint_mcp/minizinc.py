@@ -446,7 +446,7 @@ def _merge_stderr(real_stderr: str, messages: Sequence[str]) -> str:
     already wrote to ``stderr`` so a double-reported message is not duplicated.
     With no new messages the real ``stderr`` is returned unchanged.
     """
-    extra = [m for m in messages if m and m not in real_stderr]
+    extra = [m for m in messages if m and m not in real_stderr.splitlines()]
     if not extra:
         return real_stderr
     base = real_stderr if real_stderr == "" or real_stderr.endswith("\n") else real_stderr + "\n"
@@ -456,7 +456,7 @@ def _merge_stderr(real_stderr: str, messages: Sequence[str]) -> str:
 def _resolve_status(
     stream_status: SolveStatus | None, *, has_solution: bool, returncode: int
 ) -> SolveStatus:
-    # The stream's own verdict wins when it gave one. Otherwise apply the
+    # The stream's own verdict wins when it gave one. Otherwise, apply the
     # return-code fallback: a solution with a clean exit is "satisfied" (the
     # single-`satisfy` case, which emits no status object), a non-zero exit is
     # "error", and an empty clean run is "unknown".
@@ -521,9 +521,8 @@ def _build_check_result(outcome: _RunOutcome, *, solver: str) -> CheckResult:
             stderr=outcome.stderr,
             elapsed_ms=outcome.elapsed_ms,
         )
-    # A pure `-c` compile emits no FlatZinc status markers, so the process
-    # return code is the whole signal here — unlike solve, do not route this
-    # through _parse_status.
+    # A pure `-c` compile emits no status object, so the process return code is
+    # the whole signal here — unlike solve, which classifies from the stream.
     status: CheckStatus = "ok" if outcome.returncode == 0 else "error"
     return CheckResult(
         status=status,
