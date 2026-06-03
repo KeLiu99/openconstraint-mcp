@@ -426,6 +426,11 @@ def _solution_obj(default: str, values: dict[str, Any]) -> dict[str, Any]:
     return {"type": "solution", "output": {"default": default, "raw": default, "json": values}}
 
 
+def _solution_obj_json_only(values: dict[str, Any]) -> dict[str, Any]:
+    """A solution object from a model with no explicit ``output`` item: ``json`` only."""
+    return {"type": "solution", "output": {"json": values}}
+
+
 def _structured(result: Any) -> dict[str, Any]:
     """Extract the structured-content dict from a FastMCP call_tool result.
 
@@ -533,6 +538,35 @@ async def test_solve_minizinc_model_happy_path(
     assert "Statistics:" in text
     assert "- solveTime: 0.01" in text
     assert '"statistics"' not in text
+
+
+@pytest.mark.asyncio
+async def test_solve_minizinc_model_shows_solution_when_model_has_no_output_item(
+    fake_minizinc_binary: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # A model with no explicit `output` item streams only the json section. The
+    # MCP-visible text must still carry a human solution block (not just status and
+    # statistics), so the solution never disappears from the model-visible content.
+    def _fake_run(*args: object, **kwargs: object) -> _FakeCompletedProcess:
+        return _FakeCompletedProcess(
+            stdout=_stream(_solution_obj_json_only({"x": 5, "_objective": 5})),
+            stderr="",
+            returncode=0,
+        )
+
+    monkeypatch.setattr("openconstraint_mcp.minizinc.subprocess.run", _fake_run)
+
+    mcp = create_mcp_server()
+    result = await mcp.call_tool(
+        "solve_minizinc_model",
+        {"model": "var 1..5: x;\nconstraint x > 2;\nsolve maximize x;"},
+    )
+
+    assert _structured(result)["solution"] == {"x": 5}
+    text = _content_text(result)
+    assert "Stdout:" in text
+    assert "x = 5" in text
 
 
 @pytest.mark.asyncio

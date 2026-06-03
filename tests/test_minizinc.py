@@ -387,6 +387,13 @@ def _solution_obj(default: str, values: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _solution_obj_json_only(values: dict[str, Any]) -> dict[str, Any]:
+    # A real model with no explicit `output` item: under `--output-mode json` the
+    # solution object carries only the `json` section (no `default`/`raw`), so the
+    # human stdout has to be synthesized from the variable map.
+    return {"type": "solution", "output": {"json": values}, "sections": ["json"]}
+
+
 # Optimization proven optimal: one solution, OPTIMAL_SOLUTION, then statistics.
 _STREAM_OPTIMAL = _stream(
     {"type": "statistics", "statistics": {"method": "maximize", "flatTime": 0.04}},
@@ -512,6 +519,24 @@ def test_parse_solve_stream_reconstructs_stdout_from_default_sections() -> None:
     assert _parse_solve_stream(_STREAM_SATISFY_ALL).stdout == "x=1 y=2\nx=1 y=3\nx=2 y=3\n"
 
 
+def test_parse_solve_stream_synthesizes_stdout_when_only_json_section() -> None:
+    # A model with no explicit `output` item emits a solution object carrying only
+    # the `json` section. The human stdout is synthesized from the variable map
+    # (with `_objective` stripped) so a real no-output solve still shows a solution
+    # instead of an empty stdout.
+    parsed = _parse_solve_stream(
+        _stream(
+            _solution_obj_json_only({"x": 5, "_objective": 5}),
+            {"type": "status", "status": "OPTIMAL_SOLUTION"},
+        )
+    )
+    assert parsed.solutions == [{"x": 5}]
+    assert parsed.objective == 5
+    assert parsed.stdout == "x = 5;\n"
+    # The internal objective artifact never leaks into the human text.
+    assert "_objective" not in parsed.stdout
+
+
 def test_parse_solve_stream_skips_truncated_final_line() -> None:
     # A hard timeout can cut the final object mid-line; the unparseable tail is
     # skipped and the fully-received solution/objective are kept.
@@ -606,6 +631,24 @@ def test_solve_model_happy_path_returns_satisfied(
     assert result.stderr == ""
     assert result.elapsed_ms >= 0
     assert len(calls) == 1
+
+
+def test_solve_model_synthesizes_human_stdout_when_model_has_no_output_item(
+    fake_minizinc_binary: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # A satisfy model with no explicit `output` item streams only the json section.
+    # The structured solution must still be paired with a human stdout block, so
+    # the solution does not vanish from the model-visible text.
+    stream = _stream(_solution_obj_json_only({"x": 3}))
+    _record_subprocess(monkeypatch, _FakeCompletedProcess(stdout=stream, stderr="", returncode=0))
+
+    result = solve_model("var 1..5: x;\nconstraint x > 2;\nsolve satisfy;")
+
+    assert result.status == "satisfied"
+    assert result.solution == {"x": 3}
+    assert result.solutions == [{"x": 3}]
+    assert result.stdout == "x = 3;\n"
 
 
 def test_solve_model_returns_structured_optimal_solution(

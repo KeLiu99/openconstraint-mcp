@@ -234,9 +234,13 @@ in an **inline-source** form (below) and a **path-based file** sibling
     `status="timeout"`, not a new independent solver signal.
   - `stdout: str` — the human-readable solution text, **reconstructed** from
     the solve stream's `default` output sections (one solution's `output`
-    block per block). Solve runs use MiniZinc's `--json-stream` transport, so
-    this is the rendered solution text, not the literal process bytes (which
-    are line-delimited JSON); the raw stream is never surfaced.
+    block per block). When a model declares no explicit `output` item the
+    stream carries only the `json` section, so each solution's block is instead
+    synthesized as `name = <value>;` lines from its variable map (objective
+    excluded) — the solution is shown either way. Solve runs use MiniZinc's
+    `--json-stream` transport, so this is the rendered solution text, not the
+    literal process bytes (which are line-delimited JSON); the raw stream is
+    never surfaced.
   - `stderr: str` — the run's **diagnostic channel**: the managed process's
     real stderr plus any solve-stream `error`/`warning` messages folded in
     (deduplicated). `--json-stream` may route model/solver diagnostics into

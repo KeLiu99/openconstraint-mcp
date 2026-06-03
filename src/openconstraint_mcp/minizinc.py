@@ -81,7 +81,10 @@ class _StreamParse(NamedTuple):
     solutions: list[dict[str, Any]]
     objective: int | float | None
     statistics: dict[str, str]
-    stdout: str  # reconstructed human text: the joined `output.default` sections
+    # Reconstructed human text: each solution's `output.default` section, or — when
+    # the model has no explicit `output` item, so the stream carries only `json` —
+    # a synthesized rendering of that solution's variable map.
+    stdout: str
     messages: list[str]  # error/warning diagnostics to surface into `stderr`
 
 
@@ -113,13 +116,25 @@ def _map_status(raw: str, *, has_solution: bool) -> SolveStatus:
     return "satisfied" if has_solution else "unknown"
 
 
-def _reconstruct_stdout(defaults: Sequence[str]) -> str:
-    # Rebuild the human solution text from each solution's `output.default`
-    # section. Each block is made newline-terminated so consecutive solutions stay
-    # visually separated; a block already ending in a newline is left as-is (no
-    # double blank lines). This restores the "solution text lives in stdout"
-    # contract the display path and prompt rely on, now sourced from the stream.
-    return "".join(block if block.endswith("\n") else block + "\n" for block in defaults)
+def _render_json_solution(values: dict[str, Any]) -> str:
+    # Render a solution's `json` variable map as MiniZinc-style `name = <value>;`
+    # lines, one per variable. Used as the human-text fallback when a solution
+    # object has no `default` section — i.e. the model has no explicit `output`
+    # item, so under `--output-mode json` the stream emits only the `json` section.
+    # `_objective` is already stripped by the caller, matching the explicit-output
+    # `default` text (which `--output-objective` does not augment).
+    return "".join(f"{key} = {json.dumps(value)};\n" for key, value in values.items())
+
+
+def _reconstruct_stdout(blocks: Sequence[str]) -> str:
+    # Rebuild the human solution text from each solution's human block — its
+    # `output.default` section, or a `_render_json_solution` rendering when no
+    # `default` is present. Each block is made newline-terminated so consecutive
+    # solutions stay visually separated; a block already ending in a newline is
+    # left as-is (no double blank lines). This restores the "solution text lives in
+    # stdout" contract the display path and prompt rely on, now sourced from the
+    # stream regardless of whether the model declares an explicit `output` item.
+    return "".join(block if block.endswith("\n") else block + "\n" for block in blocks)
 
 
 def _parse_solve_stream(stdout: str) -> _StreamParse:
@@ -132,7 +147,7 @@ def _parse_solve_stream(stdout: str) -> _StreamParse:
     (None for satisfaction, where no solution carries one).
     """
     solutions: list[dict[str, Any]] = []
-    defaults: list[str] = []
+    blocks: list[str] = []
     statistics: dict[str, str] = {}
     messages: list[str] = []
     objective: int | float | None = None
@@ -154,16 +169,22 @@ def _parse_solve_stream(stdout: str) -> _StreamParse:
             output = obj.get("output")
             if not isinstance(output, dict):
                 continue
+            stripped: dict[str, Any] | None = None
             values = output.get("json")
             if isinstance(values, dict):
-                values = dict(values)
-                obj_val = values.pop("_objective", None)
+                stripped = dict(values)
+                obj_val = stripped.pop("_objective", None)
                 if isinstance(obj_val, (int, float)) and not isinstance(obj_val, bool):
                     objective = obj_val
-                solutions.append(values)
+                solutions.append(stripped)
             default = output.get("default")
             if isinstance(default, str):
-                defaults.append(default)
+                blocks.append(default)
+            elif stripped:
+                # No `default` section: the model has no explicit `output` item, so
+                # the solution arrives only as the `json` map. Synthesize a human
+                # block from it so the reconstructed stdout still shows the solution.
+                blocks.append(_render_json_solution(stripped))
         elif obj_type == "status":
             raw = obj.get("status")
             if isinstance(raw, str):
@@ -192,7 +213,7 @@ def _parse_solve_stream(stdout: str) -> _StreamParse:
         solutions=solutions,
         objective=objective,
         statistics=statistics,
-        stdout=_reconstruct_stdout(defaults),
+        stdout=_reconstruct_stdout(blocks),
         messages=messages,
     )
 

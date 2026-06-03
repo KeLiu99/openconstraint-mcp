@@ -137,6 +137,11 @@ def test_solve_model_optimization_returns_structured_solution() -> None:
     # `solutions` preserves emission order and ends at the best (== `solution`).
     assert result.solutions
     assert result.solutions[-1] == result.solution
+    # This model has no explicit `output` item, so the stream carries only the json
+    # section. The human stdout must still be synthesized so the MCP-visible result
+    # is never solution-less; the `_objective` artifact stays out of it.
+    assert "x = 5" in result.stdout
+    assert "_objective" not in result.stdout
 
 
 def test_solve_model_satisfaction_returns_solution() -> None:
@@ -149,6 +154,10 @@ def test_solve_model_satisfaction_returns_solution() -> None:
     assert result.solution is not None
     assert result.solution["x"] > 2
     assert result.solutions and result.solutions[-1] == result.solution
+    # No explicit `output` item → json-only solution object; the synthesized human
+    # stdout still names the variable, so the solution does not vanish from the
+    # model-visible text.
+    assert f"x = {result.solution['x']}" in result.stdout
 
 
 def test_check_model_honors_inline_data() -> None:
