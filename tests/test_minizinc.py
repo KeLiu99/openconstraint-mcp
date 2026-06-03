@@ -706,6 +706,106 @@ def test_solve_model_command_shape(
     assert kwargs["cwd"] == str(model_path.parent)
 
 
+# --- Phase 2: solver/search-control flags ----------------------------------
+
+
+def _solve_cmd_with_flags(monkeypatch: pytest.MonkeyPatch, **flags: Any) -> list[str]:
+    """Solve a trivial model with the given flags; return the argv it built."""
+    calls = _record_subprocess(
+        monkeypatch, _FakeCompletedProcess(stdout=_STREAM_SATISFY, stderr="", returncode=0)
+    )
+    solve_model("var 1..5: x;\nsolve satisfy;", **flags)
+    return calls[0]["args"][0]
+
+
+def test_solve_model_free_search_adds_f_flag(
+    fake_minizinc_binary: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    assert "-f" in _solve_cmd_with_flags(monkeypatch, free_search=True)
+
+
+def test_solve_model_all_solutions_adds_a_flag(
+    fake_minizinc_binary: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    assert "-a" in _solve_cmd_with_flags(monkeypatch, all_solutions=True)
+
+
+def test_solve_model_parallel_adds_valued_p_flag(
+    fake_minizinc_binary: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    cmd = _solve_cmd_with_flags(monkeypatch, parallel=4)
+    assert cmd[cmd.index("-p") + 1] == "4"
+
+
+def test_solve_model_num_solutions_adds_valued_n_flag(
+    fake_minizinc_binary: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    cmd = _solve_cmd_with_flags(monkeypatch, num_solutions=3)
+    assert cmd[cmd.index("-n") + 1] == "3"
+
+
+@pytest.mark.parametrize("seed", [42, 0, -5])
+def test_solve_model_random_seed_adds_valued_r_flag_for_any_int(
+    seed: int, fake_minizinc_binary: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # `random_seed` accepts any int (including 0 and negatives — no validation).
+    cmd = _solve_cmd_with_flags(monkeypatch, random_seed=seed)
+    assert cmd[cmd.index("-r") + 1] == str(seed)
+
+
+def test_solve_model_default_flags_reproduce_phase1_argv(
+    fake_minizinc_binary: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # With no flags set, the solve argv carries only the json-stream transport
+    # args — none of the search-control tokens — so a default solve is identical
+    # to the Phase-1 invocation.
+    cmd = _solve_cmd_with_flags(monkeypatch)
+    assert not ({"-f", "-p", "-r", "-a", "-n"} & set(cmd))
+
+
+def test_solve_model_combined_flags_all_appear_alongside_transport(
+    fake_minizinc_binary: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    cmd = _solve_cmd_with_flags(
+        monkeypatch,
+        free_search=True,
+        parallel=2,
+        random_seed=7,
+        all_solutions=True,
+        num_solutions=5,
+    )
+    assert "-f" in cmd and "-a" in cmd
+    assert cmd[cmd.index("-p") + 1] == "2"
+    assert cmd[cmd.index("-r") + 1] == "7"
+    assert cmd[cmd.index("-n") + 1] == "5"
+    # The transport args are untouched by the search-control flags.
+    assert "--json-stream" in cmd and "--statistics" in cmd
+
+
+@pytest.mark.parametrize("bad", [0, -1])
+def test_solve_model_rejects_non_positive_parallel(
+    bad: int, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def _fail_if_called(*args: Any, **kwargs: Any) -> Any:
+        raise AssertionError("subprocess.run must not be invoked for bad parallel")
+
+    monkeypatch.setattr("openconstraint_mcp.minizinc.subprocess.run", _fail_if_called)
+    with pytest.raises(ValueError, match="parallel"):
+        solve_model("solve satisfy;", parallel=bad)
+
+
+@pytest.mark.parametrize("bad", [0, -1])
+def test_solve_model_rejects_non_positive_num_solutions(
+    bad: int, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def _fail_if_called(*args: Any, **kwargs: Any) -> Any:
+        raise AssertionError("subprocess.run must not be invoked for bad num_solutions")
+
+    monkeypatch.setattr("openconstraint_mcp.minizinc.subprocess.run", _fail_if_called)
+    with pytest.raises(ValueError, match="num_solutions"):
+        solve_model("solve satisfy;", num_solutions=bad)
+
+
 def test_solve_model_forwards_inline_data_positionally(
     fake_minizinc_binary: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -1071,10 +1171,11 @@ def test_check_model_command_shape(
     timeout_idx = cmd.index("--time-limit")
     assert cmd[timeout_idx + 1] == "30000"
     assert "-c" in cmd
-    # Statistics and the json-stream transport are solve-only; a compile-check
-    # must request neither.
+    # Statistics, the json-stream transport, and the solve-only search-control
+    # flags are never requested by a compile-check.
     assert "--statistics" not in cmd
     assert "--json-stream" not in cmd
+    assert not ({"-f", "-p", "-r", "-a", "-n"} & set(cmd))
 
     model_path = Path(cmd[-1])
     assert model_path.suffix == ".mzn"
@@ -1286,10 +1387,11 @@ def test_find_unsat_core_command_shape(
     assert cmd[solver_idx + 1] == FINDMUS_SOLVER
     assert cmd[timeout_idx + 1] == str(DEFAULT_UNSAT_CORE_TIMEOUT_MS)
     assert "-c" not in cmd
-    # Statistics and the json-stream transport are solve-only; the findMUS path
-    # must request neither.
+    # Statistics, the json-stream transport, and the solve-only search-control
+    # flags are never requested by the findMUS path.
     assert "--statistics" not in cmd
     assert "--json-stream" not in cmd
+    assert not ({"-f", "-p", "-r", "-a", "-n"} & set(cmd))
     assert calls[0]["model_path_existed"]
     assert calls[0]["model_contents"] == _UNSAT_CORE_MODEL
     assert kwargs["cwd"] == str(model_path.parent)

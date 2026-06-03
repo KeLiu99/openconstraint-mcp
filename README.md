@@ -219,6 +219,24 @@ in an **inline-source** form (below) and a **path-based file** sibling
   - `timeout_ms: int = 30000` — solving budget in milliseconds. Must be
     strictly positive. `0` is **not** "no timeout" — it is a validation
     error. Pass a real budget, or omit the argument to get the default.
+  - `free_search: bool = False` — when true, passes `-f`: the solver may
+    ignore the model's search annotations and use its own search strategy.
+    This means "search freely", **not** "no search"; its effect is
+    solver-dependent (large for Chuffed's LCG, often minor for CP-SAT).
+  - `parallel: int | None = None` — when set, passes `-p <n>` to request `n`
+    parallel search threads. Must be `>= 1`.
+  - `random_seed: int | None = None` — when set, passes `-r <n>` to seed the
+    solver's randomization. Any int is accepted.
+  - `all_solutions: bool = False` — when true, passes `-a`: enumerate every
+    solution (satisfaction) or the optimization improving-sequence, all
+    captured in order in `solutions`.
+  - `num_solutions: int | None = None` — when set, passes `-n <n>` to stop
+    after `n` solutions. Must be `>= 1`; satisfaction-oriented (MiniZinc's
+    own scope).
+
+  All five search controls are optional and **solve-only** (not on the check
+  or findMUS tools); with none set, the invocation is byte-identical to the
+  default solve.
 
   Returns a `SolveResult` with fields:
 
@@ -367,6 +385,11 @@ unchanged and remain the right choice for ephemeral, isolated text workflows.
   which always uses findMUS).
 - `timeout_ms: int = 30000` — same semantics as the inline tools; must be
   strictly positive.
+
+`solve_minizinc_files` additionally accepts the same optional, solve-only
+search controls as `solve_minizinc_model` — `free_search`, `parallel`,
+`random_seed`, `all_solutions`, and `num_solutions` (see above for semantics
+and defaults).
 
 **Includes (MiniZinc CLI style).** The file tools run the managed binary on the
 real `model_path` with the working directory set to the model's own directory,

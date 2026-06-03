@@ -160,6 +160,41 @@ def test_solve_model_satisfaction_returns_solution() -> None:
     assert f"x = {result.solution['x']}" in result.stdout
 
 
+# --- Phase 2: solver/search-control flags ----------------------------------
+
+# `x < y` over 1..3 has exactly three solutions: (1,2), (1,3), (2,3).
+_ALL_SOLUTIONS_MODEL = "var 1..3: x;\nvar 1..3: y;\nconstraint x < y;\nsolve satisfy;\n"
+
+
+def test_solve_model_all_solutions_enumerates_multiple() -> None:
+    result = solve_model(_ALL_SOLUTIONS_MODEL, all_solutions=True)
+
+    # `-a` enumerates every solution and the stream ends in ALL_SOLUTIONS, which
+    # maps to `satisfied`; `solution` is the last enumerated entry of `solutions`.
+    assert result.status == "satisfied"
+    assert len(result.solutions) >= 2
+    assert result.solution == result.solutions[-1]
+    assert result.objective is None
+
+
+def test_solve_model_random_seed_runs_cleanly() -> None:
+    # `random_seed` is accepted and the solve completes; the seed effect is
+    # solver-internal, so assert only a clean satisfied result.
+    result = solve_model("var 1..5: x;\nconstraint x > 2;\nsolve satisfy;", random_seed=12345)
+
+    assert result.status == "satisfied"
+    assert result.solution is not None
+
+
+def test_solve_model_parallel_runs_cleanly() -> None:
+    # `parallel=2` requests two search threads; assert it solves, not a specific
+    # threading effect (solver-dependent).
+    result = solve_model("var 1..5: x;\nconstraint x > 2;\nsolve satisfy;", parallel=2)
+
+    assert result.status == "satisfied"
+    assert result.solution is not None
+
+
 def test_check_model_honors_inline_data() -> None:
     # Without data, `var 1..n` has an unbound domain and the model cannot
     # flatten — a clean `ok` proves the data file was read.

@@ -614,15 +614,67 @@ def find_unsat_core(
     return _build_unsat_core_result(outcome, model)
 
 
+def _solve_extra_args(
+    *,
+    free_search: bool,
+    parallel: int | None,
+    random_seed: int | None,
+    all_solutions: bool,
+    num_solutions: int | None,
+) -> tuple[str, ...]:
+    """Build the solve ``extra_args``: the json-stream transport plus any
+    optional solver/search-control flags.
+
+    Validates the valued numeric flags (``parallel`` / ``num_solutions`` must be
+    ``>= 1``). With every flag at its default the result is exactly
+    ``_SOLVE_STREAM_ARGS``, so a default solve is byte-identical to the
+    transport-only invocation. ``free_search`` -> ``-f``; ``parallel`` ->
+    ``-p N``; ``random_seed`` -> ``-r N`` (any int); ``all_solutions`` ->
+    ``-a``; ``num_solutions`` -> ``-n N``. Flags are appended after the
+    transport args; MiniZinc is order-insensitive among them.
+    """
+    if parallel is not None and parallel < 1:
+        raise ValueError("parallel must be >= 1")
+    if num_solutions is not None and num_solutions < 1:
+        raise ValueError("num_solutions must be >= 1")
+    flags: list[str] = []
+    if free_search:
+        flags.append("-f")
+    if parallel is not None:
+        flags += ["-p", str(parallel)]
+    if random_seed is not None:
+        flags += ["-r", str(random_seed)]
+    if all_solutions:
+        flags.append("-a")
+    if num_solutions is not None:
+        flags += ["-n", str(num_solutions)]
+    return (*_SOLVE_STREAM_ARGS, *flags)
+
+
 def solve_model(
     model: str,
     *,
     solver: str = DEFAULT_SOLVER,
     data: str | None = None,
     timeout_ms: int = DEFAULT_SOLVE_TIMEOUT_MS,
+    free_search: bool = False,
+    parallel: int | None = None,
+    random_seed: int | None = None,
+    all_solutions: bool = False,
+    num_solutions: int | None = None,
 ) -> SolveResult:
     outcome = _run_managed_minizinc(
-        model, solver=solver, timeout_ms=timeout_ms, extra_args=_SOLVE_STREAM_ARGS, data=data
+        model,
+        solver=solver,
+        timeout_ms=timeout_ms,
+        extra_args=_solve_extra_args(
+            free_search=free_search,
+            parallel=parallel,
+            random_seed=random_seed,
+            all_solutions=all_solutions,
+            num_solutions=num_solutions,
+        ),
+        data=data,
     )
     return _build_solve_result(outcome, solver=solver)
 
@@ -732,20 +784,32 @@ def solve_model_path(
     solver: str = DEFAULT_SOLVER,
     data_path: Path | None = None,
     timeout_ms: int = DEFAULT_SOLVE_TIMEOUT_MS,
+    free_search: bool = False,
+    parallel: int | None = None,
+    random_seed: int | None = None,
+    all_solutions: bool = False,
+    num_solutions: int | None = None,
 ) -> SolveResult:
     """Solve a MiniZinc model read from ``model_path`` via the managed runtime.
 
     Runs the managed binary on the real ``model_path`` with ``cwd`` = its
     parent, like normal MiniZinc CLI usage, so a relative ``include`` resolves
     against the model's own directory. Returns the inline tool's ``SolveResult``
-    shape.
+    shape. The optional solver/search-control flags behave exactly as in
+    ``solve_model`` (see ``_solve_extra_args``).
     """
     model_path, data_path = _validate_model_data_paths(model_path, data_path)
     outcome = _run_managed_minizinc_paths(
         model_path,
         solver=solver,
         timeout_ms=timeout_ms,
-        extra_args=_SOLVE_STREAM_ARGS,
+        extra_args=_solve_extra_args(
+            free_search=free_search,
+            parallel=parallel,
+            random_seed=random_seed,
+            all_solutions=all_solutions,
+            num_solutions=num_solutions,
+        ),
         data_path=data_path,
     )
     return _build_solve_result(outcome, solver=solver)
