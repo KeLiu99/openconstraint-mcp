@@ -494,7 +494,6 @@ async def test_solve_minizinc_model_tool_is_listed() -> None:
         "parallel",
         "random_seed",
         "all_solutions",
-        "num_solutions",
     } <= set(properties.keys())
 
 
@@ -716,7 +715,6 @@ async def test_solve_minizinc_model_forwards_search_flags_to_runtime(
             "parallel": 2,
             "random_seed": 7,
             "all_solutions": True,
-            "num_solutions": 5,
         },
     )
 
@@ -724,7 +722,6 @@ async def test_solve_minizinc_model_forwards_search_flags_to_runtime(
     assert "-f" in cmd and "-a" in cmd
     assert cmd[cmd.index("-p") + 1] == "2"
     assert cmd[cmd.index("-r") + 1] == "7"
-    assert cmd[cmd.index("-n") + 1] == "5"
 
 
 @pytest.mark.asyncio
@@ -986,7 +983,7 @@ async def test_file_tools_are_listed_with_expected_properties() -> None:
 
     # Search-control flags are solve-only at the MCP surface: present on the
     # solve file tool, absent from the compile-check file tool.
-    _search_flags = {"free_search", "parallel", "random_seed", "all_solutions", "num_solutions"}
+    _search_flags = {"free_search", "parallel", "random_seed", "all_solutions"}
     solve_files_props = by_name["solve_minizinc_files"].inputSchema.get("properties", {})
     assert _search_flags <= set(solve_files_props.keys())
     check_files_props = by_name["check_minizinc_files"].inputSchema.get("properties", {})

@@ -737,13 +737,6 @@ def test_solve_model_parallel_adds_valued_p_flag(
     assert cmd[cmd.index("-p") + 1] == "4"
 
 
-def test_solve_model_num_solutions_adds_valued_n_flag(
-    fake_minizinc_binary: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    cmd = _solve_cmd_with_flags(monkeypatch, num_solutions=3)
-    assert cmd[cmd.index("-n") + 1] == "3"
-
-
 @pytest.mark.parametrize("seed", [42, 0, -5])
 def test_solve_model_random_seed_adds_valued_r_flag_for_any_int(
     seed: int, fake_minizinc_binary: Path, monkeypatch: pytest.MonkeyPatch
@@ -760,7 +753,7 @@ def test_solve_model_default_flags_reproduce_phase1_argv(
     # args — none of the search-control tokens — so a default solve is identical
     # to the Phase-1 invocation.
     cmd = _solve_cmd_with_flags(monkeypatch)
-    assert not ({"-f", "-p", "-r", "-a", "-n"} & set(cmd))
+    assert not ({"-f", "-p", "-r", "-a"} & set(cmd))
 
 
 def test_solve_model_combined_flags_all_appear_alongside_transport(
@@ -772,12 +765,10 @@ def test_solve_model_combined_flags_all_appear_alongside_transport(
         parallel=2,
         random_seed=7,
         all_solutions=True,
-        num_solutions=5,
     )
     assert "-f" in cmd and "-a" in cmd
     assert cmd[cmd.index("-p") + 1] == "2"
     assert cmd[cmd.index("-r") + 1] == "7"
-    assert cmd[cmd.index("-n") + 1] == "5"
     # The transport args are untouched by the search-control flags.
     assert "--json-stream" in cmd and "--statistics" in cmd
 
@@ -792,18 +783,6 @@ def test_solve_model_rejects_non_positive_parallel(
     monkeypatch.setattr("openconstraint_mcp.minizinc.subprocess.run", _fail_if_called)
     with pytest.raises(ValueError, match="parallel"):
         solve_model("solve satisfy;", parallel=bad)
-
-
-@pytest.mark.parametrize("bad", [0, -1])
-def test_solve_model_rejects_non_positive_num_solutions(
-    bad: int, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    def _fail_if_called(*args: Any, **kwargs: Any) -> Any:
-        raise AssertionError("subprocess.run must not be invoked for bad num_solutions")
-
-    monkeypatch.setattr("openconstraint_mcp.minizinc.subprocess.run", _fail_if_called)
-    with pytest.raises(ValueError, match="num_solutions"):
-        solve_model("solve satisfy;", num_solutions=bad)
 
 
 def test_solve_model_forwards_inline_data_positionally(
@@ -1175,7 +1154,7 @@ def test_check_model_command_shape(
     # flags are never requested by a compile-check.
     assert "--statistics" not in cmd
     assert "--json-stream" not in cmd
-    assert not ({"-f", "-p", "-r", "-a", "-n"} & set(cmd))
+    assert not ({"-f", "-p", "-r", "-a"} & set(cmd))
 
     model_path = Path(cmd[-1])
     assert model_path.suffix == ".mzn"
@@ -1391,7 +1370,7 @@ def test_find_unsat_core_command_shape(
     # flags are never requested by the findMUS path.
     assert "--statistics" not in cmd
     assert "--json-stream" not in cmd
-    assert not ({"-f", "-p", "-r", "-a", "-n"} & set(cmd))
+    assert not ({"-f", "-p", "-r", "-a"} & set(cmd))
     assert calls[0]["model_path_existed"]
     assert calls[0]["model_contents"] == _UNSAT_CORE_MODEL
     assert kwargs["cwd"] == str(model_path.parent)

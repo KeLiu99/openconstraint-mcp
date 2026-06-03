@@ -195,6 +195,15 @@ def test_solve_model_parallel_runs_cleanly() -> None:
     assert result.solution is not None
 
 
+def test_solve_model_free_search_runs_cleanly() -> None:
+    # `free_search=True` lets the solver use its own search; assert only that the
+    # default managed solver accepts the flag and solves.
+    result = solve_model("var 1..5: x;\nconstraint x > 2;\nsolve satisfy;", free_search=True)
+
+    assert result.status == "satisfied"
+    assert result.solution is not None
+
+
 def test_check_model_honors_inline_data() -> None:
     # Without data, `var 1..n` has an unbound domain and the model cannot
     # flatten — a clean `ok` proves the data file was read.

@@ -53,10 +53,8 @@ SOLVE_MINIZINC_MODEL_DESC = (
     "of the model's search annotations — solver-dependent, not 'no search'); "
     "`parallel` (int >= 1 -> `-p`: parallel search threads); `random_seed` "
     "(int -> `-r`); `all_solutions` (bool -> `-a`: enumerate all solutions, "
-    "or the optimization improving-sequence, into `solutions`); "
-    "`num_solutions` (int >= 1 -> `-n`: stop after N solutions, "
-    "satisfaction-oriented). `structuredContent` carries the complete "
-    "SolveResult."
+    "or the optimization improving-sequence, into `solutions`). "
+    "`structuredContent` carries the complete SolveResult."
 )
 
 CHECK_MINIZINC_MODEL_DESC = (
@@ -122,8 +120,7 @@ SOLVE_MINIZINC_FILES_DESC = (
     "non-empty, with an explicit final-answer requirement to copy the entire "
     "section rather than summarizing selected fields. Accepts the same "
     "optional solver/search controls as `solve_minizinc_model` "
-    "(`free_search`, `parallel`, `random_seed`, `all_solutions`, "
-    "`num_solutions`)."
+    "(`free_search`, `parallel`, `random_seed`, `all_solutions`)."
 )
 
 FIND_UNSAT_CORE_FILES_DESC = (
