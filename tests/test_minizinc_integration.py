@@ -112,13 +112,52 @@ _ACCEPTED_STAT_KEYS = {"flatTime", "method", "paths", "solveTime", "failures"}
 def test_solve_model_emits_statistics() -> None:
     result = solve_model("var 1..5: x;\nconstraint x > 2;\nsolve satisfy;")
 
-    # Status is still classified correctly despite the injected stat lines.
+    # Status is classified from the stream, not from stdout markers.
     assert result.status in {"satisfied", "optimal"}
-    # `--statistics` took effect and the runner did not strip the lines out.
-    assert "%%%mzn-stat:" in result.stdout
-    # The stat block parsed into the structured view with a recognizable key.
+    # `--statistics` makes the {"type":"statistics"} stream objects appear; they
+    # parse into the structured view with a recognizable key.
     assert result.statistics
     assert _ACCEPTED_STAT_KEYS & result.statistics.keys()
+    # The json-stream transport keeps raw stat lines out of the reconstructed
+    # human stdout — statistics are sibling stream objects, not output text.
+    assert "%%%mzn-stat:" not in result.stdout
+
+
+def test_solve_model_optimization_returns_structured_solution() -> None:
+    # Unique-optimum maximization: `x` is forced to 5, so both the objective and
+    # the solution variables are deterministic and the stream reports
+    # OPTIMAL_SOLUTION — the Phase-1 single-solution structured-solve smoke.
+    result = solve_model("var 1..5: x;\nconstraint x > 2;\nsolve maximize x;")
+
+    assert result.status == "optimal"
+    assert result.objective == 5
+    # The structured solution carries the model variable with _objective stripped.
+    assert result.solution == {"x": 5}
+    assert "_objective" not in result.solution
+    # `solutions` preserves emission order and ends at the best (== `solution`).
+    assert result.solutions
+    assert result.solutions[-1] == result.solution
+    # This model has no explicit `output` item, so the stream carries only the json
+    # section. The human stdout must still be synthesized so the MCP-visible result
+    # is never solution-less; the `_objective` artifact stays out of it.
+    assert "x = 5" in result.stdout
+    assert "_objective" not in result.stdout
+
+
+def test_solve_model_satisfaction_returns_solution() -> None:
+    result = solve_model("var 1..5: x;\nconstraint x > 2;\nsolve satisfy;")
+
+    # A single `satisfy` emits a solution but no status object → satisfied, and a
+    # satisfaction model carries no objective.
+    assert result.status == "satisfied"
+    assert result.objective is None
+    assert result.solution is not None
+    assert result.solution["x"] > 2
+    assert result.solutions and result.solutions[-1] == result.solution
+    # No explicit `output` item → json-only solution object; the synthesized human
+    # stdout still names the variable, so the solution does not vanish from the
+    # model-visible text.
+    assert f"x = {result.solution['x']}" in result.stdout
 
 
 def test_check_model_honors_inline_data() -> None:

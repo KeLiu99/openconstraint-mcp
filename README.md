@@ -232,23 +232,40 @@ in an **inline-source** form (below) and a **path-based file** sibling
   - `timed_out: bool` — `true` when the subprocess wall-clock cap fired. This
     is explicit process-timeout metadata; today it is redundant with
     `status="timeout"`, not a new independent solver signal.
-  - `stdout: str` — the runtime's raw stdout (solution lines and separator
-    markers from the model's `output` block). Solve runs pass MiniZinc's
-    `--statistics`, so `stdout` also carries `%`-comment `%%%mzn-stat:` lines
-    that a baseline run would not emit.
-  - `stderr: str` — the runtime's raw stderr (compile, type, and solver
-    errors land here).
+  - `stdout: str` — the human-readable solution text, **reconstructed** from
+    the solve stream's `default` output sections (one solution's `output`
+    block per block). When a model declares no explicit `output` item the
+    stream carries only the `json` section, so each solution's block is instead
+    synthesized as `name = <value>;` lines from its variable map (objective
+    excluded) — the solution is shown either way. Solve runs use MiniZinc's
+    `--json-stream` transport, so this is the rendered solution text, not the
+    literal process bytes (which are line-delimited JSON); the raw stream is
+    never surfaced.
+  - `stderr: str` — the run's **diagnostic channel**: the managed process's
+    real stderr plus any solve-stream `error`/`warning` messages folded in
+    (deduplicated). `--json-stream` may route model/solver diagnostics into
+    the stdout stream as error objects, so they are collected here regardless
+    of channel — read `stderr` for what went wrong.
   - `elapsed_ms: int` — wall-clock duration of the subprocess call.
-  - `statistics: dict[str, str]` — best-effort raw `%%%mzn-stat:` key/value
-    pairs parsed from `stdout` (values kept verbatim, not coerced). May be
-    `{}` when none were emitted; the key set is solver- and version-defined,
-    **not** a stable contract; raw `stdout` stays authoritative. It is a
-    **non-authenticated** view: `stdout` is one stream, so a model's `output`
-    block can print `%%%mzn-stat:`-shaped lines that land in this dict — do
-    not treat it as tamper-proof.
+  - `solution: dict[str, Any] | None` — the best/last solution as a
+    variable-name → value map (the stream's `json` section, model variables
+    only; the objective is reported separately, not folded in). `null` when
+    no solution was produced.
+  - `solutions: list[dict[str, Any]]` — every emitted solution in order (the
+    optimization improving-sequence, or an `all_solutions` enumeration). Its
+    last entry is `solution`; `[]` when none.
+  - `objective: int | float | None` — the best objective, taken from the last
+    solution. `null` for pure-satisfaction problems and when no solution was
+    produced.
+  - `statistics: dict[str, str]` — best-effort solver statistics, merged from
+    the stream's `statistics` objects (typed values stringified, last-wins on
+    duplicate keys). May be `{}` when none were emitted; the key set is
+    solver- and version-defined, **not** a stable contract. Unlike the prior
+    stdout scrape, these are **driver-emitted** sibling stream objects, so a
+    model's `output` block can no longer forge them.
 
   The MCP response also includes model-visible text content with status,
-  solver metadata, raw stdout/stderr, and a `Statistics:` section whenever
+  solver metadata, stdout/stderr, and a `Statistics:` section whenever
   the parsed `statistics` map is non-empty. That text includes an explicit
   final-answer requirement telling the client's LLM not to omit the section.
   `structuredContent` still carries the complete validated `SolveResult` for

@@ -100,7 +100,16 @@ Otherwise:
    - the solution, but only when `status` carries one (`satisfied` /
      `optimal`): show it as a block read verbatim from raw `stdout` — the
      `output` block text is authoritative, so do not restate the values
-     yourself. When the problem supplies item-like data (items with
+     yourself. Use the structured fields to organize that display, never to
+     replace it: `solution` is the best/last solution as a variable-name ->
+     value map (model variables only; the objective is reported separately,
+     not folded in), `solutions` is every solution in emission order (the
+     optimization improving-sequence, so its last entry equals `solution`),
+     and `objective` is the best objective value (null for a pure-satisfaction
+     problem). Build any item table or cross-solution comparison from
+     `solution` / `solutions` and report the optimized value from `objective`,
+     while keeping the verbatim block itself from `stdout`. When the problem
+     supplies item-like data (items with
      weights/values, tasks, shifts, etc.) and the solution selects among it,
      include a compact table rather than a prose-only list. For small item
      sets (roughly 20 rows or fewer), show one row per item with the item

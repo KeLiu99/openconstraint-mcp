@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
@@ -18,6 +19,13 @@ from openconstraint_mcp.runtime import RuntimeMissingError
 from openconstraint_mcp.schemas import CheckResult, SolveResult, UnsatCoreResult
 
 _MODEL_SRC = "var 1..5: x;\nconstraint x > 2;\nsolve satisfy;\n"
+
+# A minimal `--json-stream` satisfy transcript: a single solution object and no
+# status object (a single `satisfy` stops at the first solution, emitting no
+# completeness verdict), so the parser resolves status to "satisfied".
+_SOLVE_STREAM_SAMPLE = (
+    json.dumps({"type": "solution", "output": {"default": "x = 3;\n", "json": {"x": 3}}}) + "\n"
+)
 
 _UNSAT_CORE_MODEL = (
     "var 0..10: x;\n"
@@ -84,13 +92,15 @@ def test_solve_runs_real_path_from_parent(
     model_path = tmp_path / "entry.mzn"
     model_path.write_text(_MODEL_SRC)
     calls = _record_run(
-        monkeypatch, _FakeCompletedProcess(stdout="==========\n", stderr="", returncode=0)
+        monkeypatch, _FakeCompletedProcess(stdout=_SOLVE_STREAM_SAMPLE, stderr="", returncode=0)
     )
 
     result = solve_model_path(model_path)
 
     assert isinstance(result, SolveResult)
-    assert result.status == "optimal"
+    # A single `satisfy` emits no status object; the parser's return-code
+    # fallback resolves a clean exit with a solution to "satisfied".
+    assert result.status == "satisfied"
     # The path solve runner requests statistics too, symmetric with the inline
     # solve_model (check/findMUS path runs assert its absence below).
     assert "--statistics" in calls[0]["cmd"]
@@ -110,7 +120,7 @@ def test_relative_input_is_resolved_without_double_counting(
     (sub / "model.mzn").write_text(_MODEL_SRC)
     monkeypatch.chdir(tmp_path)
     calls = _record_run(
-        monkeypatch, _FakeCompletedProcess(stdout="==========\n", stderr="", returncode=0)
+        monkeypatch, _FakeCompletedProcess(stdout=_SOLVE_STREAM_SAMPLE, stderr="", returncode=0)
     )
 
     # Relative input: cwd=parent + relative argv would make the subprocess look
@@ -132,7 +142,7 @@ def test_data_is_positional_after_model(
     data_path = tmp_path / "params.dzn"
     data_path.write_text("n = 3;\n")
     calls = _record_run(
-        monkeypatch, _FakeCompletedProcess(stdout="==========\n", stderr="", returncode=0)
+        monkeypatch, _FakeCompletedProcess(stdout=_SOLVE_STREAM_SAMPLE, stderr="", returncode=0)
     )
 
     solve_model_path(model_path, data_path=data_path)

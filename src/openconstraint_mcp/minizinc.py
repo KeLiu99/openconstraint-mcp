@@ -33,37 +33,189 @@ DEFAULT_CHECK_TIMEOUT_MS: int = DEFAULT_SOLVE_TIMEOUT_MS
 DEFAULT_UNSAT_CORE_TIMEOUT_MS: int = DEFAULT_SOLVE_TIMEOUT_MS
 _MODEL_FILENAME: str = "model.mzn"
 _DATA_FILENAME: str = "data.dzn"
+# Solve runs use the json-stream transport: `--json-stream` emits one JSON object
+# per line (each solution carries both the human `default` text and the `json`
+# variable values; status and statistics arrive as their own sibling objects),
+# `--output-mode json` selects the json section, and `--output-objective` adds
+# `_objective` to each solution so the best objective is recoverable. `--statistics`
+# is what makes the `{"type":"statistics"}` objects appear at all. Solve-only:
+# check (`-c`) and findMUS keep their plain invocation.
+_SOLVE_STREAM_ARGS: tuple[str, ...] = (
+    "--statistics",
+    "--json-stream",
+    "--output-mode",
+    "json",
+    "--output-objective",
+)
 
 
 class MiniZincExecutionError(RuntimeError):
     """Raised when the managed MiniZinc binary fails to produce a usable result."""
 
 
-def _parse_status(stdout: str, returncode: int, timed_out: bool) -> SolveStatus:
-    if timed_out:
-        return "timeout"
-    # FlatZinc status markers always occupy their own line, so match whole
-    # stripped lines rather than substrings — otherwise a model whose output
-    # block prints a rule of dashes/equals or the literal marker text would be
-    # misclassified.
-    lines = {line.strip() for line in stdout.splitlines()}
-    if "=====ERROR=====" in lines:
-        return "error"
-    if "=====UNSATISFIABLE=====" in lines:
-        return "unsatisfiable"
-    if "=====UNBOUNDED=====" in lines:
-        return "unbounded"
-    if "=====UNSATorUNBOUNDED=====" in lines:
-        return "unsat_or_unbounded"
-    if "=====UNKNOWN=====" in lines:
-        return "unknown"
-    if "==========" in lines:
-        return "optimal"
-    if "----------" in lines:
-        return "satisfied"
-    if returncode != 0:
-        return "error"
-    return "unknown"
+# MiniZinc's `--json-stream` emits one JSON object per line. Each object has a
+# `type`; the solve parser consumes `solution`, `status`, `statistics`, `error`,
+# and `warning` and ignores every other type, so a future object type can't break
+# a solve. Because status and statistics arrive as sibling top-level objects while
+# the model's own text is encapsulated inside a solution object's `output` string,
+# a model can no longer forge a status verdict or a stat line — the spoofing
+# hazard of the old stdout scrape is closed for the solve path.
+_STATUS_MAP: dict[str, SolveStatus] = {
+    "OPTIMAL_SOLUTION": "optimal",
+    "ALL_SOLUTIONS": "satisfied",
+    "SATISFIED": "satisfied",
+    "UNSATISFIABLE": "unsatisfiable",
+    "UNKNOWN": "unknown",
+    "UNBOUNDED": "unbounded",
+    "UNSAT_OR_UNBOUNDED": "unsat_or_unbounded",
+}
+
+
+class _StreamParse(NamedTuple):
+    # `status` is the stream's own verdict: an `error` object (seen at any point)
+    # forces "error", else the mapped `{"type":"status"}` value, else None —
+    # meaning the stream gave no completeness verdict and the caller applies a
+    # return-code fallback (a single `satisfy` stops at the first solution and
+    # emits no status object).
+    status: SolveStatus | None
+    solutions: list[dict[str, Any]]
+    objective: int | float | None
+    statistics: dict[str, str]
+    # Reconstructed human text: each solution's `output.default` section, or — when
+    # the model has no explicit `output` item, so the stream carries only `json` —
+    # a synthesized rendering of that solution's variable map.
+    stdout: str
+    messages: list[str]  # error/warning diagnostics to surface into `stderr`
+
+
+def _diagnostic_line(obj: dict[str, Any]) -> str | None:
+    """Render an ``error``/``warning`` stream object into one diagnostic line.
+
+    Prefers ``"<what>: <message>"`` (e.g. ``syntax error: unexpected item …``),
+    falling back to whichever of ``what``/``message`` is a string. Returns None
+    when neither is, so an empty diagnostic is never surfaced.
+    """
+    what = obj.get("what")
+    message = obj.get("message")
+    if isinstance(what, str) and isinstance(message, str):
+        return f"{what}: {message}"
+    if isinstance(message, str):
+        return message
+    if isinstance(what, str):
+        return what
+    return None
+
+
+def _map_status(raw: str, *, has_solution: bool) -> SolveStatus:
+    # A known spelling maps directly. An unrecognized verdict (a renamed or newly
+    # added MiniZinc status) falls back safely so it never crashes a solve: a
+    # solution in hand means "satisfied", otherwise "unknown".
+    mapped = _STATUS_MAP.get(raw)
+    if mapped is not None:
+        return mapped
+    return "satisfied" if has_solution else "unknown"
+
+
+def _render_json_solution(values: dict[str, Any]) -> str:
+    # Render a solution's `json` variable map as MiniZinc-style `name = <value>;`
+    # lines, one per variable. Used as the human-text fallback when a solution
+    # object has no `default` section — i.e. the model has no explicit `output`
+    # item, so under `--output-mode json` the stream emits only the `json` section.
+    # `_objective` is already stripped by the caller, matching the explicit-output
+    # `default` text (which `--output-objective` does not augment).
+    return "".join(f"{key} = {json.dumps(value)};\n" for key, value in values.items())
+
+
+def _reconstruct_stdout(blocks: Sequence[str]) -> str:
+    # Rebuild the human solution text from each solution's human block — its
+    # `output.default` section, or a `_render_json_solution` rendering when no
+    # `default` is present. Each block is made newline-terminated so consecutive
+    # solutions stay visually separated; a block already ending in a newline is
+    # left as-is (no double blank lines). This restores the "solution text lives in
+    # stdout" contract the display path and prompt rely on, now sourced from the
+    # stream regardless of whether the model declares an explicit `output` item.
+    return "".join(block if block.endswith("\n") else block + "\n" for block in blocks)
+
+
+def _parse_solve_stream(stdout: str) -> _StreamParse:
+    """Parse a ``--json-stream`` solve transcript into structured fields.
+
+    Best-effort and never raises: a line that is not a JSON object (stray text,
+    or a half-written final object truncated by a hard timeout) is skipped, and an
+    unknown object ``type`` is ignored. ``_objective`` is removed from each
+    solution's variable map, and the last solution's value becomes ``objective``
+    (None for satisfaction, where no solution carries one).
+    """
+    solutions: list[dict[str, Any]] = []
+    blocks: list[str] = []
+    statistics: dict[str, str] = {}
+    messages: list[str] = []
+    objective: int | float | None = None
+    status_raw: str | None = None
+    error_seen = False
+
+    for raw_line in stdout.splitlines():
+        line = raw_line.strip()
+        if not line:
+            continue
+        try:
+            obj = json.loads(line)
+        except ValueError:
+            continue  # not a JSON object (truncated tail / stray text)
+        if not isinstance(obj, dict):
+            continue
+        obj_type = obj.get("type")
+        if obj_type == "solution":
+            output = obj.get("output")
+            if not isinstance(output, dict):
+                continue
+            stripped: dict[str, Any] | None = None
+            values = output.get("json")
+            if isinstance(values, dict):
+                stripped = dict(values)
+                obj_val = stripped.pop("_objective", None)
+                if isinstance(obj_val, (int, float)) and not isinstance(obj_val, bool):
+                    objective = obj_val
+                solutions.append(stripped)
+            default = output.get("default")
+            if isinstance(default, str):
+                blocks.append(default)
+            elif stripped:
+                # No `default` section: the model has no explicit `output` item, so
+                # the solution arrives only as the `json` map. Synthesize a human
+                # block from it so the reconstructed stdout still shows the solution.
+                blocks.append(_render_json_solution(stripped))
+        elif obj_type == "status":
+            raw = obj.get("status")
+            if isinstance(raw, str):
+                status_raw = raw
+        elif obj_type == "statistics":
+            stats = obj.get("statistics")
+            if isinstance(stats, dict):
+                for key, value in stats.items():
+                    statistics[str(key)] = value if isinstance(value, str) else str(value)
+        elif obj_type in ("error", "warning"):
+            if obj_type == "error":
+                error_seen = True
+            line_msg = _diagnostic_line(obj)
+            if line_msg is not None:
+                messages.append(line_msg)
+        # any other object type is ignored (forward-compatible)
+
+    if error_seen:
+        status: SolveStatus | None = "error"
+    elif status_raw is not None:
+        status = _map_status(status_raw, has_solution=bool(solutions))
+    else:
+        status = None
+    return _StreamParse(
+        status=status,
+        solutions=solutions,
+        objective=objective,
+        statistics=statistics,
+        stdout=_reconstruct_stdout(blocks),
+        messages=messages,
+    )
 
 
 def _coerce_to_text(payload: str | bytes | None) -> str:
@@ -305,66 +457,79 @@ def _parse_unsat_core(
     return True, [_constraint_from_span(model, span) for span in unique_spans]
 
 
-# MiniZinc's `--statistics` flag prints `%%%mzn-stat: <key>=<value>` lines.
-# The `%%%mzn-stat-end` block sentinel does not match this prefix (it has no
-# trailing colon), so the prefix check below excludes it without a special case.
-_STAT_LINE_PREFIX = "%%%mzn-stat:"
+def _merge_stderr(real_stderr: str, messages: Sequence[str]) -> str:
+    """Fold json-stream diagnostics into the process's ``stderr`` channel.
 
-
-def _parse_statistics(stdout: str) -> dict[str, str]:
-    """Best-effort extraction of MiniZinc ``%%%mzn-stat:`` key/value pairs.
-
-    Keeps only ``%%%mzn-stat:`` lines, strips the prefix, splits on the first
-    ``=``, and stores the raw value token verbatim — quoted strings keep their
-    quotes, numbers stay strings; nothing is coerced.
-
-    The view is best-effort and never fails a solve:
-
-    - A line with no ``=`` (e.g. a timeout-truncated ``%%%mzn-stat: solveTi``)
-      is skipped, not recorded as a phantom empty-valued key.
-    - Duplicate keys across the compile/solve/per-solution blocks collapse
-      last-wins; raw ``stdout`` keeps the full trail.
-    - ``stdout`` is one unauthenticated stream, so a model ``output`` block can
-      print a stat-shaped line and it is included here. Raw ``stdout`` stays
-      authoritative; this dict is a convenience summary, not tamper-proof.
+    ``--json-stream`` routes model/solver diagnostics into the *stdout* stream as
+    ``error``/``warning`` objects, so the real process ``stderr`` is usually
+    empty. To keep the "read stderr for diagnostics" contract working regardless
+    of channel, the parsed messages are appended here — skipping any the process
+    already wrote to ``stderr`` so a double-reported message is not duplicated.
+    With no new messages the real ``stderr`` is returned unchanged.
     """
-    stats: dict[str, str] = {}
-    for raw_line in stdout.splitlines():
-        line = raw_line.strip()
-        if not line.startswith(_STAT_LINE_PREFIX):
-            continue  # plain comment, %%%mzn-stat-end sentinel, or output text
-        key, sep, value = line[len(_STAT_LINE_PREFIX) :].strip().partition("=")
-        if not sep:
-            continue  # no '=' → not a usable pair (skip, don't store empty)
-        stats[key.strip()] = value
-    return stats
+    extra = [m for m in messages if m and m not in real_stderr.splitlines()]
+    if not extra:
+        return real_stderr
+    base = real_stderr if real_stderr == "" or real_stderr.endswith("\n") else real_stderr + "\n"
+    return base + "\n".join(extra) + "\n"
+
+
+def _resolve_status(
+    stream_status: SolveStatus | None, *, has_solution: bool, returncode: int
+) -> SolveStatus:
+    # The stream's own verdict wins when it gave one. Otherwise, apply the
+    # return-code fallback: a solution with a clean exit is "satisfied" (the
+    # single-`satisfy` case, which emits no status object), a non-zero exit is
+    # "error", and an empty clean run is "unknown".
+    if stream_status is not None:
+        return stream_status
+    if has_solution:
+        return "satisfied"
+    if returncode != 0:
+        return "error"
+    return "unknown"
 
 
 def _build_solve_result(outcome: _RunOutcome, *, solver: str) -> SolveResult:
+    # Parse the json-stream transcript once; both branches reuse the structured
+    # solutions/statistics and the reconstructed human stdout. Diagnostics found
+    # in the stream are folded into stderr (the stream routes them off the real
+    # stderr channel).
+    parsed = _parse_solve_stream(outcome.stdout)
+    solution = parsed.solutions[-1] if parsed.solutions else None
+    stderr = _merge_stderr(outcome.stderr, parsed.messages)
     if outcome.timed_out:
-        # No real process return code exists once the outer subprocess timeout
-        # fires; expose None rather than the internal -1 sentinel. The captured
-        # stdout may be a mid-block truncation, which _parse_statistics tolerates.
+        # The outer subprocess cap fired: keep whatever the partial stream gave,
+        # but the verdict is "timeout" and there is no real return code (expose
+        # None, not the internal -1 sentinel).
         return SolveResult(
             status="timeout",
             solver=solver,
             return_code=None,
             timed_out=True,
-            stdout=outcome.stdout,
-            stderr=outcome.stderr,
+            stdout=parsed.stdout,
+            stderr=stderr,
             elapsed_ms=outcome.elapsed_ms,
-            statistics=_parse_statistics(outcome.stdout),
+            statistics=parsed.statistics,
+            solution=solution,
+            solutions=parsed.solutions,
+            objective=parsed.objective,
         )
-    status = _parse_status(outcome.stdout, outcome.returncode, timed_out=False)
+    status = _resolve_status(
+        parsed.status, has_solution=bool(parsed.solutions), returncode=outcome.returncode
+    )
     return SolveResult(
         status=status,
         solver=solver,
         return_code=outcome.returncode,
         timed_out=False,
-        stdout=outcome.stdout,
-        stderr=outcome.stderr,
+        stdout=parsed.stdout,
+        stderr=stderr,
         elapsed_ms=outcome.elapsed_ms,
-        statistics=_parse_statistics(outcome.stdout),
+        statistics=parsed.statistics,
+        solution=solution,
+        solutions=parsed.solutions,
+        objective=parsed.objective,
     )
 
 
@@ -377,9 +542,8 @@ def _build_check_result(outcome: _RunOutcome, *, solver: str) -> CheckResult:
             stderr=outcome.stderr,
             elapsed_ms=outcome.elapsed_ms,
         )
-    # A pure `-c` compile emits no FlatZinc status markers, so the process
-    # return code is the whole signal here — unlike solve, do not route this
-    # through _parse_status.
+    # A pure `-c` compile emits no status object, so the process return code is
+    # the whole signal here — unlike solve, which classifies from the stream.
     status: CheckStatus = "ok" if outcome.returncode == 0 else "error"
     return CheckResult(
         status=status,
@@ -458,7 +622,7 @@ def solve_model(
     timeout_ms: int = DEFAULT_SOLVE_TIMEOUT_MS,
 ) -> SolveResult:
     outcome = _run_managed_minizinc(
-        model, solver=solver, timeout_ms=timeout_ms, extra_args=("--statistics",), data=data
+        model, solver=solver, timeout_ms=timeout_ms, extra_args=_SOLVE_STREAM_ARGS, data=data
     )
     return _build_solve_result(outcome, solver=solver)
 
@@ -581,7 +745,7 @@ def solve_model_path(
         model_path,
         solver=solver,
         timeout_ms=timeout_ms,
-        extra_args=("--statistics",),
+        extra_args=_SOLVE_STREAM_ARGS,
         data_path=data_path,
     )
     return _build_solve_result(outcome, solver=solver)

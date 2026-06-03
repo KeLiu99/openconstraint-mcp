@@ -34,15 +34,21 @@ SOLVE_MINIZINC_MODEL_DESC = (
     "`solve` statement, and an `output` block. Optional `data` is `.dzn` "
     "text, run as a data file beside the model (omit it when the model "
     "needs none). Returns a SolveResult: `status`, `solver`, `return_code` "
-    "(null on a subprocess timeout), `timed_out`, raw `stdout`/`stderr` (so "
-    "you can revise and retry on errors), `elapsed_ms`, and a best-effort "
-    "`statistics` map parsed from `%%%mzn-stat:` lines (may be empty; keys "
-    "are solver-defined; raw `stdout` stays authoritative). The model-visible "
-    "text content includes a `Statistics:` section whenever that map is "
-    "non-empty, with an explicit final-answer requirement not to omit it; "
-    "copy that entire section into the user-facing answer rather than "
-    "summarizing selected fields. `structuredContent` carries the complete "
-    "SolveResult."
+    "(null on a subprocess timeout), `timed_out`, `elapsed_ms`, `stdout` "
+    "(the human-readable solution text, reconstructed from the solve "
+    "stream's output sections), `stderr` (the run's diagnostic channel — "
+    "model/solver errors and warnings, so you can revise and retry), a "
+    "structured `solution` (the best/last solution as a variable -> value "
+    "map, model variables only), `solutions` (every solution in order; its "
+    "last entry is `solution`), `objective` (the best objective value, null "
+    "for a pure-satisfaction problem), and a best-effort `statistics` map "
+    "(may be empty; keys are solver-defined). The structured values are "
+    "emitted by the runtime's machine-readable solve stream, not scraped "
+    "from text. The model-visible text content includes a `Statistics:` "
+    "section whenever that map is non-empty, with an explicit final-answer "
+    "requirement not to omit it; copy that entire section into the "
+    "user-facing answer rather than summarizing selected fields. "
+    "`structuredContent` carries the complete SolveResult."
 )
 
 CHECK_MINIZINC_MODEL_DESC = (
@@ -102,10 +108,11 @@ SOLVE_MINIZINC_FILES_DESC = (
     "of `solve_minizinc_model`. "
     + _FILE_TOOL_SHARED_DESC
     + " Returns the same SolveResult shape (`status`, `solver`, "
-    "`return_code`, `timed_out`, `stdout`, `stderr`, `elapsed_ms`, "
-    "`statistics`) and the same model-visible `Statistics:` summary whenever "
-    "the parsed map is non-empty, with an explicit final-answer requirement "
-    "to copy the entire section rather than summarizing selected fields."
+    "`return_code`, `timed_out`, `elapsed_ms`, `stdout`, `stderr`, "
+    "`solution`, `solutions`, `objective`, `statistics`) and the same "
+    "model-visible `Statistics:` summary whenever the parsed map is "
+    "non-empty, with an explicit final-answer requirement to copy the entire "
+    "section rather than summarizing selected fields."
 )
 
 FIND_UNSAT_CORE_FILES_DESC = (
