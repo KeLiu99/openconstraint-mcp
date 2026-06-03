@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import subprocess
 from importlib import metadata
 from pathlib import Path
@@ -259,6 +260,18 @@ async def test_solve_constraint_problem_prompt_explains_result_fields() -> None:
 
 
 @pytest.mark.asyncio
+async def test_solve_constraint_problem_prompt_explains_structured_solution_fields() -> None:
+    text = await _get_prompt_text("solve_constraint_problem", {"problem": SAMPLE_PROBLEM})
+
+    # The explain step must name the new structured SolveResult fields so the
+    # client builds tables and comparisons from them rather than re-parsing
+    # stdout. Backticked tokens pin the field references — plain "solution"
+    # appears throughout the prose, so it would not prove the new fields.
+    for field in ("`solution`", "`solutions`", "`objective`"):
+        assert field in text, f"prompt should reference the structured field {field}"
+
+
+@pytest.mark.asyncio
 async def test_solve_constraint_problem_prompt_instructs_structured_result_presentation() -> None:
     text = await _get_prompt_text("solve_constraint_problem", {"problem": SAMPLE_PROBLEM})
 
@@ -403,6 +416,16 @@ class _FakeCompletedProcess:
         self.returncode = returncode
 
 
+def _stream(*objects: dict[str, Any]) -> str:
+    """Serialize objects as a ``--json-stream`` transcript: one JSON object per line."""
+    return "".join(json.dumps(obj) + "\n" for obj in objects)
+
+
+def _solution_obj(default: str, values: dict[str, Any]) -> dict[str, Any]:
+    """A ``{"type":"solution"}`` object carrying the human ``default`` text and json values."""
+    return {"type": "solution", "output": {"default": default, "raw": default, "json": values}}
+
+
 def _structured(result: Any) -> dict[str, Any]:
     """Extract the structured-content dict from a FastMCP call_tool result.
 
@@ -467,7 +490,10 @@ async def test_solve_minizinc_model_happy_path(
 ) -> None:
     def _fake_run(*args: object, **kwargs: object) -> _FakeCompletedProcess:
         return _FakeCompletedProcess(
-            stdout="x = 3;\n----------\n==========\n%%%mzn-stat: solveTime=0.01\n%%%mzn-stat-end\n",
+            stdout=_stream(
+                _solution_obj("x = 3;\n", {"x": 3}),
+                {"type": "statistics", "statistics": {"solveTime": 0.01}},
+            ),
             stderr="",
             returncode=0,
         )
@@ -481,11 +507,18 @@ async def test_solve_minizinc_model_happy_path(
     )
 
     structured = _structured(result)
-    assert structured["status"] == "optimal"
+    # A single `satisfy` that finds a solution emits no status object; the
+    # return-code fallback resolves a clean exit with a solution to "satisfied".
+    assert structured["status"] == "satisfied"
     assert structured["solver"] == "cp-sat"
     assert structured["return_code"] == 0
     assert structured["timed_out"] is False
-    # Parsed %%%mzn-stat: pairs flow through FastMCP structured content.
+    # The structured solution fields are reconstructed from the stream's
+    # output.json payload; a satisfaction model carries no _objective.
+    assert structured["solution"] == {"x": 3}
+    assert structured["solutions"] == [{"x": 3}]
+    assert structured["objective"] is None
+    # Parsed statistics objects flow through FastMCP structured content.
     assert structured["statistics"] == {"solveTime": "0.01"}
 
     # The model-visible default content also highlights non-empty statistics,
@@ -509,7 +542,9 @@ async def test_solve_minizinc_model_threads_inline_data_to_runtime(
 ) -> None:
     calls = _record_data_run(
         monkeypatch,
-        _FakeCompletedProcess(stdout="==========\n", stderr="", returncode=0),
+        _FakeCompletedProcess(
+            stdout=_stream(_solution_obj("x = 3;\n", {"x": 3})), stderr="", returncode=0
+        ),
     )
 
     mcp = create_mcp_server()
@@ -519,7 +554,7 @@ async def test_solve_minizinc_model_threads_inline_data_to_runtime(
     )
 
     assert calls[0]["data_contents"] == "n = 3;"
-    assert _structured(result)["status"] == "optimal"
+    assert _structured(result)["status"] == "satisfied"
 
 
 @pytest.mark.asyncio
@@ -529,7 +564,7 @@ async def test_solve_minizinc_model_omits_visible_statistics_when_empty(
 ) -> None:
     def _fake_run(*args: object, **kwargs: object) -> _FakeCompletedProcess:
         return _FakeCompletedProcess(
-            stdout="x = 3;\n----------\n==========\n", stderr="", returncode=0
+            stdout=_stream(_solution_obj("x = 3;\n", {"x": 3})), stderr="", returncode=0
         )
 
     monkeypatch.setattr("openconstraint_mcp.minizinc.subprocess.run", _fake_run)
@@ -870,17 +905,23 @@ async def test_solve_minizinc_files_happy_path(
     model_path = tmp_path / "model.mzn"
     model_path.write_text(_FILE_MODEL_SRC)
     _record_run_capturing_cwd(
-        monkeypatch, _FakeCompletedProcess(stdout="==========\n", stderr="", returncode=0)
+        monkeypatch,
+        _FakeCompletedProcess(
+            stdout=_stream(_solution_obj("x = 3;\n", {"x": 3})), stderr="", returncode=0
+        ),
     )
 
     mcp = create_mcp_server()
     result = await mcp.call_tool("solve_minizinc_files", {"model_path": str(model_path)})
 
     structured = _structured(result)
-    assert structured["status"] == "optimal"
+    assert structured["status"] == "satisfied"
     assert structured["return_code"] == 0
     assert structured["timed_out"] is False
-    # The statistics field is exposed even when no stat lines were emitted.
+    assert structured["solution"] == {"x": 3}
+    assert structured["solutions"] == [{"x": 3}]
+    assert structured["objective"] is None
+    # The statistics field is exposed even when no statistics object was emitted.
     assert structured["statistics"] == {}
     assert "Statistics:" not in _content_text(result)
 
@@ -896,7 +937,10 @@ async def test_solve_minizinc_files_visible_content_includes_statistics(
     _record_run_capturing_cwd(
         monkeypatch,
         _FakeCompletedProcess(
-            stdout="x = 3;\n----------\n==========\n%%%mzn-stat: failures=2\n%%%mzn-stat-end\n",
+            stdout=_stream(
+                _solution_obj("x = 3;\n", {"x": 3}),
+                {"type": "statistics", "statistics": {"failures": 2}},
+            ),
             stderr="",
             returncode=0,
         ),
@@ -964,7 +1008,10 @@ async def test_solve_minizinc_files_runs_from_model_parent(
     model_path = tmp_path / "model.mzn"
     model_path.write_text(_FILE_MODEL_SRC)
     calls = _record_run_capturing_cwd(
-        monkeypatch, _FakeCompletedProcess(stdout="==========\n", stderr="", returncode=0)
+        monkeypatch,
+        _FakeCompletedProcess(
+            stdout=_stream(_solution_obj("x = 3;\n", {"x": 3})), stderr="", returncode=0
+        ),
     )
 
     mcp = create_mcp_server()

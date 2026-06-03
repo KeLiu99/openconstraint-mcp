@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Literal
+from typing import Any, Literal
 
 from pydantic import BaseModel, Field, field_validator
 
@@ -44,6 +44,14 @@ class SolveResult(BaseModel):
     stderr: str
     elapsed_ms: int
     statistics: dict[str, str] = Field(default_factory=dict)
+    # Structured solutions parsed from the driver's json-stream (the `output.json`
+    # section of each solution object, with `_objective` removed). `solution` is
+    # the last/best solution, `solutions` the full ordered list (improving
+    # sequence for optimization, enumeration for `all_solutions`), and `objective`
+    # the best solution's `_objective` — None for satisfaction and no-solution runs.
+    solution: dict[str, Any] | None = None
+    solutions: list[dict[str, Any]] = Field(default_factory=list)
+    objective: int | float | None = None
 
 
 CheckStatus = Literal[
