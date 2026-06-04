@@ -47,7 +47,13 @@ SOLVE_MINIZINC_MODEL_DESC = (
     "from text. The model-visible text content includes a `Statistics:` "
     "section whenever that map is non-empty, with an explicit final-answer "
     "requirement not to omit it; copy that entire section into the "
-    "user-facing answer rather than summarizing selected fields. "
+    "user-facing answer rather than summarizing selected fields. Optional "
+    "solver/search controls (all default to current behavior, solve-only): "
+    "`free_search` (bool -> `-f`: let the solver use its own search instead "
+    "of the model's search annotations — solver-dependent, not 'no search'); "
+    "`parallel` (int >= 1 -> `-p`: parallel search threads); `random_seed` "
+    "(int -> `-r`); `all_solutions` (bool -> `-a`: enumerate all solutions, "
+    "or the optimization improving-sequence, into `solutions`). "
     "`structuredContent` carries the complete SolveResult."
 )
 
@@ -112,7 +118,9 @@ SOLVE_MINIZINC_FILES_DESC = (
     "`solution`, `solutions`, `objective`, `statistics`) and the same "
     "model-visible `Statistics:` summary whenever the parsed map is "
     "non-empty, with an explicit final-answer requirement to copy the entire "
-    "section rather than summarizing selected fields."
+    "section rather than summarizing selected fields. Accepts the same "
+    "optional solver/search controls as `solve_minizinc_model` "
+    "(`free_search`, `parallel`, `random_seed`, `all_solutions`)."
 )
 
 FIND_UNSAT_CORE_FILES_DESC = (

@@ -485,7 +485,16 @@ async def test_solve_minizinc_model_tool_is_listed() -> None:
 
     tool = next(t for t in tools if t.name == "solve_minizinc_model")
     properties = tool.inputSchema.get("properties", {})
-    assert {"model", "data", "solver", "timeout_ms"} <= set(properties.keys())
+    assert {
+        "model",
+        "data",
+        "solver",
+        "timeout_ms",
+        "free_search",
+        "parallel",
+        "random_seed",
+        "all_solutions",
+    } <= set(properties.keys())
 
 
 @pytest.mark.asyncio
@@ -683,6 +692,54 @@ async def test_solve_minizinc_model_compile_error_returns_structured_result(
     structured = _structured(result)
     assert structured["status"] == "error"
     assert "type error" in structured["stderr"]
+
+
+@pytest.mark.asyncio
+async def test_solve_minizinc_model_forwards_search_flags_to_runtime(
+    fake_minizinc_binary: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls = _record_run_capturing_cwd(
+        monkeypatch,
+        _FakeCompletedProcess(
+            stdout=_stream(_solution_obj("x = 3\n", {"x": 3})), stderr="", returncode=0
+        ),
+    )
+
+    mcp = create_mcp_server()
+    await mcp.call_tool(
+        "solve_minizinc_model",
+        {
+            "model": "var 1..5: x;\nsolve satisfy;",
+            "free_search": True,
+            "parallel": 2,
+            "random_seed": 7,
+            "all_solutions": True,
+        },
+    )
+
+    cmd = calls[0]["cmd"]
+    assert "-f" in cmd and "-a" in cmd
+    assert cmd[cmd.index("-p") + 1] == "2"
+    assert cmd[cmd.index("-r") + 1] == "7"
+
+
+@pytest.mark.asyncio
+async def test_solve_minizinc_model_invalid_parallel_surfaces_actionable_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def _fail_if_called(*args: object, **kwargs: object) -> None:
+        raise AssertionError("subprocess.run must not be invoked for bad parallel")
+
+    monkeypatch.setattr("openconstraint_mcp.minizinc.subprocess.run", _fail_if_called)
+
+    mcp = create_mcp_server()
+    with pytest.raises(Exception) as exc_info:
+        await mcp.call_tool(
+            "solve_minizinc_model",
+            {"model": "solve satisfy;", "parallel": 0},
+        )
+    assert "parallel" in str(exc_info.value)
 
 
 @pytest.mark.asyncio
@@ -924,6 +981,14 @@ async def test_file_tools_are_listed_with_expected_properties() -> None:
         # The two-mode flag was removed: file tools always run CLI-style.
         assert "allow_local_includes" not in properties
 
+    # Search-control flags are solve-only at the MCP surface: present on the
+    # solve file tool, absent from the compile-check file tool.
+    _search_flags = {"free_search", "parallel", "random_seed", "all_solutions"}
+    solve_files_props = by_name["solve_minizinc_files"].inputSchema.get("properties", {})
+    assert _search_flags <= set(solve_files_props.keys())
+    check_files_props = by_name["check_minizinc_files"].inputSchema.get("properties", {})
+    assert not (_search_flags & set(check_files_props.keys()))
+
     findmus_props = by_name["find_unsat_core_files"].inputSchema.get("properties", {})
     assert {"model_path", "data_path", "timeout_ms"} <= set(findmus_props.keys())
     assert "solver" not in findmus_props
@@ -993,6 +1058,32 @@ async def test_solve_minizinc_files_visible_content_includes_statistics(
     assert "selected fields" in lower_text
     assert "Statistics:" in text
     assert "- failures: 2" in text
+
+
+@pytest.mark.asyncio
+async def test_solve_minizinc_files_forwards_search_flags_to_runtime(
+    tmp_path: Path,
+    fake_minizinc_binary: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    model_path = tmp_path / "model.mzn"
+    model_path.write_text(_FILE_MODEL_SRC)
+    calls = _record_run_capturing_cwd(
+        monkeypatch,
+        _FakeCompletedProcess(
+            stdout=_stream(_solution_obj("x = 3\n", {"x": 3})), stderr="", returncode=0
+        ),
+    )
+
+    mcp = create_mcp_server()
+    await mcp.call_tool(
+        "solve_minizinc_files",
+        {"model_path": str(model_path), "parallel": 3, "all_solutions": True},
+    )
+
+    cmd = calls[0]["cmd"]
+    assert "-a" in cmd
+    assert cmd[cmd.index("-p") + 1] == "3"
 
 
 @pytest.mark.asyncio

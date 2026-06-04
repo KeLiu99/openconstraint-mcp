@@ -186,10 +186,23 @@ def create_mcp_server() -> FastMCP:
         data: str | None = None,
         solver: str = DEFAULT_SOLVER,
         timeout_ms: int = DEFAULT_SOLVE_TIMEOUT_MS,
+        free_search: bool = False,
+        parallel: int | None = None,
+        random_seed: int | None = None,
+        all_solutions: bool = False,
     ) -> Annotated[CallToolResult, SolveResult]:
         try:
             return _solve_call_result(
-                solve_model(model, solver=solver, data=data, timeout_ms=timeout_ms)
+                solve_model(
+                    model,
+                    solver=solver,
+                    data=data,
+                    timeout_ms=timeout_ms,
+                    free_search=free_search,
+                    parallel=parallel,
+                    random_seed=random_seed,
+                    all_solutions=all_solutions,
+                )
             )
         except (RuntimeMissingError, MiniZincExecutionError, ValueError) as exc:
             raise RuntimeError(str(exc)) from exc
@@ -240,6 +253,10 @@ def create_mcp_server() -> FastMCP:
         data_path: str | None = None,
         solver: str = DEFAULT_SOLVER,
         timeout_ms: int = DEFAULT_SOLVE_TIMEOUT_MS,
+        free_search: bool = False,
+        parallel: int | None = None,
+        random_seed: int | None = None,
+        all_solutions: bool = False,
     ) -> Annotated[CallToolResult, SolveResult]:
         try:
             return _solve_call_result(
@@ -248,6 +265,10 @@ def create_mcp_server() -> FastMCP:
                     solver=solver,
                     data_path=Path(data_path) if data_path is not None else None,
                     timeout_ms=timeout_ms,
+                    free_search=free_search,
+                    parallel=parallel,
+                    random_seed=random_seed,
+                    all_solutions=all_solutions,
                 )
             )
         except (RuntimeMissingError, MiniZincExecutionError, ValueError) as exc:
