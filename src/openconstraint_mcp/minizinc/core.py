@@ -74,13 +74,22 @@ def _format_unsat_core_message(core: Sequence[UnsatCoreConstraint]) -> str:
     )
 
 
-def list_solvers() -> SolverList:
+def _require_minizinc_binary() -> Path:
+    """Return the managed MiniZinc binary, raising if the runtime is absent.
+
+    The runtime-presence gate shared by ``list_solvers`` and both runners, so
+    the user-facing "not installed" message lives in one place.
+    """
     if not is_runtime_installed():
         raise RuntimeMissingError(
             "Managed MiniZinc runtime not found. "
             "Run `openconstraint-mcp install-runtime` to set it up."
         )
-    binary = get_minizinc_binary()
+    return get_minizinc_binary()
+
+
+def list_solvers() -> SolverList:
+    binary = _require_minizinc_binary()
     try:
         completed = subprocess.run(
             [str(binary), "--solvers-json"],
@@ -167,6 +176,35 @@ def _invoke_minizinc(cmd: Sequence[str], *, timeout_ms: int, cwd: str) -> _RunOu
     )
 
 
+def _build_minizinc_cmd(
+    binary: Path,
+    *,
+    solver: str,
+    timeout_ms: int,
+    model_arg: str,
+    extra_args: Sequence[str] = (),
+    data_args: Sequence[str] = (),
+) -> list[str]:
+    """Assemble the managed-binary argv shared by both runners.
+
+    Centralizes MiniZinc's positional contract — the model file precedes any
+    data file (``model.mzn data.dzn``), with ``--solver``/``--time-limit`` and
+    the caller's ``extra_args`` ahead of both — so the two runners can't drift
+    on argument order. ``extra_args`` and ``data_args`` default to empty, so a
+    minimal (transport-only, dataless) command needs neither.
+    """
+    return [
+        str(binary),
+        "--solver",
+        solver,
+        "--time-limit",
+        str(timeout_ms),
+        *extra_args,
+        model_arg,
+        *data_args,
+    ]
+
+
 def _run_managed_minizinc(
     model: str,
     *,
@@ -196,12 +234,7 @@ def _run_managed_minizinc(
         raise ValueError("model must not be empty")
     if timeout_ms <= 0:
         raise ValueError("timeout_ms must be positive")
-    if not is_runtime_installed():
-        raise RuntimeMissingError(
-            "Managed MiniZinc runtime not found. "
-            "Run `openconstraint-mcp install-runtime` to set it up."
-        )
-    binary = get_minizinc_binary()
+    binary = _require_minizinc_binary()
     with tempfile.TemporaryDirectory(prefix="openconstraint-mcp-") as tmp:
         tmp_dir = Path(tmp)
         model_file = tmp_dir / _MODEL_FILENAME
@@ -211,16 +244,14 @@ def _run_managed_minizinc(
             data_file = tmp_dir / _DATA_FILENAME
             data_file.write_text(data, encoding="utf-8")
             data_args = [str(data_file)]
-        cmd = [
-            str(binary),
-            "--solver",
-            solver,
-            "--time-limit",
-            str(timeout_ms),
-            *extra_args,
-            str(model_file),
-            *data_args,
-        ]
+        cmd = _build_minizinc_cmd(
+            binary,
+            solver=solver,
+            timeout_ms=timeout_ms,
+            extra_args=extra_args,
+            model_arg=str(model_file),
+            data_args=data_args,
+        )
         return _invoke_minizinc(cmd, timeout_ms=timeout_ms, cwd=str(tmp_dir))
 
 
@@ -409,7 +440,9 @@ def _solve_extra_args(
         flags += ["-r", str(random_seed)]
     if all_solutions:
         flags.append("-a")
-    return *_SOLVE_STREAM_ARGS, *flags
+
+    # noinspection PyRedundantParentheses
+    return (*_SOLVE_STREAM_ARGS, *flags)
 
 
 def solve_model(
@@ -488,12 +521,13 @@ def _validate_model_data_paths(
         raise ValueError(f"model_path is not a file: {model_path}")
     if not _read_text_utf8(model_path).strip():
         raise ValueError(f"model file is empty: {model_path}")
-    if data_path is not None:
-        data_path = data_path.resolve()
-        if not data_path.exists():
-            raise ValueError(f"data_path does not exist: {data_path}")
-        if not data_path.is_file():
-            raise ValueError(f"data_path is not a file: {data_path}")
+    if data_path is None:
+        return model_path, None
+    data_path = data_path.resolve()
+    if not data_path.exists():
+        raise ValueError(f"data_path does not exist: {data_path}")
+    if not data_path.is_file():
+        raise ValueError(f"data_path is not a file: {data_path}")
     return model_path, data_path
 
 
@@ -517,23 +551,16 @@ def _run_managed_minizinc_paths(
     """
     if timeout_ms <= 0:
         raise ValueError("timeout_ms must be positive")
-    if not is_runtime_installed():
-        raise RuntimeMissingError(
-            "Managed MiniZinc runtime not found. "
-            "Run `openconstraint-mcp install-runtime` to set it up."
-        )
-    binary = get_minizinc_binary()
+    binary = _require_minizinc_binary()
     data_args = [str(data_path)] if data_path is not None else []
-    cmd = [
-        str(binary),
-        "--solver",
-        solver,
-        "--time-limit",
-        str(timeout_ms),
-        *extra_args,
-        str(model_path),
-        *data_args,
-    ]
+    cmd = _build_minizinc_cmd(
+        binary,
+        solver=solver,
+        timeout_ms=timeout_ms,
+        extra_args=extra_args,
+        model_arg=str(model_path),
+        data_args=data_args,
+    )
     return _invoke_minizinc(cmd, timeout_ms=timeout_ms, cwd=str(model_path.parent))
 
 
