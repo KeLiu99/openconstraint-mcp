@@ -10,18 +10,6 @@ from typing import Annotated, Any
 from mcp.server.fastmcp import FastMCP
 from mcp.types import CallToolResult, TextContent
 
-from .mcp_descriptions import (
-    CHECK_MINIZINC_FILES_DESCRIPTION,
-    CHECK_MINIZINC_MODEL_DESCRIPTION,
-    CHECK_RUNTIME_DESCRIPTION,
-    FIND_UNSAT_CORE_DESCRIPTION,
-    FIND_UNSAT_CORE_FILES_DESCRIPTION,
-    LIST_AVAILABLE_SOLVERS_DESCRIPTION,
-    MCP_SERVER_INSTRUCTIONS,
-    SOLVE_CONSTRAINT_PROBLEM_PROMPT_DESCRIPTION,
-    SOLVE_MINIZINC_FILES_DESCRIPTION,
-    SOLVE_MINIZINC_MODEL_DESCRIPTION,
-)
 from .minizinc import (
     DEFAULT_CHECK_TIMEOUT_MS,
     DEFAULT_SOLVE_TIMEOUT_MS,
@@ -36,7 +24,19 @@ from .minizinc import (
     solve_model_path,
 )
 from .minizinc import find_unsat_core as _find_unsat_core
-from .prompts import SOLVE_CONSTRAINT_PROBLEM_PROMPT
+from .protocol_text.descriptions import (
+    CHECK_MINIZINC_FILES_DESCRIPTION,
+    CHECK_MINIZINC_MODEL_DESCRIPTION,
+    CHECK_RUNTIME_DESCRIPTION,
+    FIND_UNSAT_CORE_DESCRIPTION,
+    FIND_UNSAT_CORE_FILES_DESCRIPTION,
+    LIST_AVAILABLE_SOLVERS_DESCRIPTION,
+    MCP_SERVER_INSTRUCTIONS,
+    SOLVE_CONSTRAINT_PROBLEM_PROMPT_DESCRIPTION,
+    SOLVE_MINIZINC_FILES_DESCRIPTION,
+    SOLVE_MINIZINC_MODEL_DESCRIPTION,
+)
+from .protocol_text.prompts import SOLVE_CONSTRAINT_PROBLEM_PROMPT
 from .runtime import RuntimeMissingError, get_runtime_status
 from .schemas import (
     CheckResult,
