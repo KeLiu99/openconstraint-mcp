@@ -11,10 +11,8 @@ from typer.testing import CliRunner
 from openconstraint_mcp.cli import app
 from openconstraint_mcp.minizinc import MiniZincExecutionError
 from openconstraint_mcp.runtime import read_install_config
-from openconstraint_mcp.runtime_install import (
-    RuntimeInstallError,
-    _write_runtime_marker,
-)
+from openconstraint_mcp.runtime_install import RuntimeInstallError
+from openconstraint_mcp.runtime_install.core import _write_runtime_marker
 
 runner = CliRunner()
 
