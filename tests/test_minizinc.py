@@ -459,6 +459,10 @@ _STREAM_ERROR = _stream(
         ("UNKNOWN", "unknown"),
         ("UNBOUNDED", "unbounded"),
         ("UNSAT_OR_UNBOUNDED", "unsat_or_unbounded"),
+        # A driver/solver runtime-failure verdict (e.g. cp-sat rejecting an
+        # out-of-range `random_seed`) must surface as "error", not fall through
+        # to "unknown" and hide the failure.
+        ("ERROR", "error"),
     ],
 )
 def test_parse_solve_stream_maps_known_status(verdict: str, expected: SolveStatus) -> None:

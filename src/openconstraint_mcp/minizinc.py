@@ -68,6 +68,11 @@ _STATUS_MAP: dict[str, SolveStatus] = {
     "UNKNOWN": "unknown",
     "UNBOUNDED": "unbounded",
     "UNSAT_OR_UNBOUNDED": "unsat_or_unbounded",
+    # A runtime-failure verdict from the driver/solver — e.g. cp-sat rejecting an
+    # out-of-range parameter such as a negative or > int32 `random_seed`. Without
+    # this entry it falls through `_map_status` to "unknown", silently hiding the
+    # failure; map it to "error" so a bad parameter surfaces as an error verdict.
+    "ERROR": "error",
 }
 
 

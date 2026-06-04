@@ -186,6 +186,17 @@ def test_solve_model_random_seed_runs_cleanly() -> None:
     assert result.solution is not None
 
 
+def test_solve_model_negative_random_seed_surfaces_as_error() -> None:
+    # cp-sat's seed must be a non-negative int32; a negative seed is rejected at
+    # runtime as a `{"type":"status","status":"ERROR"}` verdict. Our parser must
+    # map that to `status="error"` (not the silent "unknown" fallback), so a bad
+    # parameter is visibly an error rather than an empty no-solution result.
+    result = solve_model("var 1..5: x;\nconstraint x > 2;\nsolve satisfy;", random_seed=-5)
+
+    assert result.status == "error"
+    assert result.solution is None
+
+
 def test_solve_model_parallel_runs_cleanly() -> None:
     # `parallel=2` requests two search threads; assert it solves, not a specific
     # threading effect (solver-dependent).
