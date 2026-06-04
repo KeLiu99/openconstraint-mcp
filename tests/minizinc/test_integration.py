@@ -14,7 +14,7 @@ from pathlib import Path
 
 import pytest
 
-from openconstraint_mcp.minizinc import (
+from openconstraint_mcp.minizinc.core import (
     check_model,
     check_model_path,
     find_unsat_core,

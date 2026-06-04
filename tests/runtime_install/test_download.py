@@ -7,8 +7,8 @@ import httpx
 import pytest
 from rich.console import Console
 
-from openconstraint_mcp import runtime_install
-from openconstraint_mcp.runtime_install import MINIZINC_VERSION, RuntimeInstallError
+from openconstraint_mcp.runtime_install.download import MINIZINC_VERSION, _download_archive
+from openconstraint_mcp.runtime_install.errors import RuntimeInstallError
 
 
 def test_module_exposes_version_constant() -> None:
@@ -51,7 +51,7 @@ def test_download_archive_success(
     _install_mock_transport(monkeypatch, handler)
 
     dest = tmp_path / "archive.tgz"
-    runtime_install.download._download_archive(
+    _download_archive(
         "https://example.invalid/bundle.tgz",
         dest,
         expected_sha256=digest,
@@ -73,7 +73,7 @@ def test_download_archive_sha256_mismatch_deletes_file(
 
     dest = tmp_path / "archive.tgz"
     with pytest.raises(RuntimeInstallError) as exc_info:
-        runtime_install.download._download_archive(
+        _download_archive(
             "https://example.invalid/bundle.tgz",
             dest,
             expected_sha256="0" * 64,
@@ -94,7 +94,7 @@ def test_download_archive_http_404(
 
     dest = tmp_path / "archive.tgz"
     with pytest.raises(RuntimeInstallError) as exc_info:
-        runtime_install.download._download_archive(
+        _download_archive(
             "https://example.invalid/bundle.tgz",
             dest,
             expected_sha256="0" * 64,

@@ -81,6 +81,15 @@ If `just` is unavailable in your environment, fall back to the underlying `uv ru
 - **One responsibility per file.** Files that change together live; split by responsibility, not by technical layer.
 - **Keep functions testable.** Inject dependencies (paths, subprocess runners, clocks) where it makes a function meaningfully easier to mock. Avoid global state.
 
+## Refactoring
+
+- **Prefer direct imports; add a facade only for a real contract.** The v0 public surface is the CLI commands, MCP tools/prompts, and the `openconstraint-mcp` entry point (`openconstraint_mcp:main`) — *not* Python import paths. When a module becomes a package, callers import the submodules directly (`from pkg.module.core import X`, the way `server.py` imports `protocol_text.descriptions`) and the package `__init__.py` stays a docstring-only marker. Do **not** add a re-export facade `__init__.py` to keep an old `from pkg.module import X` path alive for hypothetical external users — in early development we delete such paths, not preserve them. Reserve a facade for an import path that is a genuine documented contract (README, `pyproject` entry point, published API); never break one of *those* without explicit user approval.
+- **`core.py` holds orchestration and the public implementations; leaves are single-purpose modules** (parser, downloader, archive handler) — single-purpose, not necessarily side-effect-free. Callers import what they need from `core` and the dependency-light leaves directly; the package `__init__.py` carries no exported contract.
+- **Don't couple sibling leaves just to share a primitive.** When two leaves need a common exception, constant, or helper, extract it to a dependency-light leaf both import (e.g. `runtime_install/errors.py`) rather than importing one leaf from the other. Orchestrator-to-leaf imports (`core.py` → `archive`/`download`) are intended and stay.
+- **Centralize an invariant once it has two call sites.** Argv order, runtime-presence gates, path validation, and user-facing error text live in one helper (`_build_minizinc_cmd`, `_require_minizinc_binary`) so call sites can't drift.
+- **Refactor tests with the code.** When a module splits, move its tests to mirror the new layout and import each extracted leaf directly, with a test for every leaf that has non-trivial behavior — proving the behavior moved. Don't add a test whose only purpose is to assert that a re-export still resolves.
+- **A behavior-preserving refactor declares its invariants.** State whether behavior, dependencies, public imports, network posture, and docs changed; if the claim is "no behavior change", a test must back it.
+
 ## Solving Scope
 
 The v0 introspection-only restriction is lifted. Solving features — `solve`, `optimize`, model validation, dry-run compilation, solution checking, global-constraint lookup, and similar — may be added incrementally as long as the following invariants hold:

@@ -8,7 +8,7 @@ from typing import Any
 import pytest
 from pydantic import ValidationError
 
-from openconstraint_mcp.minizinc import (
+from openconstraint_mcp.minizinc.core import (
     DEFAULT_SOLVE_TIMEOUT_MS,
     DEFAULT_SOLVER,
     DEFAULT_UNSAT_CORE_TIMEOUT_MS,

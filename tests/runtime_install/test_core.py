@@ -8,18 +8,13 @@ from pathlib import Path
 import pytest
 from rich.console import Console
 
-from openconstraint_mcp import runtime_install
-from openconstraint_mcp.runtime_install import (
+from openconstraint_mcp.runtime_install.core import (
     MANAGED_RUNTIME_MARKER,
-    MINIZINC_VERSION,
-    RuntimeInstallError,
+    _write_runtime_marker,
     install_managed_runtime,
 )
-
-
-def test_install_managed_runtime_is_callable() -> None:
-    assert callable(install_managed_runtime)
-    assert hasattr(runtime_install, "install_managed_runtime")
+from openconstraint_mcp.runtime_install.download import MINIZINC_VERSION
+from openconstraint_mcp.runtime_install.errors import RuntimeInstallError
 
 
 @pytest.fixture
@@ -129,7 +124,7 @@ def test_install_managed_nonempty_target_without_yes_refused(
 ) -> None:
     target = tmp_path / "runtime"
     target.mkdir()
-    runtime_install.core._write_runtime_marker(target)
+    _write_runtime_marker(target)
 
     with pytest.raises(RuntimeInstallError) as exc_info:
         install_managed_runtime(target, yes=False, console=_quiet_console())
@@ -144,7 +139,7 @@ def test_install_managed_nonempty_target_with_yes_replaces(
 ) -> None:
     target = tmp_path / "runtime"
     target.mkdir()
-    runtime_install.core._write_runtime_marker(target)
+    _write_runtime_marker(target)
     (target / "old-evidence").write_text("from a prior install")
 
     install_managed_runtime(target, yes=True, console=_quiet_console())
@@ -197,7 +192,7 @@ def test_install_refuses_with_stale_backup_when_runtime_present(
 ) -> None:
     target = tmp_path / "runtime"
     target.mkdir()
-    runtime_install.core._write_runtime_marker(target)
+    _write_runtime_marker(target)
 
     stale_backup = tmp_path / f".{target.name}.backup.99999"
     stale_backup.mkdir()
@@ -241,7 +236,7 @@ def test_install_rename_failure_restores_prior_runtime(
 ) -> None:
     target = tmp_path / "runtime"
     target.mkdir()
-    runtime_install.core._write_runtime_marker(target)
+    _write_runtime_marker(target)
     (target / "prior-evidence").write_text("prior install")
 
     real_rename = Path.rename
