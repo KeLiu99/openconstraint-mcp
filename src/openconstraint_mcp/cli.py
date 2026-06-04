@@ -8,7 +8,7 @@ import typer
 from rich.console import Console
 from rich.table import Table
 
-from .minizinc import MiniZincExecutionError, list_solvers
+from .minizinc.core import MiniZincExecutionError, list_solvers
 from .runtime import RuntimeMissingError, get_runtime_status, install_config_warning
 from .server import run_stdio
 
@@ -66,12 +66,12 @@ def install_runtime(
     # Lazy-imported so httpx/rich.progress stay out of stdio/check-runtime/list-solvers
     # cold paths. Enforced by test_cli_module_does_not_import_httpx_eagerly.
     from .runtime import get_runtime_dir, write_install_config
-    from .runtime_install import (
-        RuntimeInstallError,
+    from .runtime_install.core import (
         check_supported_platform,
         install_managed_runtime,
         is_managed_runtime_dir,
     )
+    from .runtime_install.errors import RuntimeInstallError
 
     try:
         check_supported_platform()

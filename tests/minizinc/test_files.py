@@ -7,14 +7,14 @@ from typing import Any
 
 import pytest
 
-from openconstraint_mcp.minizinc import (
+from openconstraint_mcp.minizinc.core import (
     FINDMUS_SOLVER,
     MiniZincExecutionError,
+    _validate_model_data_paths,
     check_model_path,
     find_unsat_core_path,
     solve_model_path,
 )
-from openconstraint_mcp.minizinc.core import _validate_model_data_paths
 from openconstraint_mcp.runtime import RuntimeMissingError
 from openconstraint_mcp.schemas import CheckResult, SolveResult, UnsatCoreResult
 

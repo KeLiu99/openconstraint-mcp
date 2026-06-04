@@ -7,8 +7,8 @@ from pathlib import Path
 
 import pytest
 
-from openconstraint_mcp import runtime_install
-from openconstraint_mcp.runtime_install import RuntimeInstallError
+from openconstraint_mcp.runtime_install.archive import _extract_bundle
+from openconstraint_mcp.runtime_install.errors import RuntimeInstallError
 
 
 def _make_tar(path: Path, members: list[tarfile.TarInfo]) -> Path:
@@ -37,7 +37,7 @@ def test_extract_bundle_strips_wrapper(
 ) -> None:
     dest = tmp_path / "runtime"
     dest.mkdir()
-    runtime_install.archive._extract_bundle(fake_minizinc_tarball, dest)
+    _extract_bundle(fake_minizinc_tarball, dest)
 
     binary = dest / "bin" / "minizinc"
     assert binary.is_file()
@@ -60,7 +60,7 @@ def test_extract_bundle_rejects_two_top_level_dirs(tmp_path: Path) -> None:
     dest = tmp_path / "runtime"
     dest.mkdir()
     with pytest.raises(RuntimeInstallError):
-        runtime_install.archive._extract_bundle(archive, dest)
+        _extract_bundle(archive, dest)
 
 
 def test_extract_bundle_rejects_parent_traversal(tmp_path: Path) -> None:
@@ -78,7 +78,7 @@ def test_extract_bundle_rejects_parent_traversal(tmp_path: Path) -> None:
     dest = tmp_path / "runtime"
     dest.mkdir()
     with pytest.raises(RuntimeInstallError):
-        runtime_install.archive._extract_bundle(archive, dest)
+        _extract_bundle(archive, dest)
 
 
 def test_extract_bundle_rejects_absolute_path_member(tmp_path: Path) -> None:
@@ -96,7 +96,7 @@ def test_extract_bundle_rejects_absolute_path_member(tmp_path: Path) -> None:
     dest = tmp_path / "runtime"
     dest.mkdir()
     with pytest.raises(RuntimeInstallError):
-        runtime_install.archive._extract_bundle(archive, dest)
+        _extract_bundle(archive, dest)
 
 
 def test_extract_bundle_rejects_symlink_with_absolute_target(tmp_path: Path) -> None:
@@ -115,4 +115,4 @@ def test_extract_bundle_rejects_symlink_with_absolute_target(tmp_path: Path) -> 
     dest = tmp_path / "runtime"
     dest.mkdir()
     with pytest.raises(RuntimeInstallError):
-        runtime_install.archive._extract_bundle(archive, dest)
+        _extract_bundle(archive, dest)

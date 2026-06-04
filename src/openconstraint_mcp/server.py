@@ -10,7 +10,7 @@ from typing import Annotated, Any
 from mcp.server.fastmcp import FastMCP
 from mcp.types import CallToolResult, TextContent
 
-from .minizinc import (
+from .minizinc.core import (
     DEFAULT_CHECK_TIMEOUT_MS,
     DEFAULT_SOLVE_TIMEOUT_MS,
     DEFAULT_SOLVER,
@@ -23,7 +23,7 @@ from .minizinc import (
     solve_model,
     solve_model_path,
 )
-from .minizinc import find_unsat_core as _find_unsat_core
+from .minizinc.core import find_unsat_core as _find_unsat_core
 from .protocol_text.descriptions import (
     CHECK_MINIZINC_FILES_DESCRIPTION,
     CHECK_MINIZINC_MODEL_DESCRIPTION,
