@@ -29,7 +29,7 @@ async def test_list_available_solvers_surfaces_actionable_error_on_binary_failur
             stderr="bad config\n",
         )
 
-    monkeypatch.setattr("openconstraint_mcp.minizinc.subprocess.run", _fake_run)
+    monkeypatch.setattr("openconstraint_mcp.minizinc.core.subprocess.run", _fake_run)
 
     mcp = create_mcp_server()
     with pytest.raises(Exception) as exc_info:
@@ -284,9 +284,7 @@ async def test_solve_constraint_problem_prompt_instructs_structured_result_prese
         for line in text.splitlines()
         if "present" in line.lower() and "structured" in line.lower()
     ]
-    assert presentation_lines, (
-        "explain step should instruct presenting a structured result summary"
-    )
+    assert presentation_lines, "explain step should instruct presenting a structured result summary"
 
 
 @pytest.mark.asyncio
@@ -301,9 +299,7 @@ async def test_solve_constraint_problem_prompt_solution_block_is_status_conditio
     # unsatisfiable/error/timeout branch must say there is no solution to show
     # rather than fabricating one, so a line ties the two together.
     no_solution_lines = [
-        line
-        for line in text.splitlines()
-        if "unsatisfiable" in line and "solution" in line
+        line for line in text.splitlines() if "unsatisfiable" in line and "solution" in line
     ]
     assert no_solution_lines, (
         "explain step should note unsat/error/timeout have no solution block to show"
@@ -366,8 +362,7 @@ async def test_solve_constraint_problem_prompt_avoids_repeated_headings() -> Non
     heading_lines = [
         line
         for line in text.splitlines()
-        if "heading" in line.lower()
-        and ("once" in line.lower() or "repeat" in line.lower())
+        if "heading" in line.lower() and ("once" in line.lower() or "repeat" in line.lower())
     ]
     assert heading_lines, "presentation guidance should forbid repeating section headings"
 
@@ -471,7 +466,7 @@ def _record_data_run(
         calls.append({"data_contents": data_contents})
         return completed
 
-    monkeypatch.setattr("openconstraint_mcp.minizinc.subprocess.run", _fake_run)
+    monkeypatch.setattr("openconstraint_mcp.minizinc.core.subprocess.run", _fake_run)
     return calls
 
 
@@ -512,7 +507,7 @@ async def test_solve_minizinc_model_happy_path(
             returncode=0,
         )
 
-    monkeypatch.setattr("openconstraint_mcp.minizinc.subprocess.run", _fake_run)
+    monkeypatch.setattr("openconstraint_mcp.minizinc.core.subprocess.run", _fake_run)
 
     mcp = create_mcp_server()
     result = await mcp.call_tool(
@@ -564,7 +559,7 @@ async def test_solve_minizinc_model_shows_solution_when_model_has_no_output_item
             returncode=0,
         )
 
-    monkeypatch.setattr("openconstraint_mcp.minizinc.subprocess.run", _fake_run)
+    monkeypatch.setattr("openconstraint_mcp.minizinc.core.subprocess.run", _fake_run)
 
     mcp = create_mcp_server()
     result = await mcp.call_tool(
@@ -610,7 +605,7 @@ async def test_solve_minizinc_model_omits_visible_statistics_when_empty(
             stdout=_stream(_solution_obj("x = 3;\n", {"x": 3})), stderr="", returncode=0
         )
 
-    monkeypatch.setattr("openconstraint_mcp.minizinc.subprocess.run", _fake_run)
+    monkeypatch.setattr("openconstraint_mcp.minizinc.core.subprocess.run", _fake_run)
 
     mcp = create_mcp_server()
     result = await mcp.call_tool(
@@ -643,7 +638,7 @@ async def test_solve_minizinc_model_empty_model_surfaces_actionable_error(
     def _fail_if_called(*args: object, **kwargs: object) -> None:
         raise AssertionError("subprocess.run must not be invoked for empty model")
 
-    monkeypatch.setattr("openconstraint_mcp.minizinc.subprocess.run", _fail_if_called)
+    monkeypatch.setattr("openconstraint_mcp.minizinc.core.subprocess.run", _fail_if_called)
 
     mcp = create_mcp_server()
     with pytest.raises(Exception) as exc_info:
@@ -658,7 +653,7 @@ async def test_solve_minizinc_model_non_positive_timeout_surfaces_actionable_err
     def _fail_if_called(*args: object, **kwargs: object) -> None:
         raise AssertionError("subprocess.run must not be invoked for bad timeout")
 
-    monkeypatch.setattr("openconstraint_mcp.minizinc.subprocess.run", _fail_if_called)
+    monkeypatch.setattr("openconstraint_mcp.minizinc.core.subprocess.run", _fail_if_called)
 
     mcp = create_mcp_server()
     with pytest.raises(Exception) as exc_info:
@@ -681,7 +676,7 @@ async def test_solve_minizinc_model_compile_error_returns_structured_result(
             returncode=1,
         )
 
-    monkeypatch.setattr("openconstraint_mcp.minizinc.subprocess.run", _fake_run)
+    monkeypatch.setattr("openconstraint_mcp.minizinc.core.subprocess.run", _fake_run)
 
     mcp = create_mcp_server()
     result = await mcp.call_tool(
@@ -731,7 +726,7 @@ async def test_solve_minizinc_model_invalid_parallel_surfaces_actionable_error(
     def _fail_if_called(*args: object, **kwargs: object) -> None:
         raise AssertionError("subprocess.run must not be invoked for bad parallel")
 
-    monkeypatch.setattr("openconstraint_mcp.minizinc.subprocess.run", _fail_if_called)
+    monkeypatch.setattr("openconstraint_mcp.minizinc.core.subprocess.run", _fail_if_called)
 
     mcp = create_mcp_server()
     with pytest.raises(Exception) as exc_info:
@@ -763,7 +758,7 @@ async def test_check_minizinc_model_happy_path(
     def _fake_run(*args: object, **kwargs: object) -> _FakeCompletedProcess:
         return _FakeCompletedProcess(stdout="", stderr="", returncode=0)
 
-    monkeypatch.setattr("openconstraint_mcp.minizinc.subprocess.run", _fake_run)
+    monkeypatch.setattr("openconstraint_mcp.minizinc.core.subprocess.run", _fake_run)
 
     mcp = create_mcp_server()
     result = await mcp.call_tool(
@@ -805,7 +800,7 @@ async def test_check_minizinc_model_compile_error_returns_structured_result(
             returncode=1,
         )
 
-    monkeypatch.setattr("openconstraint_mcp.minizinc.subprocess.run", _fake_run)
+    monkeypatch.setattr("openconstraint_mcp.minizinc.core.subprocess.run", _fake_run)
 
     mcp = create_mcp_server()
     result = await mcp.call_tool(
@@ -838,7 +833,7 @@ async def test_check_minizinc_model_empty_model_surfaces_actionable_error(
     def _fail_if_called(*args: object, **kwargs: object) -> None:
         raise AssertionError("subprocess.run must not be invoked for empty model")
 
-    monkeypatch.setattr("openconstraint_mcp.minizinc.subprocess.run", _fail_if_called)
+    monkeypatch.setattr("openconstraint_mcp.minizinc.core.subprocess.run", _fail_if_called)
 
     mcp = create_mcp_server()
     with pytest.raises(Exception) as exc_info:
@@ -872,7 +867,7 @@ async def test_find_unsat_core_happy_path(
             returncode=0,
         )
 
-    monkeypatch.setattr("openconstraint_mcp.minizinc.subprocess.run", _fake_run)
+    monkeypatch.setattr("openconstraint_mcp.minizinc.core.subprocess.run", _fake_run)
 
     mcp = create_mcp_server()
     result = await mcp.call_tool("find_unsat_core", {"model": _UNSAT_CORE_MODEL})
@@ -922,7 +917,7 @@ async def test_find_unsat_core_empty_model_surfaces_actionable_error(
     def _fail_if_called(*args: object, **kwargs: object) -> None:
         raise AssertionError("subprocess.run must not be invoked for empty model")
 
-    monkeypatch.setattr("openconstraint_mcp.minizinc.subprocess.run", _fail_if_called)
+    monkeypatch.setattr("openconstraint_mcp.minizinc.core.subprocess.run", _fail_if_called)
 
     mcp = create_mcp_server()
     with pytest.raises(Exception) as exc_info:
@@ -937,7 +932,7 @@ async def test_find_unsat_core_non_positive_timeout_surfaces_actionable_error(
     def _fail_if_called(*args: object, **kwargs: object) -> None:
         raise AssertionError("subprocess.run must not be invoked for bad timeout")
 
-    monkeypatch.setattr("openconstraint_mcp.minizinc.subprocess.run", _fail_if_called)
+    monkeypatch.setattr("openconstraint_mcp.minizinc.core.subprocess.run", _fail_if_called)
 
     mcp = create_mcp_server()
     with pytest.raises(Exception) as exc_info:
@@ -962,7 +957,7 @@ def _record_run_capturing_cwd(
         calls.append({"cmd": list(args[0]), "cwd": kwargs.get("cwd")})
         return completed
 
-    monkeypatch.setattr("openconstraint_mcp.minizinc.subprocess.run", _fake_run)
+    monkeypatch.setattr("openconstraint_mcp.minizinc.core.subprocess.run", _fake_run)
     return calls
 
 
@@ -1153,7 +1148,7 @@ async def test_solve_minizinc_files_path_not_found_surfaces_actionable_error(
     def _fail_if_called(*args: object, **kwargs: object) -> None:
         raise AssertionError("subprocess.run must not be invoked for a missing path")
 
-    monkeypatch.setattr("openconstraint_mcp.minizinc.subprocess.run", _fail_if_called)
+    monkeypatch.setattr("openconstraint_mcp.minizinc.core.subprocess.run", _fail_if_called)
     missing = tmp_path / "nope.mzn"
 
     mcp = create_mcp_server()

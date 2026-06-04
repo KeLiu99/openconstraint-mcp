@@ -10,11 +10,11 @@ import pytest
 from openconstraint_mcp.minizinc import (
     FINDMUS_SOLVER,
     MiniZincExecutionError,
-    _validate_model_data_paths,
     check_model_path,
     find_unsat_core_path,
     solve_model_path,
 )
+from openconstraint_mcp.minizinc.core import _validate_model_data_paths
 from openconstraint_mcp.runtime import RuntimeMissingError
 from openconstraint_mcp.schemas import CheckResult, SolveResult, UnsatCoreResult
 
@@ -70,7 +70,7 @@ def _record_run(
         )
         return completed
 
-    monkeypatch.setattr("openconstraint_mcp.minizinc.subprocess.run", _fake_run)
+    monkeypatch.setattr("openconstraint_mcp.minizinc.core.subprocess.run", _fake_run)
     return calls
 
 
@@ -78,7 +78,7 @@ def _fail_if_run_called(monkeypatch: pytest.MonkeyPatch) -> None:
     def _fail(*args: Any, **kwargs: Any) -> Any:
         raise AssertionError("subprocess.run must not be invoked")
 
-    monkeypatch.setattr("openconstraint_mcp.minizinc.subprocess.run", _fail)
+    monkeypatch.setattr("openconstraint_mcp.minizinc.core.subprocess.run", _fail)
 
 
 # --- CLI-style execution (real path, cwd = model's parent) -----------------
@@ -377,7 +377,7 @@ def test_oserror_wraps_as_execution_error(
     def _fake_run(*args: Any, **kwargs: Any) -> Any:
         raise OSError(8, "Exec format error")
 
-    monkeypatch.setattr("openconstraint_mcp.minizinc.subprocess.run", _fake_run)
+    monkeypatch.setattr("openconstraint_mcp.minizinc.core.subprocess.run", _fake_run)
 
     with pytest.raises(MiniZincExecutionError) as exc_info:
         solve_model_path(model_path)

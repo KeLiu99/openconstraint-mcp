@@ -24,11 +24,11 @@ MCP_SERVER_INSTRUCTIONS = (
     "runtime; do not use remote solvers or a bare PATH minizinc."
 )
 
-CHECK_RUNTIME_DESC = "Report whether the managed MiniZinc runtime is installed."
+CHECK_RUNTIME_DESCRIPTION = "Report whether the managed MiniZinc runtime is installed."
 
-LIST_AVAILABLE_SOLVERS_DESC = "List solvers available in the managed MiniZinc runtime."
+LIST_AVAILABLE_SOLVERS_DESCRIPTION = "List solvers available in the managed MiniZinc runtime."
 
-SOLVE_MINIZINC_MODEL_DESC = (
+SOLVE_MINIZINC_MODEL_DESCRIPTION = (
     "Solve a complete MiniZinc model through the managed local runtime. "
     "`model` must be full source: declarations, constraints, exactly one "
     "`solve` statement, and an `output` block. Optional `data` is `.dzn` "
@@ -57,7 +57,7 @@ SOLVE_MINIZINC_MODEL_DESC = (
     "`structuredContent` carries the complete SolveResult."
 )
 
-CHECK_MINIZINC_MODEL_DESC = (
+CHECK_MINIZINC_MODEL_DESCRIPTION = (
     "Compile-check a complete MiniZinc model through the managed local "
     "runtime WITHOUT solving it — flattening it for the chosen solver to "
     "catch syntax, type, missing-include, invalid-domain, and "
@@ -70,7 +70,7 @@ CHECK_MINIZINC_MODEL_DESC = (
     "is satisfiable."
 )
 
-FIND_UNSAT_CORE_DESC = (
+FIND_UNSAT_CORE_DESCRIPTION = (
     "Diagnose an unsatisfiable MiniZinc model by computing a minimal "
     "unsatisfiable subset (MUS) of its constraints via the managed "
     "runtime's findMUS tool. Use it when solve_minizinc_model returns "
@@ -87,7 +87,7 @@ FIND_UNSAT_CORE_DESC = (
 )
 
 # Shared guidance injected into each path-based file-tool description.
-_FILE_TOOL_SHARED_DESC = (
+_FILE_TOOL_SHARED_DESCRIPTION = (
     "Reads the model (and optional data) from local FILE PATHS on the "
     "machine running the server and runs the managed runtime from the "
     "model's own directory, so a relative `include` resolves just like a "
@@ -100,19 +100,19 @@ _FILE_TOOL_SHARED_DESC = (
     "solver."
 )
 
-CHECK_MINIZINC_FILES_DESC = (
+CHECK_MINIZINC_FILES_DESCRIPTION = (
     "Compile-check a MiniZinc model from local file paths WITHOUT solving "
     "it — the path-based sibling of `check_minizinc_model`. "
-    + _FILE_TOOL_SHARED_DESC
+    + _FILE_TOOL_SHARED_DESCRIPTION
     + " Returns the same CheckResult shape (`status` "
     "`ok`/`error`/`timeout`, `solver`, `stdout`, `stderr`, `elapsed_ms`); "
     "`ok` means it compiles, not that it is satisfiable."
 )
 
-SOLVE_MINIZINC_FILES_DESC = (
+SOLVE_MINIZINC_FILES_DESCRIPTION = (
     "Solve a MiniZinc model from local file paths — the path-based sibling "
     "of `solve_minizinc_model`. "
-    + _FILE_TOOL_SHARED_DESC
+    + _FILE_TOOL_SHARED_DESCRIPTION
     + " Returns the same SolveResult shape (`status`, `solver`, "
     "`return_code`, `timed_out`, `elapsed_ms`, `stdout`, `stderr`, "
     "`solution`, `solutions`, `objective`, `statistics`) and the same "
@@ -123,11 +123,11 @@ SOLVE_MINIZINC_FILES_DESC = (
     "(`free_search`, `parallel`, `random_seed`, `all_solutions`)."
 )
 
-FIND_UNSAT_CORE_FILES_DESC = (
+FIND_UNSAT_CORE_FILES_DESCRIPTION = (
     "Diagnose an unsatisfiable MiniZinc model from local file paths by "
     "computing a minimal unsatisfiable subset (MUS) via the managed "
     "runtime's findMUS tool — the path-based sibling of `find_unsat_core`. "
-    + _FILE_TOOL_SHARED_DESC
+    + _FILE_TOOL_SHARED_DESCRIPTION
     + " Returns the same UnsatCoreResult shape (`status` "
     "`mus_found`/`no_core`/`error`/`timeout`, `core`, `message`, `stdout`, "
     "`stderr`, `elapsed_ms`). `core` resolves from the ENTRY MODEL FILE "
@@ -136,7 +136,7 @@ FIND_UNSAT_CORE_FILES_DESC = (
     "the globally smallest."
 )
 
-SOLVE_CONSTRAINT_PROBLEM_PROMPT_DESC = (
+SOLVE_CONSTRAINT_PROBLEM_PROMPT_DESCRIPTION = (
     "Guide the MCP client's LLM through translating a natural-language "
     "constraint or optimization problem into MiniZinc and running it "
     "through the local managed runtime (via solve_minizinc_model when "

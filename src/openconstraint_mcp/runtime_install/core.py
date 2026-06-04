@@ -1,44 +1,27 @@
 from __future__ import annotations
 
-import hashlib
 import json
 import os
 import platform
 import shutil
 import subprocess
 import sys
-import tarfile
 import tempfile
 from pathlib import Path
 
-import httpx
 from rich.console import Console
-from rich.progress import (
-    BarColumn,
-    DownloadColumn,
-    Progress,
-    TextColumn,
-    TimeRemainingColumn,
-    TransferSpeedColumn,
+
+from .archive import _extract_bundle
+from .download import (
+    _ARCHIVE_SHA256,
+    _BUNDLE_FILENAME,
+    _BUNDLE_URL,
+    MINIZINC_VERSION,
+    _download_archive,
 )
-
-MINIZINC_VERSION: str = "2.9.7"
-
-# SHA256 of MiniZincIDE-2.9.7-bundle-linux-x86_64.tgz from the upstream
-# MiniZincIDE GitHub release. Recompute alongside MINIZINC_VERSION when bumping.
-_ARCHIVE_SHA256: str = "7e78d3a1d6feec2f5b6a43628632decb6995755ade92ff4e51a2188c54ca6399"
-
-_BUNDLE_FILENAME: str = f"MiniZincIDE-{MINIZINC_VERSION}-bundle-linux-x86_64.tgz"
-_BUNDLE_URL: str = (
-    f"https://github.com/MiniZinc/MiniZincIDE/releases/download/{MINIZINC_VERSION}/"
-    f"{_BUNDLE_FILENAME}"
-)
+from .errors import RuntimeInstallError
 
 MANAGED_RUNTIME_MARKER: str = ".openconstraint-runtime.json"
-
-
-class RuntimeInstallError(RuntimeError):
-    """Raised when installing the managed MiniZinc runtime fails."""
 
 
 def check_supported_platform() -> None:
@@ -70,99 +53,6 @@ def _write_runtime_marker(runtime_dir: Path) -> None:
         "minizinc_version": MINIZINC_VERSION,
     }
     marker.write_text(json.dumps(payload, indent=2) + "\n")
-
-
-def _download_archive(
-    url: str,
-    dest: Path,
-    expected_sha256: str,
-    console: Console,
-) -> None:
-    """Stream ``url`` to ``dest`` with a rich progress bar and SHA256 verify.
-
-    On any HTTP error or checksum mismatch ``dest`` is unlinked and a
-    :class:`RuntimeInstallError` is raised so callers never see a partial or
-    tampered file on disk.
-    """
-    timeout = httpx.Timeout(30.0, read=120.0)
-    hasher = hashlib.sha256()
-    try:
-        with httpx.Client(follow_redirects=True, timeout=timeout) as client:
-            with client.stream("GET", url) as response:
-                if response.status_code >= 400:
-                    raise RuntimeInstallError(
-                        f"download failed: HTTP {response.status_code} from {url}"
-                    )
-                total = int(response.headers.get("content-length", 0)) or None
-                with Progress(
-                    TextColumn("[bold blue]Downloading"),
-                    BarColumn(),
-                    DownloadColumn(),
-                    TransferSpeedColumn(),
-                    TimeRemainingColumn(),
-                    console=console,
-                    transient=True,
-                ) as progress:
-                    task_id = progress.add_task("download", total=total)
-                    with dest.open("wb") as fh:
-                        for chunk in response.iter_bytes():
-                            if not chunk:
-                                continue
-                            fh.write(chunk)
-                            hasher.update(chunk)
-                            progress.update(task_id, advance=len(chunk))
-    except RuntimeInstallError:
-        if dest.exists():
-            dest.unlink()
-        raise
-    except httpx.HTTPError as exc:
-        if dest.exists():
-            dest.unlink()
-        raise RuntimeInstallError(f"download failed for {url}: {exc}") from exc
-
-    digest = hasher.hexdigest()
-    if digest.lower() != expected_sha256.lower():
-        if dest.exists():
-            dest.unlink()
-        raise RuntimeInstallError(
-            "checksum mismatch for downloaded MiniZinc archive: "
-            f"expected {expected_sha256}, got {digest}"
-        )
-
-
-def _extract_bundle(archive: Path, dest: Path) -> None:
-    """Extract ``archive`` into ``dest``, stripping the single top-level wrapper.
-
-    The MiniZinc bundle ships everything under one wrapper directory
-    (e.g. ``MiniZincIDE-2.9.7-bundle-linux-x86_64/``). After extraction the
-    contents of that wrapper live directly under ``dest``.
-    """
-    scratch = dest / "_extract"
-    if scratch.exists():
-        shutil.rmtree(scratch)
-    scratch.mkdir(parents=True)
-    try:
-        try:
-            with tarfile.open(archive, "r:*") as tar:
-                tar.extractall(scratch, filter="data")
-        except (tarfile.TarError, OSError) as exc:
-            raise RuntimeInstallError(
-                f"failed to extract MiniZinc archive {archive}: {exc}"
-            ) from exc
-
-        entries = list(scratch.iterdir())
-        if len(entries) != 1 or not entries[0].is_dir():
-            raise RuntimeInstallError(
-                "MiniZinc archive did not contain a single top-level directory "
-                f"(got {[entry.name for entry in entries]})"
-            )
-        wrapper = entries[0]
-        for child in wrapper.iterdir():
-            shutil.move(child, dest / child.name)
-        wrapper.rmdir()
-    finally:
-        if scratch.exists():
-            shutil.rmtree(scratch, ignore_errors=True)
 
 
 def _smoke_check_binary(binary: Path) -> None:

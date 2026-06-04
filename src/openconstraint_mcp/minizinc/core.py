@@ -1,16 +1,15 @@
 from __future__ import annotations
 
 import json
-import re
 import subprocess
 import tempfile
 import time
-from collections.abc import Iterator, Sequence
+from collections.abc import Sequence
 from pathlib import Path
 from typing import Any, NamedTuple
 
-from .runtime import RuntimeMissingError, get_minizinc_binary, is_runtime_installed
-from .schemas import (
+from ..runtime import RuntimeMissingError, get_minizinc_binary, is_runtime_installed
+from ..schemas import (
     CheckResult,
     CheckStatus,
     SolveResult,
@@ -20,6 +19,8 @@ from .schemas import (
     UnsatCoreConstraint,
     UnsatCoreResult,
 )
+from .stream import _parse_solve_stream
+from .unsat_core import _parse_unsat_core
 
 DEFAULT_SOLVER: str = "cp-sat"
 FINDMUS_SOLVER: str = "org.minizinc.findmus"
@@ -53,176 +54,6 @@ class MiniZincExecutionError(RuntimeError):
     """Raised when the managed MiniZinc binary fails to produce a usable result."""
 
 
-# MiniZinc's `--json-stream` emits one JSON object per line. Each object has a
-# `type`; the solve parser consumes `solution`, `status`, `statistics`, `error`,
-# and `warning` and ignores every other type, so a future object type can't break
-# a solve. Because status and statistics arrive as sibling top-level objects while
-# the model's own text is encapsulated inside a solution object's `output` string,
-# a model can no longer forge a status verdict or a stat line — the spoofing
-# hazard of the old stdout scrape is closed for the solve path.
-_STATUS_MAP: dict[str, SolveStatus] = {
-    "OPTIMAL_SOLUTION": "optimal",
-    "ALL_SOLUTIONS": "satisfied",
-    "SATISFIED": "satisfied",
-    "UNSATISFIABLE": "unsatisfiable",
-    "UNKNOWN": "unknown",
-    "UNBOUNDED": "unbounded",
-    "UNSAT_OR_UNBOUNDED": "unsat_or_unbounded",
-    # A runtime-failure verdict from the driver/solver — e.g. cp-sat rejecting an
-    # out-of-range parameter such as a negative or > int32 `random_seed`. Without
-    # this entry it falls through `_map_status` to "unknown", silently hiding the
-    # failure; map it to "error" so a bad parameter surfaces as an error verdict.
-    "ERROR": "error",
-}
-
-
-class _StreamParse(NamedTuple):
-    # `status` is the stream's own verdict: an `error` object (seen at any point)
-    # forces "error", else the mapped `{"type":"status"}` value, else None —
-    # meaning the stream gave no completeness verdict and the caller applies a
-    # return-code fallback (a single `satisfy` stops at the first solution and
-    # emits no status object).
-    status: SolveStatus | None
-    solutions: list[dict[str, Any]]
-    objective: int | float | None
-    statistics: dict[str, str]
-    # Reconstructed human text: each solution's `output.default` section, or — when
-    # the model has no explicit `output` item, so the stream carries only `json` —
-    # a synthesized rendering of that solution's variable map.
-    stdout: str
-    messages: list[str]  # error/warning diagnostics to surface into `stderr`
-
-
-def _diagnostic_line(obj: dict[str, Any]) -> str | None:
-    """Render an ``error``/``warning`` stream object into one diagnostic line.
-
-    Prefers ``"<what>: <message>"`` (e.g. ``syntax error: unexpected item …``),
-    falling back to whichever of ``what``/``message`` is a string. Returns None
-    when neither is, so an empty diagnostic is never surfaced.
-    """
-    what = obj.get("what")
-    message = obj.get("message")
-    if isinstance(what, str) and isinstance(message, str):
-        return f"{what}: {message}"
-    if isinstance(message, str):
-        return message
-    if isinstance(what, str):
-        return what
-    return None
-
-
-def _map_status(raw: str, *, has_solution: bool) -> SolveStatus:
-    # A known spelling maps directly. An unrecognized verdict (a renamed or newly
-    # added MiniZinc status) falls back safely so it never crashes a solve: a
-    # solution in hand means "satisfied", otherwise "unknown".
-    mapped = _STATUS_MAP.get(raw)
-    if mapped is not None:
-        return mapped
-    return "satisfied" if has_solution else "unknown"
-
-
-def _render_json_solution(values: dict[str, Any]) -> str:
-    # Render a solution's `json` variable map as MiniZinc-style `name = <value>;`
-    # lines, one per variable. Used as the human-text fallback when a solution
-    # object has no `default` section — i.e. the model has no explicit `output`
-    # item, so under `--output-mode json` the stream emits only the `json` section.
-    # `_objective` is already stripped by the caller, matching the explicit-output
-    # `default` text (which `--output-objective` does not augment).
-    return "".join(f"{key} = {json.dumps(value)};\n" for key, value in values.items())
-
-
-def _reconstruct_stdout(blocks: Sequence[str]) -> str:
-    # Rebuild the human solution text from each solution's human block — its
-    # `output.default` section, or a `_render_json_solution` rendering when no
-    # `default` is present. Each block is made newline-terminated so consecutive
-    # solutions stay visually separated; a block already ending in a newline is
-    # left as-is (no double blank lines). This restores the "solution text lives in
-    # stdout" contract the display path and prompt rely on, now sourced from the
-    # stream regardless of whether the model declares an explicit `output` item.
-    return "".join(block if block.endswith("\n") else block + "\n" for block in blocks)
-
-
-def _parse_solve_stream(stdout: str) -> _StreamParse:
-    """Parse a ``--json-stream`` solve transcript into structured fields.
-
-    Best-effort and never raises: a line that is not a JSON object (stray text,
-    or a half-written final object truncated by a hard timeout) is skipped, and an
-    unknown object ``type`` is ignored. ``_objective`` is removed from each
-    solution's variable map, and the last solution's value becomes ``objective``
-    (None for satisfaction, where no solution carries one).
-    """
-    solutions: list[dict[str, Any]] = []
-    blocks: list[str] = []
-    statistics: dict[str, str] = {}
-    messages: list[str] = []
-    objective: int | float | None = None
-    status_raw: str | None = None
-    error_seen = False
-
-    for raw_line in stdout.splitlines():
-        line = raw_line.strip()
-        if not line:
-            continue
-        try:
-            obj = json.loads(line)
-        except ValueError:
-            continue  # not a JSON object (truncated tail / stray text)
-        if not isinstance(obj, dict):
-            continue
-        obj_type = obj.get("type")
-        if obj_type == "solution":
-            output = obj.get("output")
-            if not isinstance(output, dict):
-                continue
-            stripped: dict[str, Any] | None = None
-            values = output.get("json")
-            if isinstance(values, dict):
-                stripped = dict(values)
-                obj_val = stripped.pop("_objective", None)
-                if isinstance(obj_val, (int, float)) and not isinstance(obj_val, bool):
-                    objective = obj_val
-                solutions.append(stripped)
-            default = output.get("default")
-            if isinstance(default, str):
-                blocks.append(default)
-            elif stripped:
-                # No `default` section: the model has no explicit `output` item, so
-                # the solution arrives only as the `json` map. Synthesize a human
-                # block from it so the reconstructed stdout still shows the solution.
-                blocks.append(_render_json_solution(stripped))
-        elif obj_type == "status":
-            raw = obj.get("status")
-            if isinstance(raw, str):
-                status_raw = raw
-        elif obj_type == "statistics":
-            stats = obj.get("statistics")
-            if isinstance(stats, dict):
-                for key, value in stats.items():
-                    statistics[str(key)] = value if isinstance(value, str) else str(value)
-        elif obj_type in ("error", "warning"):
-            if obj_type == "error":
-                error_seen = True
-            line_msg = _diagnostic_line(obj)
-            if line_msg is not None:
-                messages.append(line_msg)
-        # any other object type is ignored (forward-compatible)
-
-    if error_seen:
-        status: SolveStatus | None = "error"
-    elif status_raw is not None:
-        status = _map_status(status_raw, has_solution=bool(solutions))
-    else:
-        status = None
-    return _StreamParse(
-        status=status,
-        solutions=solutions,
-        objective=objective,
-        statistics=statistics,
-        stdout=_reconstruct_stdout(blocks),
-        messages=messages,
-    )
-
-
 def _coerce_to_text(payload: str | bytes | None) -> str:
     if payload is None:
         return ""
@@ -243,13 +74,22 @@ def _format_unsat_core_message(core: Sequence[UnsatCoreConstraint]) -> str:
     )
 
 
-def list_solvers() -> SolverList:
+def _require_minizinc_binary() -> Path:
+    """Return the managed MiniZinc binary, raising if the runtime is absent.
+
+    The runtime-presence gate shared by ``list_solvers`` and both runners, so
+    the user-facing "not installed" message lives in one place.
+    """
     if not is_runtime_installed():
         raise RuntimeMissingError(
             "Managed MiniZinc runtime not found. "
             "Run `openconstraint-mcp install-runtime` to set it up."
         )
-    binary = get_minizinc_binary()
+    return get_minizinc_binary()
+
+
+def list_solvers() -> SolverList:
+    binary = _require_minizinc_binary()
     try:
         completed = subprocess.run(
             [str(binary), "--solvers-json"],
@@ -336,6 +176,35 @@ def _invoke_minizinc(cmd: Sequence[str], *, timeout_ms: int, cwd: str) -> _RunOu
     )
 
 
+def _build_minizinc_cmd(
+    binary: Path,
+    *,
+    solver: str,
+    timeout_ms: int,
+    model_arg: str,
+    extra_args: Sequence[str] = (),
+    data_args: Sequence[str] = (),
+) -> list[str]:
+    """Assemble the managed-binary argv shared by both runners.
+
+    Centralizes MiniZinc's positional contract — the model file precedes any
+    data file (``model.mzn data.dzn``), with ``--solver``/``--time-limit`` and
+    the caller's ``extra_args`` ahead of both — so the two runners can't drift
+    on argument order. ``extra_args`` and ``data_args`` default to empty, so a
+    minimal (transport-only, dataless) command needs neither.
+    """
+    return [
+        str(binary),
+        "--solver",
+        solver,
+        "--time-limit",
+        str(timeout_ms),
+        *extra_args,
+        model_arg,
+        *data_args,
+    ]
+
+
 def _run_managed_minizinc(
     model: str,
     *,
@@ -365,12 +234,7 @@ def _run_managed_minizinc(
         raise ValueError("model must not be empty")
     if timeout_ms <= 0:
         raise ValueError("timeout_ms must be positive")
-    if not is_runtime_installed():
-        raise RuntimeMissingError(
-            "Managed MiniZinc runtime not found. "
-            "Run `openconstraint-mcp install-runtime` to set it up."
-        )
-    binary = get_minizinc_binary()
+    binary = _require_minizinc_binary()
     with tempfile.TemporaryDirectory(prefix="openconstraint-mcp-") as tmp:
         tmp_dir = Path(tmp)
         model_file = tmp_dir / _MODEL_FILENAME
@@ -380,86 +244,15 @@ def _run_managed_minizinc(
             data_file = tmp_dir / _DATA_FILENAME
             data_file.write_text(data, encoding="utf-8")
             data_args = [str(data_file)]
-        cmd = [
-            str(binary),
-            "--solver",
-            solver,
-            "--time-limit",
-            str(timeout_ms),
-            *extra_args,
-            str(model_file),
-            *data_args,
-        ]
+        cmd = _build_minizinc_cmd(
+            binary,
+            solver=solver,
+            timeout_ms=timeout_ms,
+            extra_args=extra_args,
+            model_arg=str(model_file),
+            data_args=data_args,
+        )
         return _invoke_minizinc(cmd, timeout_ms=timeout_ms, cwd=str(tmp_dir))
-
-
-def _slice_source(model: str, sl: int, sc: int, el: int, ec: int) -> str:
-    lines = model.splitlines()
-    # Reject an unusable line span: before the file, inverted, or starting past EOF.
-    if sl < 1 or el < 1 or sl > el or sl > len(lines):
-        return ""
-
-    # Clamp the end line into the file; the guard above keeps this non-empty.
-    referenced = lines[sl - 1 : min(el, len(lines))]
-    fallback = "\n".join(referenced)
-    first, last = referenced[0], referenced[-1]
-
-    # Slice precisely only when every column bound lands inside its line (and, on
-    # a single line, start precedes end). An end line past EOF means the end
-    # column can't be trusted, so fall back to the whole referenced line(s).
-    cols_usable = (
-        el <= len(lines)
-        and 1 <= sc <= len(first)
-        and 1 <= ec <= len(last)
-        and (sl != el or sc <= ec)
-    )
-    if not cols_usable:
-        return fallback
-
-    if sl == el:
-        return first[sc - 1 : ec]
-    return "\n".join([first[sc - 1 :], *referenced[1:-1], last[:ec]])
-
-
-# findMUS prints each MUS constraint as a pipe-delimited trace span:
-# <file>|<start-line>|<start-col>|<end-line>|<end-col>|... — capture the file
-# token (ending in .mzn) and the four 1-indexed coordinates.
-_SPAN_PATTERN = re.compile(r"([^\s|;]+\.mzn)\|(\d+)\|(\d+)\|(\d+)\|(\d+)")
-
-
-def _iter_model_spans(stdout: str, model_filename: str) -> Iterator[tuple[int, int, int, int]]:
-    # Keep only spans whose file token matches the entry model's basename;
-    # spans from included files stay out of the structured core. The match is
-    # basename-only, so an included file sharing the entry model's basename in
-    # a different directory would be mis-attributed here — a documented
-    # best-effort limitation (raw stdout stays authoritative).
-    for file_name, sl_raw, sc_raw, el_raw, ec_raw in _SPAN_PATTERN.findall(stdout):
-        if Path(file_name).name == model_filename:
-            yield int(sl_raw), int(sc_raw), int(el_raw), int(ec_raw)
-
-
-def _constraint_from_span(model: str, span: tuple[int, int, int, int]) -> UnsatCoreConstraint:
-    sl, sc, el, ec = span
-    return UnsatCoreConstraint(
-        line=sl,
-        column=sc,
-        end_line=el,
-        end_column=ec,
-        source=_slice_source(model, sl, sc, el, ec),
-    )
-
-
-def _parse_unsat_core(
-    stdout: str, model: str, *, model_filename: str = _MODEL_FILENAME
-) -> tuple[bool, list[UnsatCoreConstraint]]:
-    mus_present = any(line.lstrip().startswith("MUS:") for line in stdout.splitlines())
-    if not mus_present:
-        return False, []
-
-    # Repeated trace lines for the same constraint collapse to a single entry,
-    # with first-seen order preserved (dict keeps insertion order).
-    unique_spans = dict.fromkeys(_iter_model_spans(stdout, model_filename))
-    return True, [_constraint_from_span(model, span) for span in unique_spans]
 
 
 def _merge_stderr(real_stderr: str, messages: Sequence[str]) -> str:
@@ -647,7 +440,8 @@ def _solve_extra_args(
         flags += ["-r", str(random_seed)]
     if all_solutions:
         flags.append("-a")
-    return (*_SOLVE_STREAM_ARGS, *flags)
+
+    return *_SOLVE_STREAM_ARGS, *flags
 
 
 def solve_model(
@@ -726,12 +520,13 @@ def _validate_model_data_paths(
         raise ValueError(f"model_path is not a file: {model_path}")
     if not _read_text_utf8(model_path).strip():
         raise ValueError(f"model file is empty: {model_path}")
-    if data_path is not None:
-        data_path = data_path.resolve()
-        if not data_path.exists():
-            raise ValueError(f"data_path does not exist: {data_path}")
-        if not data_path.is_file():
-            raise ValueError(f"data_path is not a file: {data_path}")
+    if data_path is None:
+        return model_path, None
+    data_path = data_path.resolve()
+    if not data_path.exists():
+        raise ValueError(f"data_path does not exist: {data_path}")
+    if not data_path.is_file():
+        raise ValueError(f"data_path is not a file: {data_path}")
     return model_path, data_path
 
 
@@ -755,23 +550,16 @@ def _run_managed_minizinc_paths(
     """
     if timeout_ms <= 0:
         raise ValueError("timeout_ms must be positive")
-    if not is_runtime_installed():
-        raise RuntimeMissingError(
-            "Managed MiniZinc runtime not found. "
-            "Run `openconstraint-mcp install-runtime` to set it up."
-        )
-    binary = get_minizinc_binary()
+    binary = _require_minizinc_binary()
     data_args = [str(data_path)] if data_path is not None else []
-    cmd = [
-        str(binary),
-        "--solver",
-        solver,
-        "--time-limit",
-        str(timeout_ms),
-        *extra_args,
-        str(model_path),
-        *data_args,
-    ]
+    cmd = _build_minizinc_cmd(
+        binary,
+        solver=solver,
+        timeout_ms=timeout_ms,
+        extra_args=extra_args,
+        model_arg=str(model_path),
+        data_args=data_args,
+    )
     return _invoke_minizinc(cmd, timeout_ms=timeout_ms, cwd=str(model_path.parent))
 
 
