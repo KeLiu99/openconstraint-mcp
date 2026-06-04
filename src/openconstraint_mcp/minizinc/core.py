@@ -441,8 +441,7 @@ def _solve_extra_args(
     if all_solutions:
         flags.append("-a")
 
-    # noinspection PyRedundantParentheses
-    return (*_SOLVE_STREAM_ARGS, *flags)
+    return *_SOLVE_STREAM_ARGS, *flags
 
 
 def solve_model(

@@ -14,6 +14,8 @@ from rich.progress import (
     TransferSpeedColumn,
 )
 
+from .errors import RuntimeInstallError
+
 MINIZINC_VERSION: str = "2.9.7"
 
 # SHA256 of MiniZincIDE-2.9.7-bundle-linux-x86_64.tgz from the upstream
@@ -25,10 +27,6 @@ _BUNDLE_URL: str = (
     f"https://github.com/MiniZinc/MiniZincIDE/releases/download/{MINIZINC_VERSION}/"
     f"{_BUNDLE_FILENAME}"
 )
-
-
-class RuntimeInstallError(RuntimeError):
-    """Raised when installing the managed MiniZinc runtime fails."""
 
 
 def _download_archive(

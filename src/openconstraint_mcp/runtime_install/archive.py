@@ -4,7 +4,7 @@ import shutil
 import tarfile
 from pathlib import Path
 
-from .download import RuntimeInstallError
+from .errors import RuntimeInstallError
 
 
 def _extract_bundle(archive: Path, dest: Path) -> None:

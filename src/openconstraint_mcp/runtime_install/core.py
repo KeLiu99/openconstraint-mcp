@@ -17,9 +17,9 @@ from .download import (
     _BUNDLE_FILENAME,
     _BUNDLE_URL,
     MINIZINC_VERSION,
-    RuntimeInstallError,
     _download_archive,
 )
+from .errors import RuntimeInstallError
 
 MANAGED_RUNTIME_MARKER: str = ".openconstraint-runtime.json"
 
