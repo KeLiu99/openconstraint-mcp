@@ -256,6 +256,36 @@ def test_solve_model_num_solutions_rejected_for_cp_sat() -> None:
         solve_model(_ALL_SOLUTIONS_MODEL, solver="cp-sat", num_solutions=2)
 
 
+@pytest.mark.parametrize("solver", ["org.gecode.gecode", "org.chuffed.chuffed"])
+def test_list_solvers_reports_num_solutions_capability_for_supported_solvers(
+    solver: str,
+) -> None:
+    # Validates the parsing assumption against the real 2.9.7 config: the bundled
+    # gecode/chuffed entries actually carry stdFlags, and both are allowlisted, so
+    # the conservative gate reports supports_num_solutions True for them.
+    _skip_if_solver_absent(solver)
+
+    by_id = {s.id: s for s in list_solvers().solvers}
+    caps = by_id[solver].capabilities
+
+    assert caps.std_flags
+    assert caps.supports_num_solutions is True
+
+
+def test_list_solvers_reports_cpsat_without_num_solutions_capability() -> None:
+    # The conservative gate holds against the real config: cp-sat declares the
+    # standard flags but is not allowlisted, so supports_num_solutions stays False.
+    # The managed 2.9.7 runtime reports the OR-Tools solver under the canonical id
+    # `cp-sat` (not `com.google.or-tools.cpsat`), matching the `solver="cp-sat"`
+    # the solve-path gate rejects in test_solve_model_num_solutions_rejected_for_cp_sat.
+    _skip_if_solver_absent("cp-sat")
+
+    by_id = {s.id: s for s in list_solvers().solvers}
+    caps = by_id["cp-sat"].capabilities
+
+    assert caps.supports_num_solutions is False
+
+
 def test_check_model_honors_inline_data() -> None:
     # Without data, `var 1..n` has an unbound domain and the model cannot
     # flatten — a clean `ok` proves the data file was read.

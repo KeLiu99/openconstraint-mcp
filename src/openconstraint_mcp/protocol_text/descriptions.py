@@ -30,7 +30,36 @@ MCP_SERVER_INSTRUCTIONS = (
 
 CHECK_RUNTIME_DESCRIPTION = "Report whether the managed MiniZinc runtime is installed."
 
-LIST_AVAILABLE_SOLVERS_DESCRIPTION = "List solvers available in the managed MiniZinc runtime."
+LIST_AVAILABLE_SOLVERS_DESCRIPTION = (
+    "List solvers available in the managed MiniZinc runtime. Returns a "
+    "SolverList of SolverInfo entries — each with `id`, `name`, `version`, "
+    "`tags`, and a `capabilities` object of deterministic facts read from the "
+    "managed runtime's own `--solvers-json` config, for client-side solver "
+    "routing. `capabilities.supports_all_solutions` (`-a`), `supports_free_search` "
+    "(`-f`), `supports_parallel` (`-p`), and `supports_random_seed` (`-r`) report "
+    "membership in the solver's declared `stdFlags`. `supports_num_solutions` "
+    "(`-n`) is NOT a raw stdFlags read: it is the conservative canonical gate "
+    "matching the `num_solutions` solve control — True only for "
+    "`org.gecode.gecode` and `org.chuffed.chuffed`, not the default `cp-sat`. "
+    "Capabilities are advisory facts, not enforcement: the server still does not "
+    "reject `-a/-f/-p/-r` at solve time. The raw advisory `std_flags` list reports "
+    "the standard flags the solver configuration declares; it is NOT a passthrough "
+    "surface — a client cannot send those flags back into `solve_minizinc_model` / "
+    "`solve_minizinc_files`. Two cases to keep distinct: (a) `std_flags` may list "
+    "standard flags the server exposes no named control for at all (e.g. `-i`, "
+    "`-s`, `-t`, `-v`) — purely informational; and (b) the allowlist divergence — "
+    "`org.gecode.gist` lists `-n` (which does map to the named `num_solutions` "
+    "control) yet `supports_num_solutions` is False, because the conservative gate "
+    "excludes gist. The model-visible text content presents a complete "
+    "`id`/`name`/`version` inventory table of every solver with a final-answer "
+    "requirement to copy the table without omitting rows, converting it to "
+    "bullets/prose, summarizing, or grouping entries, followed by a user-visible "
+    "note that detailed solver capabilities can be requested. "
+    "The structured `SolverList` also carries that top-level `capability_note`. "
+    "The full `capabilities` metadata (the `supports_*` booleans and `std_flags`) "
+    "lives in the structured result and is not printed by default — request it "
+    "explicitly to surface it."
+)
 
 SOLVE_MINIZINC_MODEL_DESCRIPTION = (
     "Solve a complete MiniZinc model through the managed local runtime. "

@@ -142,8 +142,28 @@ in an **inline-source** form (below) and a **path-based file** sibling
 - **`check_runtime`** — returns a `RuntimeStatus` with fields
   `installed: bool`, `runtime_dir: str`, and `minizinc_binary: str | None`.
 - **`list_available_solvers`** — returns a `SolverList` of `SolverInfo` entries
-  (`id`, `name`, `version`, `tags`). Raises a runtime-missing error if the
-  managed MiniZinc binary is not present.
+  (`id`, `name`, `version`, `tags`, and a `capabilities` object), plus a
+  top-level `capability_note`. `capabilities`
+  carries `supports_all_solutions` (`-a`), `supports_free_search` (`-f`),
+  `supports_parallel` (`-p`), `supports_random_seed` (`-r`),
+  `supports_num_solutions` (`-n`), and an advisory `std_flags` list — deterministic
+  facts read from the managed runtime's `--solvers-json` config for client-side
+  solver routing. `supports_num_solutions` is the conservative gate
+  (`org.gecode.gecode` / `org.chuffed.chuffed` only, matching the `num_solutions`
+  solve control); `std_flags` is advisory — it reports the standard flags the
+  solver configuration declares and is **not** a passthrough, so clients cannot
+  send those flags back into `solve_minizinc_model` / `solve_minizinc_files`.
+  Alongside the structured `SolverList`, the tool returns model-visible text
+  content presenting a complete `id`/`name`/`version` inventory table of
+  **every** solver (with a final-answer requirement to copy the table without
+  omitting rows, converting it to bullets/prose, summarizing, or grouping
+  entries), followed by a user-visible note that detailed solver capabilities
+  can be requested, a `num_solutions` routing note, and a caution that a declared
+  MIP solver may still need separate binaries/licenses to run. The full
+  `capabilities` metadata stays in the structured result and is not printed by
+  default — request it explicitly to surface the `supports_*` booleans and
+  `std_flags`. Raises a runtime-missing error if the managed MiniZinc binary is
+  not present.
 - **`check_minizinc_model`** — compile-check a complete MiniZinc model
   through the managed local runtime **without solving it**. This is the
   cheap pre-flight before `solve_minizinc_model`: it runs MiniZinc's

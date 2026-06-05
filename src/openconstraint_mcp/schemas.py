@@ -12,15 +12,34 @@ class RuntimeStatus(BaseModel):
     minizinc_binary: str | None = None
 
 
+class SolverCapabilities(BaseModel):
+    # Read from the solver config's stdFlags (--solvers-json): which standard
+    # solve controls the managed runtime declares for this solver. Advisory —
+    # the server does not gate these at solve time.
+    supports_all_solutions: bool = False  # -a
+    supports_free_search: bool = False  # -f
+    supports_parallel: bool = False  # -p
+    supports_random_seed: bool = False  # -r
+    # NOT stdFlags-derived. The conservative, canonical num_solutions gate
+    # (org.gecode.gecode / org.chuffed.chuffed only). org.gecode.gist lists -n in
+    # stdFlags but is excluded, so this deliberately diverges from std_flags.
+    supports_num_solutions: bool = False  # -n
+    # Raw stdFlags, advisory/informational. May include flags the server exposes
+    # no named control for; NOT a passthrough surface.
+    std_flags: list[str] = Field(default_factory=list)
+
+
 class SolverInfo(BaseModel):
     id: str
     name: str
     version: str | None = None
     tags: list[str] = Field(default_factory=list)
+    capabilities: SolverCapabilities = Field(default_factory=SolverCapabilities)
 
 
 class SolverList(BaseModel):
     solvers: list[SolverInfo]
+    capability_note: str = "Detailed solver capabilities are available on request for every solver."
 
 
 SolveStatus = Literal[
