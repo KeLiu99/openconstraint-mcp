@@ -18,6 +18,7 @@ from openconstraint_mcp.minizinc.core import (
     find_unsat_core,
     list_solvers,
     solve_model,
+    solver_supports_num_solutions,
 )
 from openconstraint_mcp.minizinc.stream import _parse_solve_stream
 from openconstraint_mcp.minizinc.unsat_core import _parse_unsat_core, _slice_source
@@ -800,6 +801,83 @@ def test_solve_model_rejects_non_positive_parallel(
     monkeypatch.setattr("openconstraint_mcp.minizinc.core.subprocess.run", _fail_if_called)
     with pytest.raises(ValueError, match="parallel"):
         solve_model("solve satisfy;", parallel=bad)
+
+
+# --- num_solutions (solver-gated) ------------------------------------------
+
+
+@pytest.mark.parametrize("solver", ["org.chuffed.chuffed", "org.gecode.gecode"])
+def test_solve_model_num_solutions_adds_valued_n_flag_for_supported_solver(
+    solver: str, fake_minizinc_binary: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # A canonical -n-supporting solver gets `-n N` appended alongside the transport.
+    cmd = _solve_cmd_with_flags(monkeypatch, num_solutions=2, solver=solver)
+    assert cmd[cmd.index("-n") + 1] == "2"
+
+
+def test_solve_model_num_solutions_rejects_short_alias(
+    fake_minizinc_binary: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The allowlist is canonical-ids-only: a short alias like "gecode" degrades to
+    # the actionable error rather than a broken -n command (Decision 2).
+    def _fail_if_called(*args: Any, **kwargs: Any) -> Any:
+        raise AssertionError("subprocess.run must not be invoked for an unsupported solver")
+
+    monkeypatch.setattr("openconstraint_mcp.minizinc.core.subprocess.run", _fail_if_called)
+    with pytest.raises(ValueError, match="num_solutions") as exc_info:
+        solve_model("solve satisfy;", num_solutions=2, solver="gecode")
+    message = str(exc_info.value)
+    assert "org.chuffed.chuffed" in message
+    assert "org.gecode.gecode" in message
+
+
+def test_solve_model_num_solutions_rejected_for_default_solver(
+    fake_minizinc_binary: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The default solver (cp-sat) does not support -n; the gate raises before any
+    # subprocess so the doomed command is never built.
+    def _fail_if_called(*args: Any, **kwargs: Any) -> Any:
+        raise AssertionError("subprocess.run must not be invoked for cp-sat + num_solutions")
+
+    monkeypatch.setattr("openconstraint_mcp.minizinc.core.subprocess.run", _fail_if_called)
+    with pytest.raises(ValueError, match="num_solutions") as exc_info:
+        solve_model("solve satisfy;", num_solutions=2)
+    message = str(exc_info.value)
+    assert "org.chuffed.chuffed" in message
+    assert "org.gecode.gecode" in message
+
+
+@pytest.mark.parametrize("bad", [0, -1])
+def test_solve_model_rejects_non_positive_num_solutions(
+    bad: int, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def _fail_if_called(*args: Any, **kwargs: Any) -> Any:
+        raise AssertionError("subprocess.run must not be invoked for bad num_solutions")
+
+    monkeypatch.setattr("openconstraint_mcp.minizinc.core.subprocess.run", _fail_if_called)
+    with pytest.raises(ValueError, match="num_solutions"):
+        solve_model("solve satisfy;", num_solutions=bad, solver="org.chuffed.chuffed")
+
+
+def test_solve_model_default_omits_num_solutions_flag(
+    fake_minizinc_binary: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # With num_solutions unset, no -n token appears (Phase-1 argv preserved).
+    assert "-n" not in _solve_cmd_with_flags(monkeypatch)
+
+
+@pytest.mark.parametrize(
+    ("solver", "expected"),
+    [
+        ("org.gecode.gecode", True),
+        ("org.chuffed.chuffed", True),
+        ("cp-sat", False),
+        ("gecode", False),
+        ("org.gecode.gist", False),
+    ],
+)
+def test_solver_supports_num_solutions_truth_table(solver: str, expected: bool) -> None:
+    assert solver_supports_num_solutions(solver) is expected
 
 
 def test_solve_model_forwards_inline_data_positionally(

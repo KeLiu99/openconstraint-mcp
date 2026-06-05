@@ -44,7 +44,14 @@ Otherwise:
    declaration, every constraint, exactly one `solve` statement
    (`solve satisfy;`, `solve minimize <expr>;`, or `solve maximize <expr>;`),
    and an `output` block that prints the solution self-describingly. Prefer
-   `cp-sat` as the default solver unless the user says otherwise.
+   `cp-sat` as the default solver unless the user says otherwise. If the user
+   asks for a specific number of distinct satisfaction solutions, choose
+   `org.gecode.gecode` or `org.chuffed.chuffed` and pass `num_solutions` — the
+   default `cp-sat` does not support it. If the user asks for multiple optimal
+   solutions, first solve the optimization to a proven optimum; then add a
+   constraint fixing the objective expression to that value, change the model
+   to `solve satisfy;`, and enumerate with one of those supported solvers plus
+   `num_solutions`.
 
 4. Validate before solving. Call `check_minizinc_model` and branch on the
    returned `status`; never solve ahead of a clean check. The recommended

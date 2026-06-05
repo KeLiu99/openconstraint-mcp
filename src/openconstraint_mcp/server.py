@@ -190,6 +190,7 @@ def create_mcp_server() -> FastMCP:
         parallel: int | None = None,
         random_seed: int | None = None,
         all_solutions: bool = False,
+        num_solutions: int | None = None,
     ) -> Annotated[CallToolResult, SolveResult]:
         try:
             result = solve_model(
@@ -201,6 +202,7 @@ def create_mcp_server() -> FastMCP:
                 parallel=parallel,
                 random_seed=random_seed,
                 all_solutions=all_solutions,
+                num_solutions=num_solutions,
             )
             return _wrap_solve_result(result)
         except (RuntimeMissingError, MiniZincExecutionError, ValueError) as exc:
@@ -256,6 +258,7 @@ def create_mcp_server() -> FastMCP:
         parallel: int | None = None,
         random_seed: int | None = None,
         all_solutions: bool = False,
+        num_solutions: int | None = None,
     ) -> Annotated[CallToolResult, SolveResult]:
         try:
             result = solve_model_path(
@@ -267,6 +270,7 @@ def create_mcp_server() -> FastMCP:
                 parallel=parallel,
                 random_seed=random_seed,
                 all_solutions=all_solutions,
+                num_solutions=num_solutions,
             )
 
             return _wrap_solve_result(result)

@@ -230,8 +230,18 @@ in an **inline-source** form (below) and a **path-based file** sibling
   - `all_solutions: bool = False` — when true, passes `-a`: enumerate every
     solution (satisfaction) or the optimization improving-sequence, all
     captured in order in `solutions`.
+  - `num_solutions: int | None = None` — when set, passes `-n <n>` to cap the
+    number of solutions for a **satisfaction** problem. Must be `>= 1`. It is
+    **solver-gated**: only `org.gecode.gecode` and `org.chuffed.chuffed`
+    support `-n`; the default `cp-sat` (and any other solver) returns a clear,
+    actionable error instead of a broken run. It is **not** meaningful for
+    optimization (`minimize`/`maximize`) — use `all_solutions` there for the
+    improving sequence. For multiple optimal solutions, first solve the
+    optimization to a proven optimum, then re-solve as a satisfaction model
+    with the objective fixed to that value and use a supported
+    `num_solutions` solver.
 
-  All four search controls are optional and **solve-only** (not on the check
+  All five search controls are optional and **solve-only** (not on the check
   or findMUS tools); with none set, the invocation is byte-identical to the
   default solve.
 
@@ -385,7 +395,8 @@ unchanged and remain the right choice for ephemeral, isolated text workflows.
 
 `solve_minizinc_files` additionally accepts the same optional, solve-only
 search controls as `solve_minizinc_model` — `free_search`, `parallel`,
-`random_seed`, and `all_solutions` (see above for semantics and defaults).
+`random_seed`, `all_solutions`, and the solver-gated, satisfaction-only
+`num_solutions` (see above for semantics and defaults).
 
 **Includes (MiniZinc CLI style).** The file tools run the managed binary on the
 real `model_path` with the working directory set to the model's own directory,
