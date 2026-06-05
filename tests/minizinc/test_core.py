@@ -14,6 +14,7 @@ from openconstraint_mcp.minizinc.core import (
     DEFAULT_UNSAT_CORE_TIMEOUT_MS,
     FINDMUS_SOLVER,
     MiniZincExecutionError,
+    _solver_capabilities,
     check_model,
     find_unsat_core,
     list_solvers,
@@ -25,7 +26,9 @@ from openconstraint_mcp.minizinc.unsat_core import _parse_unsat_core, _slice_sou
 from openconstraint_mcp.runtime import RuntimeMissingError
 from openconstraint_mcp.schemas import (
     CheckResult,
+    SolverCapabilities,
     SolveResult,
+    SolverInfo,
     SolverList,
     SolveStatus,
     UnsatCoreConstraint,
@@ -74,11 +77,13 @@ def test_list_solvers_parses_solvers_json(
                 "name": "Gecode",
                 "version": "6.3.0",
                 "tags": ["cp", "int"],
+                "stdFlags": ["-a", "-f", "-n", "-p", "-r"],
             },
             {
                 "id": "com.google.or-tools.cpsat",
                 "name": "OR-Tools CP-SAT",
                 "version": "9.10",
+                "stdFlags": ["-a", "-i", "-f", "-p", "-r"],
             },
         ]
     )
@@ -102,6 +107,24 @@ def test_list_solvers_parses_solvers_json(
     assert result.solvers[0].tags == ["cp", "int"]
     assert result.solvers[1].version == "9.10"
     assert result.solvers[1].tags == []
+
+    # Capabilities flow from each entry's stdFlags. gecode declares -n and is
+    # allowlisted, so every control reads True; or-tools declares the standard
+    # flags but no -n and is not allowlisted, so supports_num_solutions is False.
+    gecode_caps = result.solvers[0].capabilities
+    assert gecode_caps.supports_all_solutions is True
+    assert gecode_caps.supports_free_search is True
+    assert gecode_caps.supports_parallel is True
+    assert gecode_caps.supports_random_seed is True
+    assert gecode_caps.supports_num_solutions is True
+
+    cpsat_caps = result.solvers[1].capabilities
+    assert cpsat_caps.supports_all_solutions is True
+    assert cpsat_caps.supports_free_search is True
+    assert cpsat_caps.supports_parallel is True
+    assert cpsat_caps.supports_random_seed is True
+    assert cpsat_caps.supports_num_solutions is False
+    assert "Detailed solver capabilities" in result.capability_note
 
 
 def test_list_solvers_wraps_subprocess_failure(
@@ -303,6 +326,160 @@ def test_unsat_core_result_rejects_unknown_status() -> None:
             stderr="",
             elapsed_ms=0,
         )
+
+
+def test_solver_capabilities_round_trips() -> None:
+    caps = SolverCapabilities(
+        supports_all_solutions=True,
+        supports_free_search=True,
+        supports_parallel=True,
+        supports_random_seed=True,
+        supports_num_solutions=True,
+        std_flags=["-a", "-f", "-n", "-p", "-r"],
+    )
+    assert caps.model_dump() == {
+        "supports_all_solutions": True,
+        "supports_free_search": True,
+        "supports_parallel": True,
+        "supports_random_seed": True,
+        "supports_num_solutions": True,
+        "std_flags": ["-a", "-f", "-n", "-p", "-r"],
+    }
+
+
+def test_solver_info_round_trips_with_capabilities() -> None:
+    info = SolverInfo(
+        id="org.gecode.gecode",
+        name="Gecode",
+        version="6.3.0",
+        tags=["cp", "int"],
+        capabilities=SolverCapabilities(
+            supports_all_solutions=True,
+            supports_free_search=True,
+            supports_parallel=True,
+            supports_random_seed=True,
+            supports_num_solutions=True,
+            std_flags=["-a", "-f", "-n", "-p", "-r"],
+        ),
+    )
+    assert info.model_dump() == {
+        "id": "org.gecode.gecode",
+        "name": "Gecode",
+        "version": "6.3.0",
+        "tags": ["cp", "int"],
+        "capabilities": {
+            "supports_all_solutions": True,
+            "supports_free_search": True,
+            "supports_parallel": True,
+            "supports_random_seed": True,
+            "supports_num_solutions": True,
+            "std_flags": ["-a", "-f", "-n", "-p", "-r"],
+        },
+    }
+
+
+def test_solver_info_capabilities_default_is_conservative() -> None:
+    # A bare SolverInfo defaults capabilities to all-False booleans and an empty
+    # std_flags — the conservative default that keeps Pydantic construction
+    # compatible and the missing-config case default-deny.
+    info = SolverInfo(id="com.example.unknown", name="Unknown")
+    assert info.capabilities.model_dump() == {
+        "supports_all_solutions": False,
+        "supports_free_search": False,
+        "supports_parallel": False,
+        "supports_random_seed": False,
+        "supports_num_solutions": False,
+        "std_flags": [],
+    }
+
+
+def test_solver_capabilities_gecode_declares_all_controls() -> None:
+    caps = _solver_capabilities(
+        {"id": "org.gecode.gecode", "stdFlags": ["-a", "-f", "-n", "-p", "-r"]}
+    )
+    assert caps.supports_all_solutions is True
+    assert caps.supports_free_search is True
+    assert caps.supports_parallel is True
+    assert caps.supports_random_seed is True
+    assert caps.supports_num_solutions is True
+    assert caps.std_flags == ["-a", "-f", "-n", "-p", "-r"]
+
+
+def test_solver_capabilities_chuffed_lacks_parallel() -> None:
+    # chuffed's stdFlags omit -p: supports_parallel must be a real read, not a
+    # constant True. The other three derived booleans stay True.
+    caps = _solver_capabilities({"id": "org.chuffed.chuffed", "stdFlags": ["-a", "-f", "-n", "-r"]})
+    assert caps.supports_parallel is False
+    assert caps.supports_all_solutions is True
+    assert caps.supports_free_search is True
+    assert caps.supports_random_seed is True
+    assert caps.supports_num_solutions is True
+
+
+def test_solver_capabilities_cpsat_declares_flags_but_not_num_solutions() -> None:
+    # Real cp-sat: declares -a/-f/-p/-r (and -i, which is untracked) but no -n,
+    # and is not in the num_solutions allowlist — so supports_num_solutions False.
+    caps = _solver_capabilities(
+        {"id": "com.google.or-tools.cpsat", "stdFlags": ["-a", "-i", "-f", "-p", "-r"]}
+    )
+    assert caps.supports_all_solutions is True
+    assert caps.supports_free_search is True
+    assert caps.supports_parallel is True
+    assert caps.supports_random_seed is True
+    assert caps.supports_num_solutions is False
+    assert caps.std_flags == ["-a", "-i", "-f", "-p", "-r"]
+
+
+def test_solver_capabilities_gist_diverges_from_std_flags() -> None:
+    # The load-bearing divergence: gist lists -n in stdFlags but is excluded from
+    # the canonical gate, so supports_num_solutions is False even though
+    # "-n" stays present in the verbatim std_flags.
+    caps = _solver_capabilities(
+        {"id": "org.gecode.gist", "stdFlags": ["-a", "-f", "-n", "-p", "-r"]}
+    )
+    assert caps.supports_num_solutions is False
+    assert "-n" in caps.std_flags
+
+
+def test_solver_capabilities_unknown_without_std_flags_is_default_deny() -> None:
+    # No stdFlags key and a non-allowlisted id: empty std_flags zeroes the four
+    # derived booleans, and the id is not allowlisted — two independent reasons.
+    caps = _solver_capabilities({"id": "com.example.unknown", "name": "Unknown"})
+    assert caps.std_flags == []
+    assert caps.supports_all_solutions is False
+    assert caps.supports_free_search is False
+    assert caps.supports_parallel is False
+    assert caps.supports_random_seed is False
+    assert caps.supports_num_solutions is False
+
+
+@pytest.mark.parametrize("bad_std_flags", [None, " -a"])
+def test_solver_capabilities_malformed_std_flags_non_allowlisted(
+    bad_std_flags: object,
+) -> None:
+    # A present null or a scalar string must degrade to an empty std_flags — never
+    # crash on list(None) or split " -a" into ['  ', '-', 'a']. Non-allowlisted id
+    # keeps supports_num_solutions False.
+    caps = _solver_capabilities({"id": "com.example.unknown", "stdFlags": bad_std_flags})
+    assert caps.std_flags == []
+    assert caps.supports_all_solutions is False
+    assert caps.supports_free_search is False
+    assert caps.supports_parallel is False
+    assert caps.supports_random_seed is False
+    assert caps.supports_num_solutions is False
+
+
+def test_solver_capabilities_malformed_std_flags_allowlisted_keeps_num_solutions() -> None:
+    # The independence invariant: a malformed stdFlags zeroes the four derived
+    # booleans, but supports_num_solutions follows the id allowlist and stays True
+    # for gecode — never re-coupled to stdFlags.
+    caps = _solver_capabilities({"id": "org.gecode.gecode", "stdFlags": None})
+    assert caps.std_flags == []
+    assert caps.supports_all_solutions is False
+    assert caps.supports_free_search is False
+    assert caps.supports_parallel is False
+    assert caps.supports_random_seed is False
+    assert caps.supports_num_solutions is True
 
 
 def test_parse_unsat_core_extracts_model_spans() -> None:

@@ -9,7 +9,10 @@ from typing import Any
 import pytest
 from mcp.types import CallToolResult
 
-from openconstraint_mcp.protocol_text.descriptions import MCP_SERVER_INSTRUCTIONS
+from openconstraint_mcp.protocol_text.descriptions import (
+    LIST_AVAILABLE_SOLVERS_DESCRIPTION,
+    MCP_SERVER_INSTRUCTIONS,
+)
 from openconstraint_mcp.server import (
     _homepage_url,
     _lifespan,
@@ -39,6 +42,57 @@ async def test_list_available_solvers_surfaces_actionable_error_on_binary_failur
     message = str(exc_info.value)
     assert "install-runtime" in message
     assert "bad config" in message
+
+
+def test_list_available_solvers_description_documents_capabilities() -> None:
+    text = LIST_AVAILABLE_SOLVERS_DESCRIPTION
+    assert "capabilities" in text
+    for field in (
+        "supports_all_solutions",
+        "supports_free_search",
+        "supports_parallel",
+        "supports_random_seed",
+        "supports_num_solutions",
+        "std_flags",
+    ):
+        assert field in text, f"description should name the capability field {field}"
+    assert "advisory" in text.lower()
+
+
+def test_list_available_solvers_description_calls_out_conservative_num_solutions_gate() -> None:
+    # supports_num_solutions is the conservative gate: only the two supported
+    # solvers, explicitly not the default cp-sat.
+    text = LIST_AVAILABLE_SOLVERS_DESCRIPTION
+    assert "org.gecode.gecode" in text
+    assert "org.chuffed.chuffed" in text
+    assert "cp-sat" in text
+
+
+def test_list_available_solvers_description_frames_std_flags_as_non_passthrough() -> None:
+    # std_flags reports declared flags; it is not a surface for sending flags back
+    # into the solve tools.
+    text = LIST_AVAILABLE_SOLVERS_DESCRIPTION
+    assert "solve_minizinc_model" in text
+    assert "solve_minizinc_files" in text
+    assert "passthrough" in text.lower()
+
+
+def test_list_available_solvers_description_distinguishes_no_control_from_divergence() -> None:
+    # Two distinct cases must stay separate: standard flags with no named control
+    # (-i/-s/-t/-v) vs. the gist/-n allowlist divergence.
+    text = LIST_AVAILABLE_SOLVERS_DESCRIPTION
+    assert "gist" in text.lower()
+    assert any(flag in text for flag in ("-i", "-s", "-t", "-v")), (
+        "description should give a no-named-control flag example"
+    )
+
+
+def test_list_available_solvers_description_notes_complete_inventory_presentation() -> None:
+    # The description must advertise the complete-inventory text presentation and
+    # that the full capability metadata is structured, not printed by default.
+    text = LIST_AVAILABLE_SOLVERS_DESCRIPTION
+    assert "inventory" in text.lower()
+    assert "not printed by default" in text
 
 
 SAMPLE_PROBLEM = (
@@ -500,6 +554,182 @@ def _record_data_run(
 
     monkeypatch.setattr("openconstraint_mcp.minizinc.core.subprocess.run", _fake_run)
     return calls
+
+
+@pytest.mark.asyncio
+async def test_list_available_solvers_surfaces_capabilities(
+    fake_minizinc_binary: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Happy path (the other server test only covers the failure path): the richer
+    # SolverInfo flows through to structured content with no per-field wiring.
+    payload = json.dumps(
+        [
+            {
+                "id": "org.gecode.gecode",
+                "name": "Gecode",
+                "version": "6.3.0",
+                "stdFlags": ["-a", "-f", "-n", "-p", "-r"],
+            },
+            {
+                "id": "com.google.or-tools.cpsat",
+                "name": "OR-Tools CP-SAT",
+                "version": "9.10",
+                "stdFlags": ["-a", "-i", "-f", "-p", "-r"],
+            },
+        ]
+    )
+
+    def _fake_run(*args: object, **kwargs: object) -> _FakeCompletedProcess:
+        return _FakeCompletedProcess(stdout=payload, stderr="", returncode=0)
+
+    monkeypatch.setattr("openconstraint_mcp.minizinc.core.subprocess.run", _fake_run)
+
+    mcp = create_mcp_server()
+    result = await mcp.call_tool("list_available_solvers", {})
+
+    structured = _structured(result)
+    by_id = {solver["id"]: solver for solver in structured["solvers"]}
+    gecode_caps = by_id["org.gecode.gecode"]["capabilities"]
+    cpsat_caps = by_id["com.google.or-tools.cpsat"]["capabilities"]
+
+    # gecode declares -n and is allowlisted; or-tools declares -a/-f/-p/-r but not
+    # -n and is not allowlisted, so the conservative gate holds across the boundary.
+    assert gecode_caps["supports_num_solutions"] is True
+    assert gecode_caps["std_flags"] == ["-a", "-f", "-n", "-p", "-r"]
+    assert cpsat_caps["supports_num_solutions"] is False
+    assert cpsat_caps["supports_parallel"] is True
+    assert "Detailed solver capabilities" in structured["capability_note"]
+
+
+# A distinctive `--cp-profiler` flag in gecode's stdFlags lets a test prove the
+# default text view does NOT dump raw std_flags values (only the field name).
+_LIST_SOLVERS_PAYLOAD = json.dumps(
+    [
+        {
+            "id": "org.gecode.gecode",
+            "name": "Gecode",
+            "version": "6.3.0",
+            "stdFlags": ["-a", "-f", "-n", "-p", "-r", "--cp-profiler"],
+        },
+        {
+            "id": "cp-sat",
+            "name": "OR Tools CP-SAT",
+            "version": "9.15",
+            "stdFlags": ["-a", "-i", "-f", "-p", "-r"],
+        },
+    ]
+)
+
+
+def _patch_list_solvers_run(
+    monkeypatch: pytest.MonkeyPatch, payload: str = _LIST_SOLVERS_PAYLOAD
+) -> None:
+    def _fake_run(*args: object, **kwargs: object) -> _FakeCompletedProcess:
+        return _FakeCompletedProcess(stdout=payload, stderr="", returncode=0)
+
+    monkeypatch.setattr("openconstraint_mcp.minizinc.core.subprocess.run", _fake_run)
+
+
+@pytest.mark.asyncio
+async def test_list_available_solvers_text_lists_every_solver(
+    fake_minizinc_binary: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # The model-visible text must carry a complete row per solver, so a client
+    # cannot silently drop entries it would otherwise summarize away.
+    _patch_list_solvers_run(monkeypatch)
+    mcp = create_mcp_server()
+
+    text = _content_text(await mcp.call_tool("list_available_solvers", {}))
+
+    assert "| id | name | version |" in text
+    assert "capability hint" not in text.lower()
+    for token in (
+        "org.gecode.gecode",
+        "Gecode",
+        "6.3.0",
+        "cp-sat",
+        "OR Tools CP-SAT",
+        "9.15",
+    ):
+        assert token in text
+
+
+@pytest.mark.asyncio
+async def test_list_available_solvers_text_requires_complete_inventory(
+    fake_minizinc_binary: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # The presentation requirement is what steers clients away from "additional
+    # solvers" elisions; assert the binding instruction is present.
+    _patch_list_solvers_run(monkeypatch)
+    mcp = create_mcp_server()
+
+    text = _content_text(await mcp.call_tool("list_available_solvers", {}))
+
+    assert "copy the solver inventory table below" in text
+    assert "Do not omit rows" in text
+    assert "convert it to bullets" in text
+    assert "summarize, group" in text
+    assert "additional solvers" in text
+
+
+@pytest.mark.asyncio
+async def test_list_available_solvers_text_notes_num_solutions_support(
+    fake_minizinc_binary: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # The routing note names exactly the two gated solvers and flags the default
+    # cp-sat as unsupported.
+    _patch_list_solvers_run(monkeypatch)
+    mcp = create_mcp_server()
+
+    text = _content_text(await mcp.call_tool("list_available_solvers", {}))
+
+    assert "is supported only by" in text
+    assert "org.chuffed.chuffed" in text
+    assert "org.gecode.gecode" in text
+    assert "cp-sat` solver does not support it" in text
+
+
+@pytest.mark.asyncio
+async def test_list_available_solvers_text_cautions_external_mip_setup(
+    fake_minizinc_binary: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # A declared MIP solver entry is not a guarantee it can run; the caution must
+    # name the commercial/external solvers and the separate-setup requirement.
+    _patch_list_solvers_run(monkeypatch)
+    mcp = create_mcp_server()
+
+    text = _content_text(await mcp.call_tool("list_available_solvers", {}))
+
+    assert "runtime configuration" in text
+    for solver in ("CPLEX", "Gurobi", "Xpress", "SCIP", "COIN-BC"):
+        assert solver in text
+    assert "separate installed binaries" in text
+
+
+@pytest.mark.asyncio
+async def test_list_available_solvers_text_points_to_structured_capabilities_without_dumping_flags(
+    fake_minizinc_binary: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # The text advertises where the rich capability metadata lives (structured, on
+    # request) but must NOT dump raw std_flags values into the default view — the
+    # distinctive `--cp-profiler` flag from the payload proves no flag dump.
+    _patch_list_solvers_run(monkeypatch)
+    mcp = create_mcp_server()
+
+    text = _content_text(await mcp.call_tool("list_available_solvers", {}))
+
+    assert "ask for them explicitly" in text
+    assert "Detailed solver capabilities are available on request" in text
+    assert "capabilities.supports_all_solutions" in text
+    assert "for each solver" in text
+    assert "std_flags" in text
+    assert "--cp-profiler" not in text
 
 
 @pytest.mark.asyncio

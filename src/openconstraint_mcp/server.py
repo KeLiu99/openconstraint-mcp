@@ -60,6 +60,27 @@ _STATS_PRESENTATION_REQUIREMENT = (
     "the user-facing answer. Do not omit it, summarize it, or replace it with "
     "only selected fields."
 )
+_SOLVER_INVENTORY_PRESENTATION_REQUIREMENT = (
+    "Final answer requirement: copy the solver inventory table below into the "
+    "user-facing answer. Do not omit rows, convert it to bullets or prose, "
+    'summarize, group, or replace rows with phrases like "additional solvers".'
+)
+_SOLVER_NUM_SOLUTIONS_NOTE = (
+    "`num_solutions` is supported only by `org.chuffed.chuffed` and "
+    "`org.gecode.gecode`; the default `cp-sat` solver does not support it."
+)
+_SOLVER_RUNTIME_CONFIG_CAUTION = (
+    "Caution: solver entries come from the MiniZinc runtime configuration. "
+    "Commercial or external MIP solvers such as CPLEX, Gurobi, Xpress, SCIP, and "
+    "COIN-BC may still require separate installed binaries, licenses, or "
+    "solver-specific setup before they can successfully solve a model."
+)
+_SOLVER_CAPABILITY_METADATA_NOTE = (
+    "To inspect detailed solver capabilities, ask for them explicitly. The "
+    "structured result includes `capabilities.supports_all_solutions`, "
+    "`supports_free_search`, `supports_parallel`, `supports_random_seed`, "
+    "`supports_num_solutions`, and advisory `std_flags` for each solver."
+)
 
 
 def _homepage_url() -> str | None:
@@ -148,6 +169,45 @@ def _wrap_solve_result(result: SolveResult) -> CallToolResult:
     )
 
 
+def _format_solver_list_content(result: SolverList) -> str:
+    """Return model-visible solver inventory: a complete id/name/version table.
+
+    Leads with a presentation requirement so a client renders every row instead
+    of summarizing or grouping, then appends advisory notes. The full
+    ``capabilities`` object is deliberately kept out of this text — it lives in
+    ``structuredContent`` and is surfaced only on request — so the default
+    presentation stays compact and never dumps raw ``std_flags``.
+    """
+    return "\n".join(
+        [
+            _SOLVER_INVENTORY_PRESENTATION_REQUIREMENT,
+            "",
+            "| id | name | version |",
+            "| --- | --- | --- |",
+            *(
+                f"| {solver.id} | {solver.name} | "
+                f"{solver.version if solver.version is not None else '<unknown version>'} |"
+                for solver in result.solvers
+            ),
+            "",
+            result.capability_note,
+            _SOLVER_CAPABILITY_METADATA_NOTE,
+            "",
+            _SOLVER_NUM_SOLUTIONS_NOTE,
+            "",
+            _SOLVER_RUNTIME_CONFIG_CAUTION,
+        ]
+    )
+
+
+def _wrap_solver_list(result: SolverList) -> CallToolResult:
+    """Wrap a SolverList as a complete-inventory text block plus structured output."""
+    return CallToolResult(
+        content=[TextContent(type="text", text=_format_solver_list_content(result))],
+        structuredContent=result.model_dump(mode="json"),
+    )
+
+
 @asynccontextmanager
 async def _lifespan(server: FastMCP[Any]) -> AsyncIterator[None]:
     """Server lifespan: emit the boot diagnostic on startup; no teardown."""
@@ -169,9 +229,9 @@ def create_mcp_server() -> FastMCP:
         return get_runtime_status()
 
     @mcp.tool(description=LIST_AVAILABLE_SOLVERS_DESCRIPTION)
-    def list_available_solvers() -> SolverList:
+    def list_available_solvers() -> Annotated[CallToolResult, SolverList]:
         try:
-            return list_solvers()
+            return _wrap_solver_list(list_solvers())
         except (RuntimeMissingError, MiniZincExecutionError) as exc:
             # v0: surface the error message as a plain MCP error so the
             # client sees something actionable. Future versions should return a

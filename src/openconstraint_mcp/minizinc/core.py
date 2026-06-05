@@ -12,6 +12,7 @@ from ..runtime import RuntimeMissingError, get_minizinc_binary, is_runtime_insta
 from ..schemas import (
     CheckResult,
     CheckStatus,
+    SolverCapabilities,
     SolveResult,
     SolverInfo,
     SolverList,
@@ -95,6 +96,33 @@ def _require_minizinc_binary() -> Path:
     return get_minizinc_binary()
 
 
+def _solver_capabilities(entry: dict[str, Any]) -> SolverCapabilities:
+    """Derive a solver's capability facts from one ``--solvers-json`` entry.
+
+    The ``-a/-f/-p/-r`` booleans are honest membership reads of the solver's
+    declared ``stdFlags``; ``supports_num_solutions`` is **not** — it follows the
+    canonical ``solver_supports_num_solutions`` allowlist, so ``org.gecode.gist``
+    stays excluded despite listing ``-n`` and an allowlisted solver stays
+    supported even when its ``stdFlags`` is malformed.
+
+    ``stdFlags`` is trusted only when it is a JSON array. An absent key, a
+    ``null``, or a scalar string degrades to an empty ``std_flags`` (default-deny
+    for the four derived booleans) rather than crashing on ``list(None)`` or
+    splitting a string into characters — guarding against runtime-version shape
+    drift.
+    """
+    raw = entry.get("stdFlags")
+    std_flags = [str(flag) for flag in raw] if isinstance(raw, list) else []
+    return SolverCapabilities(
+        supports_all_solutions="-a" in std_flags,
+        supports_free_search="-f" in std_flags,
+        supports_parallel="-p" in std_flags,
+        supports_random_seed="-r" in std_flags,
+        supports_num_solutions=solver_supports_num_solutions(str(entry.get("id", ""))),
+        std_flags=std_flags,
+    )
+
+
 def list_solvers() -> SolverList:
     binary = _require_minizinc_binary()
     try:
@@ -115,12 +143,13 @@ def list_solvers() -> SolverList:
             "`openconstraint-mcp install-runtime`."
         ) from exc
     raw: list[dict[str, Any]] = json.loads(completed.stdout)
-    solvers = [
+    solvers: list[SolverInfo] = [
         SolverInfo(
-            id=str(entry.get("id", "")),
-            name=str(entry.get("name", entry.get("id", ""))),
+            id=str(solver_id := entry.get("id", "")),
+            name=str(entry.get("name", solver_id)),
             version=entry.get("version"),
             tags=list(entry.get("tags", [])),
+            capabilities=_solver_capabilities(entry),
         )
         for entry in raw
     ]
