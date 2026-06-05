@@ -24,6 +24,13 @@ from .unsat_core import _parse_unsat_core
 
 DEFAULT_SOLVER: str = "cp-sat"
 FINDMUS_SOLVER: str = "org.minizinc.findmus"
+# Canonical solver ids whose `.msc` stdFlags include `-n` (verified against the
+# managed MiniZinc 2.9.7 runtime). Canonical-only and default-deny: a short alias
+# ("gecode") or any unlisted solver — including the default cp-sat — is rejected
+# with an actionable error rather than building a doomed `-n` command.
+# `org.gecode.gist` is excluded deliberately: it is Gecode's Gist GUI search
+# tool, inappropriate for a headless local-first server, even though it lists `-n`.
+NUM_SOLUTIONS_SOLVERS: frozenset[str] = frozenset({"org.gecode.gecode", "org.chuffed.chuffed"})
 DEFAULT_SOLVE_TIMEOUT_MS: int = 30_000
 # Named separately from the solve budget so the check call site doesn't read as
 # a solve constant. A compile-check is far cheaper than a solve, but reusing the
@@ -412,22 +419,40 @@ def find_unsat_core(
     return _build_unsat_core_result(outcome, model)
 
 
+def solver_supports_num_solutions(solver: str) -> bool:
+    """Return whether ``solver`` accepts the ``-n`` (num-solutions) flag.
+
+    A canonical-id allowlist, default-deny (see ``NUM_SOLUTIONS_SOLVERS``). The
+    one invariant shared by the core gate and any future server-side re-run
+    decision, so the supported set is defined in a single place.
+    """
+    return solver in NUM_SOLUTIONS_SOLVERS
+
+
 def _solve_extra_args(
     *,
+    solver: str,
     free_search: bool,
     parallel: int | None,
     random_seed: int | None,
     all_solutions: bool,
+    num_solutions: int | None,
 ) -> tuple[str, ...]:
     """Build the solve ``extra_args``: the json-stream transport plus any
     optional solver/search-control flags.
 
-    Validates the valued numeric flag (``parallel`` must be ``>= 1``). With
-    every flag at its default the result is exactly ``_SOLVE_STREAM_ARGS``, so a
-    default solve is byte-identical to the transport-only invocation.
-    ``free_search`` -> ``-f``; ``parallel`` -> ``-p N``; ``random_seed`` ->
-    ``-r N`` (any int); ``all_solutions`` -> ``-a``. Flags are appended after
-    the transport args; MiniZinc is order-insensitive among them.
+    Validates the valued numeric flags (``parallel`` must be ``>= 1``;
+    ``num_solutions`` must be ``>= 1``). With every flag at its default the
+    result is exactly ``_SOLVE_STREAM_ARGS``, so a default solve is
+    byte-identical to the transport-only invocation. ``free_search`` -> ``-f``;
+    ``parallel`` -> ``-p N``; ``random_seed`` -> ``-r N`` (any int);
+    ``all_solutions`` -> ``-a``; ``num_solutions`` -> ``-n N``. Flags are
+    appended after the transport args; MiniZinc is order-insensitive among them.
+
+    ``num_solutions`` is solver-gated (satisfaction-only ``-n``): it is appended
+    only for a solver in ``NUM_SOLUTIONS_SOLVERS``; for any other solver
+    (including the default cp-sat) it raises a ``ValueError`` naming the
+    supported solvers, so the doomed ``-n`` command is never built.
     """
     if parallel is not None and parallel < 1:
         raise ValueError("parallel must be >= 1")
@@ -440,6 +465,16 @@ def _solve_extra_args(
         flags += ["-r", str(random_seed)]
     if all_solutions:
         flags.append("-a")
+    if num_solutions is None:
+        return *_SOLVE_STREAM_ARGS, *flags
+    if num_solutions < 1:
+        raise ValueError("num_solutions must be >= 1")
+    if not solver_supports_num_solutions(solver):
+        raise ValueError(
+            f"solver '{solver}' does not support num_solutions (the -n flag). "
+            "Retry with solver='org.chuffed.chuffed' or solver='org.gecode.gecode'."
+        )
+    flags += ["-n", str(num_solutions)]
 
     return *_SOLVE_STREAM_ARGS, *flags
 
@@ -454,16 +489,19 @@ def solve_model(
     parallel: int | None = None,
     random_seed: int | None = None,
     all_solutions: bool = False,
+    num_solutions: int | None = None,
 ) -> SolveResult:
     outcome = _run_managed_minizinc(
         model,
         solver=solver,
         timeout_ms=timeout_ms,
         extra_args=_solve_extra_args(
+            solver=solver,
             free_search=free_search,
             parallel=parallel,
             random_seed=random_seed,
             all_solutions=all_solutions,
+            num_solutions=num_solutions,
         ),
         data=data,
     )
@@ -573,6 +611,7 @@ def solve_model_path(
     parallel: int | None = None,
     random_seed: int | None = None,
     all_solutions: bool = False,
+    num_solutions: int | None = None,
 ) -> SolveResult:
     """Solve a MiniZinc model read from ``model_path`` via the managed runtime.
 
@@ -588,10 +627,12 @@ def solve_model_path(
         solver=solver,
         timeout_ms=timeout_ms,
         extra_args=_solve_extra_args(
+            solver=solver,
             free_search=free_search,
             parallel=parallel,
             random_seed=random_seed,
             all_solutions=all_solutions,
+            num_solutions=num_solutions,
         ),
         data_path=data_path,
     )

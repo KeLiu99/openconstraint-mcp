@@ -9,6 +9,7 @@ from typing import Any
 import pytest
 from mcp.types import CallToolResult
 
+from openconstraint_mcp.protocol_text.descriptions import MCP_SERVER_INSTRUCTIONS
 from openconstraint_mcp.server import (
     _homepage_url,
     _lifespan,
@@ -145,6 +146,37 @@ async def test_solve_constraint_problem_prompt_guides_minizinc_drafting() -> Non
         "install-runtime",
     ):
         assert substring in text, f"prompt missing required guidance: {substring!r}"
+
+
+@pytest.mark.asyncio
+async def test_solve_constraint_problem_prompt_steers_num_solutions_to_supported_solver() -> None:
+    text = await _get_prompt_text("solve_constraint_problem", {"problem": SAMPLE_PROBLEM})
+
+    # The recommended flow defaults to cp-sat, which does not support num_solutions;
+    # without explicit steering an "N solutions" request lands on the gated solver.
+    assert "num_solutions" in text
+    assert "org.gecode.gecode" in text
+    assert "org.chuffed.chuffed" in text
+
+
+@pytest.mark.asyncio
+async def test_solve_constraint_problem_prompt_guides_multiple_optimal_solutions() -> None:
+    text = await _get_prompt_text("solve_constraint_problem", {"problem": SAMPLE_PROBLEM})
+    normalized = " ".join(text.split())
+
+    assert "multiple optimal solutions" in normalized
+    assert "proven optimum" in normalized
+    assert "solve satisfy" in normalized
+    assert "num_solutions" in normalized
+
+
+def test_mcp_server_instructions_route_num_solutions_and_multiple_optima() -> None:
+    assert "num_solutions" in MCP_SERVER_INSTRUCTIONS
+    assert "org.gecode.gecode" in MCP_SERVER_INSTRUCTIONS
+    assert "org.chuffed.chuffed" in MCP_SERVER_INSTRUCTIONS
+    assert "not the default `cp-sat`" in MCP_SERVER_INSTRUCTIONS
+    assert "multiple optimal solutions" in MCP_SERVER_INSTRUCTIONS
+    assert "objective fixed" in MCP_SERVER_INSTRUCTIONS
 
 
 @pytest.mark.asyncio
@@ -489,6 +521,7 @@ async def test_solve_minizinc_model_tool_is_listed() -> None:
         "parallel",
         "random_seed",
         "all_solutions",
+        "num_solutions",
     } <= set(properties.keys())
 
 
@@ -738,6 +771,54 @@ async def test_solve_minizinc_model_invalid_parallel_surfaces_actionable_error(
 
 
 @pytest.mark.asyncio
+async def test_solve_minizinc_model_num_solutions_forwards_n_flag_for_supported_solver(
+    fake_minizinc_binary: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls = _record_run_capturing_cwd(
+        monkeypatch,
+        _FakeCompletedProcess(
+            stdout=_stream(_solution_obj("x = 3\n", {"x": 3})), stderr="", returncode=0
+        ),
+    )
+
+    mcp = create_mcp_server()
+    await mcp.call_tool(
+        "solve_minizinc_model",
+        {
+            "model": "var 1..5: x;\nsolve satisfy;",
+            "solver": "org.chuffed.chuffed",
+            "num_solutions": 2,
+        },
+    )
+
+    cmd = calls[0]["cmd"]
+    assert cmd[cmd.index("-n") + 1] == "2"
+
+
+@pytest.mark.asyncio
+async def test_solve_minizinc_model_num_solutions_rejected_for_default_solver(
+    fake_minizinc_binary: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def _fail_if_called(*args: object, **kwargs: object) -> None:
+        raise AssertionError("subprocess.run must not be invoked for cp-sat + num_solutions")
+
+    monkeypatch.setattr("openconstraint_mcp.minizinc.core.subprocess.run", _fail_if_called)
+
+    mcp = create_mcp_server()
+    with pytest.raises(Exception) as exc_info:
+        await mcp.call_tool(
+            "solve_minizinc_model",
+            {"model": "solve satisfy;", "num_solutions": 2},
+        )
+    message = str(exc_info.value)
+    assert "num_solutions" in message
+    assert "org.chuffed.chuffed" in message
+    assert "org.gecode.gecode" in message
+
+
+@pytest.mark.asyncio
 async def test_check_minizinc_model_tool_is_listed() -> None:
     mcp = create_mcp_server()
     tools = await mcp.list_tools()
@@ -978,7 +1059,7 @@ async def test_file_tools_are_listed_with_expected_properties() -> None:
 
     # Search-control flags are solve-only at the MCP surface: present on the
     # solve file tool, absent from the compile-check file tool.
-    _search_flags = {"free_search", "parallel", "random_seed", "all_solutions"}
+    _search_flags = {"free_search", "parallel", "random_seed", "all_solutions", "num_solutions"}
     solve_files_props = by_name["solve_minizinc_files"].inputSchema.get("properties", {})
     assert _search_flags <= set(solve_files_props.keys())
     check_files_props = by_name["check_minizinc_files"].inputSchema.get("properties", {})
@@ -1079,6 +1160,58 @@ async def test_solve_minizinc_files_forwards_search_flags_to_runtime(
     cmd = calls[0]["cmd"]
     assert "-a" in cmd
     assert cmd[cmd.index("-p") + 1] == "3"
+
+
+@pytest.mark.asyncio
+async def test_solve_minizinc_files_num_solutions_forwards_n_flag_for_supported_solver(
+    tmp_path: Path,
+    fake_minizinc_binary: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    model_path = tmp_path / "model.mzn"
+    model_path.write_text(_FILE_MODEL_SRC)
+    calls = _record_run_capturing_cwd(
+        monkeypatch,
+        _FakeCompletedProcess(
+            stdout=_stream(_solution_obj("x = 3\n", {"x": 3})), stderr="", returncode=0
+        ),
+    )
+
+    mcp = create_mcp_server()
+    await mcp.call_tool(
+        "solve_minizinc_files",
+        {"model_path": str(model_path), "solver": "org.gecode.gecode", "num_solutions": 2},
+    )
+
+    cmd = calls[0]["cmd"]
+    assert cmd[cmd.index("-n") + 1] == "2"
+
+
+@pytest.mark.asyncio
+async def test_solve_minizinc_files_num_solutions_rejected_for_default_solver(
+    tmp_path: Path,
+    fake_minizinc_binary: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # An EXISTING model file is required: path validation runs before the gate.
+    model_path = tmp_path / "model.mzn"
+    model_path.write_text(_FILE_MODEL_SRC)
+
+    def _fail_if_called(*args: object, **kwargs: object) -> None:
+        raise AssertionError("subprocess.run must not be invoked for cp-sat + num_solutions")
+
+    monkeypatch.setattr("openconstraint_mcp.minizinc.core.subprocess.run", _fail_if_called)
+
+    mcp = create_mcp_server()
+    with pytest.raises(Exception) as exc_info:
+        await mcp.call_tool(
+            "solve_minizinc_files",
+            {"model_path": str(model_path), "num_solutions": 2},
+        )
+    message = str(exc_info.value)
+    assert "num_solutions" in message
+    assert "org.chuffed.chuffed" in message
+    assert "org.gecode.gecode" in message
 
 
 @pytest.mark.asyncio

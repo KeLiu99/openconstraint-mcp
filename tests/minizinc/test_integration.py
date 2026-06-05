@@ -19,6 +19,7 @@ from openconstraint_mcp.minizinc.core import (
     check_model_path,
     find_unsat_core,
     find_unsat_core_path,
+    list_solvers,
     solve_model,
     solve_model_path,
 )
@@ -213,6 +214,46 @@ def test_solve_model_free_search_runs_cleanly() -> None:
 
     assert result.status == "satisfied"
     assert result.solution is not None
+
+
+# --- num_solutions (solver-gated, satisfaction-only) -----------------------
+#
+# These prove what mocked-argv unit tests cannot: the managed binary actually
+# accepts `-n N` for the gated solvers and caps the count (the exact "a string
+# was built != the binary accepts it" trap that produced the original `-n` bug).
+
+
+def _skip_if_solver_absent(solver: str) -> None:
+    """Skip when ``solver`` is not in the managed runtime.
+
+    These are the first integration tests to need a non-default solver; a
+    user-pointed runtime (`configure-runtime` / `OPENCONSTRAINT_MCP_RUNTIME_DIR`)
+    may lack gecode/chuffed, so resolve the gate against what `list_solvers`
+    actually reports rather than assuming the bundled set.
+    """
+    available = {s.id for s in list_solvers().solvers}
+    if solver not in available:
+        pytest.skip(f"{solver} not in managed runtime")
+
+
+@pytest.mark.parametrize("solver", ["org.gecode.gecode", "org.chuffed.chuffed"])
+def test_solve_model_num_solutions_caps_satisfaction_count(solver: str) -> None:
+    # `_ALL_SOLUTIONS_MODEL` has three solutions; `-n 2` must cap the enumeration
+    # at exactly two for a solver whose stdFlags include `-n`.
+    _skip_if_solver_absent(solver)
+
+    result = solve_model(_ALL_SOLUTIONS_MODEL, solver=solver, num_solutions=2)
+
+    assert result.status == "satisfied"
+    assert len(result.solutions) == 2
+
+
+def test_solve_model_num_solutions_rejected_for_cp_sat() -> None:
+    # cp-sat is the pinned default and does NOT support `-n`: the gate raises a
+    # ValueError before any subprocess, so the doomed command is never built and
+    # the solver never fakes a success. Unconditional — cp-sat is always present.
+    with pytest.raises(ValueError, match="num_solutions"):
+        solve_model(_ALL_SOLUTIONS_MODEL, solver="cp-sat", num_solutions=2)
 
 
 def test_check_model_honors_inline_data() -> None:

@@ -20,7 +20,11 @@ MCP_SERVER_INSTRUCTIONS = (
     "terms of the user's problem (not the raw JSON SolveResult), a compact "
     "item table when the problem supplies item-like data, and the complete "
     "model-visible `Statistics:` section when present. Do not condense it to "
-    "selected fields. All execution must use the managed local MiniZinc "
+    "selected fields. Use `num_solutions` only with `org.gecode.gecode` or "
+    "`org.chuffed.chuffed`, not the default `cp-sat`; for multiple optimal "
+    "solutions, solve the optimization first, then re-solve as satisfaction "
+    "with the objective fixed to the proven optimum. All execution must use "
+    "the managed local MiniZinc "
     "runtime; do not use remote solvers or a bare PATH minizinc."
 )
 
@@ -53,7 +57,12 @@ SOLVE_MINIZINC_MODEL_DESCRIPTION = (
     "of the model's search annotations — solver-dependent, not 'no search'); "
     "`parallel` (int >= 1 -> `-p`: parallel search threads); `random_seed` "
     "(int -> `-r`); `all_solutions` (bool -> `-a`: enumerate all solutions, "
-    "or the optimization improving-sequence, into `solutions`). "
+    "or the optimization improving-sequence, into `solutions`); "
+    "`num_solutions` (int >= 1 -> `-n`: cap the number of solutions for a "
+    "SATISFACTION problem; SOLVER-GATED — only `org.gecode.gecode` or "
+    "`org.chuffed.chuffed`, NOT the default `cp-sat` (any other solver returns "
+    "an actionable error); not meaningful for optimization — use "
+    "`all_solutions` there). "
     "`structuredContent` carries the complete SolveResult."
 )
 
@@ -120,7 +129,8 @@ SOLVE_MINIZINC_FILES_DESCRIPTION = (
     "non-empty, with an explicit final-answer requirement to copy the entire "
     "section rather than summarizing selected fields. Accepts the same "
     "optional solver/search controls as `solve_minizinc_model` "
-    "(`free_search`, `parallel`, `random_seed`, `all_solutions`)."
+    "(`free_search`, `parallel`, `random_seed`, `all_solutions`, and the "
+    "solver-gated, satisfaction-only `num_solutions`)."
 )
 
 FIND_UNSAT_CORE_FILES_DESCRIPTION = (

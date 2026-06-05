@@ -243,6 +243,55 @@ def test_compile_error_returns_structured_error(
     assert "cannot open included file" in result.stderr
 
 
+# --- num_solutions gate wires through the path call site -------------------
+
+
+def test_solve_model_path_num_solutions_adds_valued_n_flag(
+    tmp_path: Path,
+    fake_minizinc_binary: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    model_path = tmp_path / "entry.mzn"
+    model_path.write_text(_MODEL_SRC)
+    calls = _record_run(
+        monkeypatch, _FakeCompletedProcess(stdout=_SOLVE_STREAM_SAMPLE, stderr="", returncode=0)
+    )
+
+    solve_model_path(model_path, num_solutions=2, solver="org.chuffed.chuffed")
+
+    cmd = calls[0]["cmd"]
+    assert cmd[cmd.index("-n") + 1] == "2"
+
+
+def test_solve_model_path_num_solutions_rejected_for_default_solver(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Path validation runs before the gate, so an EXISTING model file is required
+    # to reach the gate (a missing path would raise the path error first).
+    model_path = tmp_path / "entry.mzn"
+    model_path.write_text(_MODEL_SRC)
+    _fail_if_run_called(monkeypatch)
+
+    with pytest.raises(ValueError, match="num_solutions") as exc_info:
+        solve_model_path(model_path, num_solutions=2)
+    message = str(exc_info.value)
+    assert "org.chuffed.chuffed" in message
+    assert "org.gecode.gecode" in message
+
+
+def test_solve_model_path_rejects_non_positive_num_solutions(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    model_path = tmp_path / "entry.mzn"
+    model_path.write_text(_MODEL_SRC)
+    _fail_if_run_called(monkeypatch)
+
+    with pytest.raises(ValueError, match="num_solutions"):
+        solve_model_path(model_path, num_solutions=0, solver="org.chuffed.chuffed")
+
+
 # --- _validate_model_data_paths --------------------------------------------
 
 
