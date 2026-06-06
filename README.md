@@ -567,6 +567,46 @@ The stdio server also exposes one MCP prompt for client-side LLMs to use:
   verified by the local managed MiniZinc runtime via
   `solve_minizinc_model`. `LLM proposes, local MiniZinc verifies.`
 
+## Example models
+
+The `examples/` directory holds small, self-contained MiniZinc models you can
+point the path-based file tools at (or run by hand through the managed
+runtime). Each is a `model.mzn` plus a matching `data.dzn`:
+
+- **`examples/knapsack`** — bounded knapsack: choose how many of each item type
+  to pack to maximize total value without exceeding the weight `capacity`
+  (`solve maximize`).
+- **`examples/balanced_assignment`** — assign jobs to workers to minimize the
+  most-loaded worker's total duration, i.e. balance the load (`solve minimize`).
+- **`examples/social_golfers`** — the Social Golfer Problem: schedule `n_groups`
+  groups of `group_size` golfers over `n_weeks` weeks so no pair ever shares a
+  group twice (`solve satisfy`). The shipped data is the 15-golfer instance
+  (5 groups of 3 over 7 weeks — Kirkman's schoolgirls, full socialisation).
+
+For instance, to solve the knapsack example end to end:
+
+```jsonc
+// solve_minizinc_files
+{
+  "model_path": "examples/knapsack/model.mzn",
+  "data_path": "examples/knapsack/data.dzn"
+}
+```
+
+(prefer absolute paths in real MCP calls — see *Path-based file tools* above).
+
+The social-golfers model is parameterized through its `data.dzn`, which enables
+two workflows beyond a single solve:
+
+- **Longest schedule.** "As many weeks as possible" is the same model re-solved
+  with `n_weeks` raised until it turns unsatisfiable. For the shipped instance,
+  `n_weeks = 7` solves but `n_weeks = 8` is `unsatisfiable` (only `C(15,2) = 105`
+  pairs exist, and 8 weeks would need 120 distinct ones), so 7 is the maximum.
+- **Multiple schedules.** To enumerate several distinct schedules, lower
+  `n_weeks` (e.g. to 5) and request more than one solution with a solver that
+  supports it — `num_solutions` works with `org.gecode.gecode` or
+  `org.chuffed.chuffed`, not the default `cp-sat`.
+
 ## Managed runtime
 
 The default managed runtime location is `<platformdirs user_data_dir>/minizinc`,

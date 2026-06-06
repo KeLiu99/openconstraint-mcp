@@ -1,1 +1,2 @@
-"""MCP-facing text: tool/prompt descriptions, server instructions, and prompt bodies."""
+"""MCP-facing text: tool/prompt descriptions, server instructions, prompt bodies,
+and result-body text."""

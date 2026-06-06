@@ -1,11 +1,12 @@
 from __future__ import annotations
 
+import functools
 import sys
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager
 from importlib import metadata
 from pathlib import Path
-from typing import Annotated, Any
+from typing import Annotated, Any, ParamSpec, TypeVar
 
 from mcp.server.fastmcp import FastMCP
 from mcp.types import CallToolResult, TextContent
@@ -42,6 +43,13 @@ from .protocol_text.descriptions import (
     SOLVE_MINIZINC_MODEL_DESCRIPTION,
 )
 from .protocol_text.prompts import SOLVE_CONSTRAINT_PROBLEM_PROMPT
+from .protocol_text.results import (
+    SOLVER_CAPABILITY_METADATA_NOTE,
+    SOLVER_INVENTORY_PRESENTATION_REQUIREMENT,
+    SOLVER_NUM_SOLUTIONS_NOTE,
+    SOLVER_RUNTIME_CONFIG_CAUTION,
+    STATS_PRESENTATION_REQUIREMENT,
+)
 from .runtime import RuntimeMissingError, get_runtime_status
 from .schemas import (
     CheckResult,
@@ -60,32 +68,6 @@ _PREFERRED_STAT_KEYS = (
     "failures",
     "propagations",
     "solveTime",
-)
-_STATS_PRESENTATION_REQUIREMENT = (
-    "Final answer requirement: copy the entire Statistics section below into "
-    "the user-facing answer. Do not omit it, summarize it, or replace it with "
-    "only selected fields."
-)
-_SOLVER_INVENTORY_PRESENTATION_REQUIREMENT = (
-    "Final answer requirement: copy the solver inventory table below into the "
-    "user-facing answer. Do not omit rows, convert it to bullets or prose, "
-    'summarize, group, or replace rows with phrases like "additional solvers".'
-)
-_SOLVER_NUM_SOLUTIONS_NOTE = (
-    "`num_solutions` is supported only by `org.chuffed.chuffed` and "
-    "`org.gecode.gecode`; the default `cp-sat` solver does not support it."
-)
-_SOLVER_RUNTIME_CONFIG_CAUTION = (
-    "Caution: solver entries come from the MiniZinc runtime configuration. "
-    "Commercial or external MIP solvers such as CPLEX, Gurobi, Xpress, SCIP, and "
-    "COIN-BC may still require separate installed binaries, licenses, or "
-    "solver-specific setup before they can successfully solve a model."
-)
-_SOLVER_CAPABILITY_METADATA_NOTE = (
-    "To inspect detailed solver capabilities, ask for them explicitly. The "
-    "structured result includes `capabilities.supports_all_solutions`, "
-    "`supports_free_search`, `supports_parallel`, `supports_random_seed`, "
-    "`supports_num_solutions`, and advisory `std_flags` for each solver."
 )
 
 
@@ -153,7 +135,7 @@ def _format_solve_result_content(result: SolveResult) -> str:
         lines.extend(["", "Stderr:", result.stderr.rstrip()])
 
     if result.statistics:
-        lines.extend(["", _STATS_PRESENTATION_REQUIREMENT, "Statistics:"])
+        lines.extend(["", STATS_PRESENTATION_REQUIREMENT, "Statistics:"])
         seen: set[str] = set()
         for key in _PREFERRED_STAT_KEYS:
             value = result.statistics.get(key)
@@ -186,7 +168,7 @@ def _format_solver_list_content(result: SolverList) -> str:
     """
     return "\n".join(
         [
-            _SOLVER_INVENTORY_PRESENTATION_REQUIREMENT,
+            SOLVER_INVENTORY_PRESENTATION_REQUIREMENT,
             "",
             "| id | name | version |",
             "| --- | --- | --- |",
@@ -197,11 +179,11 @@ def _format_solver_list_content(result: SolverList) -> str:
             ),
             "",
             result.capability_note,
-            _SOLVER_CAPABILITY_METADATA_NOTE,
+            SOLVER_CAPABILITY_METADATA_NOTE,
             "",
-            _SOLVER_NUM_SOLUTIONS_NOTE,
+            SOLVER_NUM_SOLUTIONS_NOTE,
             "",
-            _SOLVER_RUNTIME_CONFIG_CAUTION,
+            SOLVER_RUNTIME_CONFIG_CAUTION,
         ]
     )
 
@@ -212,6 +194,53 @@ def _wrap_solver_list(result: SolverList) -> CallToolResult:
         content=[TextContent(type="text", text=_format_solver_list_content(result))],
         structuredContent=result.model_dump(mode="json"),
     )
+
+
+_P = ParamSpec("_P")
+_R = TypeVar("_R")
+
+# The domain exceptions every solving/checking tool translates: the managed
+# runtime is absent, the managed binary failed, or an argument was rejected.
+_DEFAULT_MCP_ERROR_TYPES: tuple[type[Exception], ...] = (
+    RuntimeMissingError,
+    MiniZincExecutionError,
+    ValueError,
+)
+
+
+def _as_mcp_error(
+    *exc_types: type[Exception],
+) -> Callable[[Callable[_P, _R]], Callable[_P, _R]]:
+    """Translate a tool's domain exceptions into a plain MCP ``RuntimeError``.
+
+    The single home for the ``(domain exception -> RuntimeError)`` invariant: on
+    any of ``exc_types`` (defaulting to the runtime/execution/value triad), the
+    domain message is re-raised verbatim as a ``RuntimeError`` with the original
+    exception preserved as ``__cause__``. Pass a narrower tuple to catch less —
+    ``list_available_solvers`` takes no user arguments, so it deliberately does
+    not translate ``ValueError`` (a ``ValueError`` there is a real bug, not an
+    actionable user message).
+
+    v0 policy is to surface the message string so MCP clients see something
+    actionable. A future structured error envelope (e.g. ``{"code":
+    "runtime_missing", "hint": "run install-runtime"}``) that lets clients branch
+    programmatically instead of parsing the message belongs here, in this one
+    place. ``functools.wraps`` preserves the wrapped tool's signature and
+    annotations so FastMCP derives an unchanged schema from the decorated tool.
+    """
+    caught = exc_types or _DEFAULT_MCP_ERROR_TYPES
+
+    def _decorator(fn: Callable[_P, _R]) -> Callable[_P, _R]:
+        @functools.wraps(fn)
+        def _wrapper(*args: _P.args, **kwargs: _P.kwargs) -> _R:
+            try:
+                return fn(*args, **kwargs)
+            except caught as exc:
+                raise RuntimeError(str(exc)) from exc
+
+        return _wrapper
+
+    return _decorator
 
 
 @asynccontextmanager
@@ -235,18 +264,14 @@ def create_mcp_server() -> FastMCP:
         return get_runtime_status()
 
     @mcp.tool(description=LIST_AVAILABLE_SOLVERS_DESCRIPTION)
+    # Narrower than the default: this tool takes no user arguments, so a
+    # ValueError would be a real bug, not an actionable user message.
+    @_as_mcp_error(RuntimeMissingError, MiniZincExecutionError)
     def list_available_solvers() -> Annotated[CallToolResult, SolverList]:
-        try:
-            return _wrap_solver_list(list_solvers())
-        except (RuntimeMissingError, MiniZincExecutionError) as exc:
-            # v0: surface the error message as a plain MCP error so the
-            # client sees something actionable. Future versions should return a
-            # structured error envelope (e.g. {"code": "runtime_missing",
-            # "hint": "run install-runtime"}) so MCP clients can branch on it
-            # programmatically rather than parsing the message string.
-            raise RuntimeError(str(exc)) from exc
+        return _wrap_solver_list(list_solvers())
 
     @mcp.tool(description=SOLVE_MINIZINC_MODEL_DESCRIPTION)
+    @_as_mcp_error()
     def solve_minizinc_model(
         model: str,
         data: str | None = None,
@@ -258,92 +283,80 @@ def create_mcp_server() -> FastMCP:
         all_solutions: bool = False,
         num_solutions: int | None = None,
     ) -> Annotated[CallToolResult, SolveResult]:
-        try:
-            result = solve_model(
-                model,
-                solver=solver,
-                data=data,
-                timeout_ms=timeout_ms,
-                free_search=free_search,
-                parallel=parallel,
-                random_seed=random_seed,
-                all_solutions=all_solutions,
-                num_solutions=num_solutions,
-            )
-            return _wrap_solve_result(result)
-        except (RuntimeMissingError, MiniZincExecutionError, ValueError) as exc:
-            raise RuntimeError(str(exc)) from exc
+        result = solve_model(
+            model,
+            solver=solver,
+            data=data,
+            timeout_ms=timeout_ms,
+            free_search=free_search,
+            parallel=parallel,
+            random_seed=random_seed,
+            all_solutions=all_solutions,
+            num_solutions=num_solutions,
+        )
+        return _wrap_solve_result(result)
 
     @mcp.tool(description=CHECK_MINIZINC_MODEL_DESCRIPTION)
+    @_as_mcp_error()
     def check_minizinc_model(
         model: str,
         data: str | None = None,
         solver: str = DEFAULT_SOLVER,
         timeout_ms: int = DEFAULT_CHECK_TIMEOUT_MS,
     ) -> CheckResult:
-        try:
-            return check_model(model, solver=solver, data=data, timeout_ms=timeout_ms)
-        except (RuntimeMissingError, MiniZincExecutionError, ValueError) as exc:
-            raise RuntimeError(str(exc)) from exc
+        return check_model(model, solver=solver, data=data, timeout_ms=timeout_ms)
 
     @mcp.tool(description=INSPECT_MINIZINC_MODEL_DESCRIPTION)
+    @_as_mcp_error()
     def inspect_minizinc_model(
         model: str,
         data: str | None = None,
         solver: str = DEFAULT_SOLVER,
         timeout_ms: int = DEFAULT_INSPECT_TIMEOUT_MS,
     ) -> ModelInspectionResult:
-        try:
-            return inspect_model(model, solver=solver, data=data, timeout_ms=timeout_ms)
-        except (RuntimeMissingError, MiniZincExecutionError, ValueError) as exc:
-            raise RuntimeError(str(exc)) from exc
+        return inspect_model(model, solver=solver, data=data, timeout_ms=timeout_ms)
 
     @mcp.tool(description=FIND_UNSAT_CORE_DESCRIPTION)
+    @_as_mcp_error()
     def find_unsat_core(
         model: str,
         data: str | None = None,
         timeout_ms: int = DEFAULT_UNSAT_CORE_TIMEOUT_MS,
     ) -> UnsatCoreResult:
-        try:
-            return _find_unsat_core(model, data=data, timeout_ms=timeout_ms)
-        except (RuntimeMissingError, MiniZincExecutionError, ValueError) as exc:
-            raise RuntimeError(str(exc)) from exc
+        return _find_unsat_core(model, data=data, timeout_ms=timeout_ms)
 
     @mcp.tool(description=CHECK_MINIZINC_FILES_DESCRIPTION)
+    @_as_mcp_error()
     def check_minizinc_files(
         model_path: str,
         data_path: str | None = None,
         solver: str = DEFAULT_SOLVER,
         timeout_ms: int = DEFAULT_CHECK_TIMEOUT_MS,
     ) -> CheckResult:
-        try:
-            return check_model_path(
-                Path(model_path),
-                solver=solver,
-                data_path=Path(data_path) if data_path is not None else None,
-                timeout_ms=timeout_ms,
-            )
-        except (RuntimeMissingError, MiniZincExecutionError, ValueError) as exc:
-            raise RuntimeError(str(exc)) from exc
+        return check_model_path(
+            Path(model_path),
+            solver=solver,
+            data_path=Path(data_path) if data_path is not None else None,
+            timeout_ms=timeout_ms,
+        )
 
     @mcp.tool(description=INSPECT_MINIZINC_FILES_DESCRIPTION)
+    @_as_mcp_error()
     def inspect_minizinc_files(
         model_path: str,
         data_path: str | None = None,
         solver: str = DEFAULT_SOLVER,
         timeout_ms: int = DEFAULT_INSPECT_TIMEOUT_MS,
     ) -> ModelInspectionResult:
-        try:
-            return inspect_model_path(
-                Path(model_path),
-                solver=solver,
-                data_path=Path(data_path) if data_path is not None else None,
-                timeout_ms=timeout_ms,
-            )
-        except (RuntimeMissingError, MiniZincExecutionError, ValueError) as exc:
-            raise RuntimeError(str(exc)) from exc
+        return inspect_model_path(
+            Path(model_path),
+            solver=solver,
+            data_path=Path(data_path) if data_path is not None else None,
+            timeout_ms=timeout_ms,
+        )
 
     @mcp.tool(description=SOLVE_MINIZINC_FILES_DESCRIPTION)
+    @_as_mcp_error()
     def solve_minizinc_files(
         model_path: str,
         data_path: str | None = None,
@@ -355,37 +368,32 @@ def create_mcp_server() -> FastMCP:
         all_solutions: bool = False,
         num_solutions: int | None = None,
     ) -> Annotated[CallToolResult, SolveResult]:
-        try:
-            result = solve_model_path(
-                Path(model_path),
-                solver=solver,
-                data_path=Path(data_path) if data_path is not None else None,
-                timeout_ms=timeout_ms,
-                free_search=free_search,
-                parallel=parallel,
-                random_seed=random_seed,
-                all_solutions=all_solutions,
-                num_solutions=num_solutions,
-            )
+        result = solve_model_path(
+            Path(model_path),
+            solver=solver,
+            data_path=Path(data_path) if data_path is not None else None,
+            timeout_ms=timeout_ms,
+            free_search=free_search,
+            parallel=parallel,
+            random_seed=random_seed,
+            all_solutions=all_solutions,
+            num_solutions=num_solutions,
+        )
 
-            return _wrap_solve_result(result)
-        except (RuntimeMissingError, MiniZincExecutionError, ValueError) as exc:
-            raise RuntimeError(str(exc)) from exc
+        return _wrap_solve_result(result)
 
     @mcp.tool(description=FIND_UNSAT_CORE_FILES_DESCRIPTION)
+    @_as_mcp_error()
     def find_unsat_core_files(
         model_path: str,
         data_path: str | None = None,
         timeout_ms: int = DEFAULT_UNSAT_CORE_TIMEOUT_MS,
     ) -> UnsatCoreResult:
-        try:
-            return find_unsat_core_path(
-                Path(model_path),
-                data_path=Path(data_path) if data_path is not None else None,
-                timeout_ms=timeout_ms,
-            )
-        except (RuntimeMissingError, MiniZincExecutionError, ValueError) as exc:
-            raise RuntimeError(str(exc)) from exc
+        return find_unsat_core_path(
+            Path(model_path),
+            data_path=Path(data_path) if data_path is not None else None,
+            timeout_ms=timeout_ms,
+        )
 
     @mcp.prompt(
         name="solve_constraint_problem",
