@@ -132,6 +132,7 @@ def test_mcp_server_instructions_route_constraint_tasks() -> None:
         "solve_constraint_problem",
         "check_minizinc_model",
         "solve_minizinc_model",
+        "inspect_minizinc_model",
         "check_minizinc_files",
         "solve_minizinc_files",
         "managed local MiniZinc runtime",
@@ -1149,6 +1150,120 @@ async def test_check_minizinc_model_empty_model_surfaces_actionable_error(
     mcp = create_mcp_server()
     with pytest.raises(Exception) as exc_info:
         await mcp.call_tool("check_minizinc_model", {"model": ""})
+    assert "empty" in str(exc_info.value)
+
+
+_SOLVE_ONLY_CONTROLS = {"free_search", "parallel", "random_seed", "all_solutions", "num_solutions"}
+
+# A single-line interface object as the managed binary emits under
+# `--model-interface-only`: one required array param and one output var.
+_INSPECT_STDOUT = (
+    '{"type": "interface", "input": {"weight": {"type": "int", "dim": 1}}, '
+    '"output": {"take": {"type": "bool", "dim": 1}}, "method": "max", '
+    '"has_output_item": false, "included_files": [], "globals": []}'
+)
+
+
+@pytest.mark.asyncio
+async def test_inspect_minizinc_model_tool_is_listed() -> None:
+    mcp = create_mcp_server()
+    tools = await mcp.list_tools()
+
+    names = {tool.name for tool in tools}
+    assert "inspect_minizinc_model" in names
+
+    tool = next(t for t in tools if t.name == "inspect_minizinc_model")
+    properties = tool.inputSchema.get("properties", {})
+    assert {"model", "data", "solver", "timeout_ms"} <= set(properties.keys())
+    # Decision 8: inspection exposes no solve-only search controls.
+    assert not (_SOLVE_ONLY_CONTROLS & set(properties.keys()))
+
+
+@pytest.mark.asyncio
+async def test_inspect_minizinc_files_tool_is_listed() -> None:
+    mcp = create_mcp_server()
+    tools = await mcp.list_tools()
+
+    names = {tool.name for tool in tools}
+    assert "inspect_minizinc_files" in names
+
+    tool = next(t for t in tools if t.name == "inspect_minizinc_files")
+    properties = tool.inputSchema.get("properties", {})
+    assert {"model_path", "data_path", "solver", "timeout_ms"} <= set(properties.keys())
+    assert not (_SOLVE_ONLY_CONTROLS & set(properties.keys()))
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("tool_name", ["inspect_minizinc_model", "inspect_minizinc_files"])
+async def test_inspect_tools_output_schema_advertises_field_names(tool_name: str) -> None:
+    # Concern 3: with no Pydantic aliases the advertised outputSchema must list the
+    # public field names base_type/is_set/is_optional for InterfaceType — never
+    # MiniZinc's raw type/set/optional — so a client validating structured output
+    # against it does not fail.
+    mcp = create_mcp_server()
+    tools = await mcp.list_tools()
+
+    tool = next(t for t in tools if t.name == tool_name)
+    assert tool.outputSchema is not None
+    type_props = tool.outputSchema["$defs"]["InterfaceType"]["properties"]
+    assert set(type_props) == {"base_type", "dim", "is_set", "is_optional"}
+    assert "type" not in type_props
+    assert "set" not in type_props
+
+
+@pytest.mark.asyncio
+async def test_inspect_minizinc_model_happy_path(
+    fake_minizinc_binary: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def _fake_run(*args: object, **kwargs: object) -> _FakeCompletedProcess:
+        return _FakeCompletedProcess(stdout=_INSPECT_STDOUT, stderr="", returncode=0)
+
+    monkeypatch.setattr("openconstraint_mcp.minizinc.core.subprocess.run", _fake_run)
+
+    mcp = create_mcp_server()
+    result = await mcp.call_tool(
+        "inspect_minizinc_model",
+        {"model": "array[1..3] of int: weight;\narray[1..3] of var bool: take;\n"
+         "solve maximize sum(i in 1..3)(weight[i] * take[i]);"},
+    )
+
+    structured = _structured(result)
+    assert structured["status"] == "ok"
+    assert structured["interface"]["method"] == "max"
+    # The structured payload carries the public field names, matching the
+    # advertised outputSchema (Concern 3).
+    weight = structured["interface"]["required_parameters"]["weight"]
+    assert set(weight) == {"base_type", "dim", "is_set", "is_optional"}
+    assert weight["base_type"] == "int"
+    assert weight["dim"] == 1
+
+
+@pytest.mark.asyncio
+async def test_inspect_minizinc_model_runtime_missing_surfaces_actionable_error(
+    fake_runtime_dir: Path,
+) -> None:
+    mcp = create_mcp_server()
+    with pytest.raises(Exception) as exc_info:
+        await mcp.call_tool("inspect_minizinc_model", {"model": "solve satisfy;"})
+
+    message = str(exc_info.value)
+    assert "install-runtime" in message
+    assert "MiniZinc" in message
+
+
+@pytest.mark.asyncio
+async def test_inspect_minizinc_model_empty_model_surfaces_actionable_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def _fail_if_called(*args: object, **kwargs: object) -> None:
+        raise AssertionError("subprocess.run must not be invoked for empty model")
+
+    monkeypatch.setattr("openconstraint_mcp.minizinc.core.subprocess.run", _fail_if_called)
+
+    mcp = create_mcp_server()
+    with pytest.raises(Exception) as exc_info:
+        await mcp.call_tool("inspect_minizinc_model", {"model": ""})
     assert "empty" in str(exc_info.value)
 
 

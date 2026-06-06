@@ -9,6 +9,8 @@ import pytest
 from pydantic import ValidationError
 
 from openconstraint_mcp.minizinc.core import (
+    DEFAULT_CHECK_TIMEOUT_MS,
+    DEFAULT_INSPECT_TIMEOUT_MS,
     DEFAULT_SOLVE_TIMEOUT_MS,
     DEFAULT_SOLVER,
     DEFAULT_UNSAT_CORE_TIMEOUT_MS,
@@ -17,6 +19,7 @@ from openconstraint_mcp.minizinc.core import (
     _solver_capabilities,
     check_model,
     find_unsat_core,
+    inspect_model,
     list_solvers,
     solve_model,
     solver_supports_num_solutions,
@@ -26,6 +29,7 @@ from openconstraint_mcp.minizinc.unsat_core import _parse_unsat_core, _slice_sou
 from openconstraint_mcp.runtime import RuntimeMissingError
 from openconstraint_mcp.schemas import (
     CheckResult,
+    ModelInspectionResult,
     SolverCapabilities,
     SolveResult,
     SolverInfo,
@@ -1806,3 +1810,191 @@ def test_find_unsat_core_uses_default_timeout(
 
     cmd = calls[0]["args"][0]
     assert cmd[cmd.index("--time-limit") + 1] == str(DEFAULT_UNSAT_CORE_TIMEOUT_MS)
+
+
+# --- inspect_model (--model-interface-only) --------------------------------
+
+_INSPECT_KNAPSACK_MODEL = (
+    "int: n;\narray[1..n] of int: weight;\narray[1..n] of var bool: take;\n"
+    "solve maximize sum(i in 1..n)(weight[i] * take[i]);\n"
+)
+# A single-line interface object as the managed binary emits it (captured shape).
+_INSPECT_KNAPSACK_STDOUT = (
+    '{"type": "interface", "input": {"n": {"type": "int"}, "weight": '
+    '{"type": "int", "dim": 1}}, "output": {"take": {"type": "bool", "dim": 1}}, '
+    '"method": "max", "has_output_item": false, "included_files": [], "globals": []}'
+)
+
+
+def test_inspect_model_happy_path_returns_ok(
+    fake_minizinc_binary: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls = _record_subprocess(
+        monkeypatch,
+        _FakeCompletedProcess(stdout=_INSPECT_KNAPSACK_STDOUT, stderr="", returncode=0),
+    )
+
+    result = inspect_model(_INSPECT_KNAPSACK_MODEL)
+
+    assert isinstance(result, ModelInspectionResult)
+    assert result.status == "ok"
+    assert result.solver == "cp-sat"
+    assert result.interface is not None
+    assert result.interface.method == "max"
+    assert set(result.interface.required_parameters) == {"n", "weight"}
+    assert result.interface.required_parameters["weight"].dim == 1
+    assert result.elapsed_ms >= 0
+    assert len(calls) == 1
+
+
+def test_inspect_model_command_shape(
+    fake_minizinc_binary: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls = _record_subprocess(
+        monkeypatch,
+        _FakeCompletedProcess(stdout=_INSPECT_KNAPSACK_STDOUT, stderr="", returncode=0),
+    )
+
+    inspect_model(_INSPECT_KNAPSACK_MODEL)
+
+    cmd = calls[0]["args"][0]
+    assert "--model-interface-only" in cmd
+    # Inspection is read-only type analysis: never the solve transport, the
+    # statistics flag, or any solve-only search control.
+    assert "--json-stream" not in cmd
+    assert "--statistics" not in cmd
+    assert not ({"-a", "-f", "-p", "-r", "-n"} & set(cmd))
+    # The interface flag precedes the model file (extra_args go before the model).
+    assert cmd.index("--model-interface-only") < cmd.index(
+        next(arg for arg in cmd if str(arg).endswith(".mzn"))
+    )
+
+
+def test_inspect_model_returns_structured_error_for_compile_error(
+    fake_minizinc_binary: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _record_subprocess(
+        monkeypatch,
+        _FakeCompletedProcess(
+            stdout="",
+            stderr="Error: type error: undefined identifier 'xz'\n",
+            returncode=1,
+        ),
+    )
+
+    result = inspect_model("var 1..3: x;\nconstraint xz > 2;\nsolve satisfy;")
+
+    assert result.status == "error"
+    assert result.interface is None
+    assert "type error" in result.stderr
+
+
+def test_inspect_model_degrades_to_error_on_unparseable_stdout(
+    fake_minizinc_binary: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # rc 0 but stdout is not a parseable interface object: rather than mis-report a
+    # partial interface, the result degrades to status="error" with interface None.
+    _record_subprocess(
+        monkeypatch,
+        _FakeCompletedProcess(stdout="not an interface line\n", stderr="", returncode=0),
+    )
+
+    result = inspect_model("var 1..5: x;\nsolve satisfy;")
+
+    assert result.status == "error"
+    assert result.interface is None
+    # The raw stdout is preserved so the failure is diagnosable.
+    assert "not an interface line" in result.stdout
+
+
+def test_inspect_model_returns_timeout_when_run_times_out(
+    fake_minizinc_binary: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # A hard timeout during interface extraction classifies as status="timeout" with
+    # no interface, completing the status matrix alongside ok / error-compile /
+    # error-unparseable. Driven by a raised TimeoutExpired, the same idiom check uses.
+    def _fake_run(*args: Any, **kwargs: Any) -> None:
+        raise subprocess.TimeoutExpired(
+            cmd=args[0],
+            timeout=kwargs.get("timeout", 35.0),
+            output=b"partial",
+            stderr=b"",
+        )
+
+    monkeypatch.setattr("openconstraint_mcp.minizinc.core.subprocess.run", _fake_run)
+
+    result = inspect_model("solve satisfy;")
+
+    assert result.status == "timeout"
+    assert result.interface is None
+    assert result.stdout == "partial"
+    assert result.stderr == ""
+
+
+def test_inspect_model_forwards_inline_data_positionally(
+    fake_minizinc_binary: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    empty_interface = (
+        '{"type": "interface", "input": {}, "output": {"x": {"type": "int"}}, '
+        '"method": "sat", "has_output_item": false}'
+    )
+    calls = _record_subprocess(
+        monkeypatch,
+        _FakeCompletedProcess(stdout=empty_interface, stderr="", returncode=0),
+    )
+
+    result = inspect_model("int: n;\nvar 1..n: x;\nsolve satisfy;", data="n = 3;")
+
+    cmd = calls[0]["args"][0]
+    assert "--model-interface-only" in cmd
+    assert Path(cmd[-2]).suffix == ".mzn"
+    assert Path(cmd[-1]).suffix == ".dzn"
+    assert calls[0]["data_contents"] == "n = 3;"
+    # Data supplied -> the interface reports nothing still required (completeness).
+    assert result.status == "ok"
+    assert result.interface is not None
+    assert result.interface.required_parameters == {}
+
+
+@pytest.mark.parametrize("bad_model", ["", "\n\n  \t\n"])
+def test_inspect_model_rejects_empty_or_whitespace_model(
+    bad_model: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def _fail_if_called(*args: Any, **kwargs: Any) -> Any:
+        raise AssertionError("subprocess.run must not be invoked for empty model")
+
+    monkeypatch.setattr("openconstraint_mcp.minizinc.core.subprocess.run", _fail_if_called)
+
+    with pytest.raises(ValueError, match="empty"):
+        inspect_model(bad_model)
+
+
+def test_inspect_model_rejects_non_positive_timeout(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def _fail_if_called(*args: Any, **kwargs: Any) -> Any:
+        raise AssertionError("subprocess.run must not be invoked for bad timeout")
+
+    monkeypatch.setattr("openconstraint_mcp.minizinc.core.subprocess.run", _fail_if_called)
+
+    with pytest.raises(ValueError, match="positive"):
+        inspect_model("solve satisfy;", timeout_ms=0)
+
+
+def test_inspect_model_raises_when_runtime_missing(fake_runtime_dir: Path) -> None:
+    with pytest.raises(RuntimeMissingError) as exc_info:
+        inspect_model("solve satisfy;")
+    assert "install-runtime" in str(exc_info.value)
+
+
+def test_inspect_default_timeout_aliases_check_budget() -> None:
+    # Decision 7: inspection is a preflight like check, so it shares the check
+    # budget rather than an independent literal that could drift.
+    assert DEFAULT_INSPECT_TIMEOUT_MS == DEFAULT_CHECK_TIMEOUT_MS

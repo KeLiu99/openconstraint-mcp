@@ -134,10 +134,10 @@ The package exposes five commands:
 
 ## MCP tools
 
-The stdio server exposes two introspection tools, a model-check tool, an
-execution tool, and an unsat-core diagnostic tool — each of the latter three
-in an **inline-source** form (below) and a **path-based file** sibling
-([Path-based file tools](#path-based-file-tools)):
+The stdio server exposes two runtime-introspection tools, a model-check tool, a
+model-inspection tool, an execution tool, and an unsat-core diagnostic tool —
+each of the latter four in an **inline-source** form (below) and a **path-based
+file** sibling ([Path-based file tools](#path-based-file-tools)):
 
 - **`check_runtime`** — returns a `RuntimeStatus` with fields
   `installed: bool`, `runtime_dir: str`, and `minizinc_binary: str | None`.
@@ -222,6 +222,68 @@ in an **inline-source** form (below) and a **path-based file** sibling
   failures into cheap compile errors instead of spent solve attempts. When
   the model uses inline data, pass the **same** `data` to both the check and
   the solve call so you validate and solve the same instance.
+
+- **`inspect_minizinc_model`** — inspect a model's **interface without solving
+  it**. It wraps the managed runtime's `--model-interface-only` flag, which runs
+  MiniZinc's type analysis and stops *before* flattening or search, so it is even
+  cheaper than `check_minizinc_model`. Use it to discover what data a model needs
+  (so a client LLM can build a correct `.dzn`) and what it outputs, before
+  spending a solve. Arguments:
+
+  - `model: str` — the complete MiniZinc source. Must not be empty.
+  - `data: str | None = None` — optional inline `.dzn` data, written to a
+    private temp file beside the model and passed as a positional data file
+    (same contract as `check_minizinc_model`). Supplying data narrows the
+    reported `required_parameters` (see below); omit it to see the model's full
+    required set.
+  - `solver: str = "cp-sat"` — passed through to `--solver`. Interface
+    extraction is solver-independent in practice, but the flag is accepted for
+    consistency with the other tools.
+  - `timeout_ms: int = 30000` — wall-clock budget (must be strictly positive);
+    shares the `check` default, since inspection is a comparable pre-flight.
+
+  Returns a `ModelInspectionResult` with fields:
+
+  - `status: str` — one of `"ok"`, `"error"`, `"timeout"`. **`"ok"` means only
+    that the interface was *extracted* — it is NOT a data-completeness signal.**
+    A no-data inspection is `"ok"` with a *non-empty* `required_parameters`
+    (that is the whole point of the tool). Completeness is signalled solely by
+    `required_parameters == {}`.
+  - `solver: str` — echoed from the request.
+  - `interface: ModelInterface | None` — populated **only when `status="ok"`**,
+    with fields:
+    - `method: str` — the solve kind, one of `"sat"`, `"min"`, `"max"`.
+    - `required_parameters: dict[str, InterfaceType]` — the parameters **still
+      needing a value** given any `data` you passed. With no data this is the
+      model's full required set; supplying the matching data shrinks it to `{}`.
+    - `output_variables: dict[str, InterfaceType]` — the model's output variables.
+      **Advisory:** with an `output` item this tracks the output-referenced
+      variables and excludes functionally-defined ones, so treat it as "the
+      model's output variables", not "every decision variable".
+    - `has_output_item: bool` — whether the model declares an `output` item.
+    - `globals: list[str]`, `included_files: list[str]` — as reported by the
+      runtime.
+
+    Each `InterfaceType` carries `base_type` (one of `"int"`, `"bool"`,
+    `"float"`, `"string"`, `"tuple"`, `"record"`, `"ann"`), `dim` (array
+    dimensionality; `0` for a scalar), `is_set` (`true` for a set type), and
+    `is_optional` (`true` for an `opt` type). `"ann"` is MiniZinc's annotation
+    type — e.g. an `array[1..2] of ann` search-strategy list passed to
+    `seq_search`. **This mode does not surface:** enum-typed entries appear as
+    `base_type="int"` (enum names are not exposed — infer them from the model
+    text); variable domains and parameter ranges (e.g. `1..n`) are not reported;
+    array index sets are not reported, only the `dim` count; and `tuple`/`record`
+    entries carry only the tag, not their component types.
+  - `stdout: str` / `stderr: str` — the runtime's raw output. A *successful*
+    inspection may still emit warnings to `stderr`, so `status="ok"` does not
+    depend on empty `stderr`.
+  - `elapsed_ms: int` — wall-clock duration of the subprocess call.
+
+  **Failure-mode contract.** Identical to `check_minizinc_model`: environment and
+  argument problems (runtime missing, empty `model`, non-positive `timeout_ms`,
+  OS-level exec failure) surface as **MCP errors**; a model type/syntax error
+  comes back as a normal `ModelInspectionResult` with `status="error"`,
+  `interface=None`, and the diagnostic in `stderr`.
 
 - **`solve_minizinc_model`** — run a complete MiniZinc model through the
   managed local runtime. Arguments:
@@ -387,7 +449,7 @@ in an **inline-source** form (below) and a **path-based file** sibling
 
 ### Path-based file tools
 
-The three tools above take the model (and optional data) as **inline source
+The four tools above take the model (and optional data) as **inline source
 text**, which the server writes to a private temp file. That is ideal for the
 small/medium models a client LLM drafts, but it forces the agent to read an
 entire `.mzn`/`.dzn` from disk and thread the whole contents through MCP
@@ -395,21 +457,25 @@ arguments. For large local models the server also exposes **path-based**
 siblings that read the model/data from local file paths instead:
 
 - **`check_minizinc_files`** — path-based sibling of `check_minizinc_model`.
+- **`inspect_minizinc_files`** — path-based sibling of `inspect_minizinc_model`.
 - **`solve_minizinc_files`** — path-based sibling of `solve_minizinc_model`.
 - **`find_unsat_core_files`** — path-based sibling of `find_unsat_core`.
 
 Each returns the **same** result shape as its inline counterpart
-(`CheckResult` / `SolveResult` / `UnsatCoreResult`). The inline tools are
+(`CheckResult` / `ModelInspectionResult` / `SolveResult` / `UnsatCoreResult`).
+A path-based inspection is the one that genuinely benefits from running in the
+model's own directory: the interface parses without data, but a relative
+`include` must still resolve from the model's own dir. The inline tools are
 unchanged and remain the right choice for ephemeral, isolated text workflows.
 
-**Arguments** (all three):
+**Arguments** (all four):
 
 - `model_path: str` — path to a local `.mzn` file on the machine running the
   server. Required; must exist and be a regular file.
 - `data_path: str | None = None` — path to a local `.dzn` file, or `null`. An
   empty data file is allowed (a valid "no parameters" input).
-- `solver: str = "cp-sat"` — `solve`/`check` only (not `find_unsat_core_files`,
-  which always uses findMUS).
+- `solver: str = "cp-sat"` — `solve`/`check`/`inspect` only (not
+  `find_unsat_core_files`, which always uses findMUS).
 - `timeout_ms: int = 30000` — same semantics as the inline tools; must be
   strictly positive.
 

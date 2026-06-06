@@ -12,6 +12,7 @@ from mcp.types import CallToolResult, TextContent
 
 from .minizinc.core import (
     DEFAULT_CHECK_TIMEOUT_MS,
+    DEFAULT_INSPECT_TIMEOUT_MS,
     DEFAULT_SOLVE_TIMEOUT_MS,
     DEFAULT_SOLVER,
     DEFAULT_UNSAT_CORE_TIMEOUT_MS,
@@ -19,6 +20,8 @@ from .minizinc.core import (
     check_model,
     check_model_path,
     find_unsat_core_path,
+    inspect_model,
+    inspect_model_path,
     list_solvers,
     solve_model,
     solve_model_path,
@@ -30,6 +33,8 @@ from .protocol_text.descriptions import (
     CHECK_RUNTIME_DESCRIPTION,
     FIND_UNSAT_CORE_DESCRIPTION,
     FIND_UNSAT_CORE_FILES_DESCRIPTION,
+    INSPECT_MINIZINC_FILES_DESCRIPTION,
+    INSPECT_MINIZINC_MODEL_DESCRIPTION,
     LIST_AVAILABLE_SOLVERS_DESCRIPTION,
     MCP_SERVER_INSTRUCTIONS,
     SOLVE_CONSTRAINT_PROBLEM_PROMPT_DESCRIPTION,
@@ -40,6 +45,7 @@ from .protocol_text.prompts import SOLVE_CONSTRAINT_PROBLEM_PROMPT
 from .runtime import RuntimeMissingError, get_runtime_status
 from .schemas import (
     CheckResult,
+    ModelInspectionResult,
     RuntimeStatus,
     SolveResult,
     SolverList,
@@ -280,6 +286,18 @@ def create_mcp_server() -> FastMCP:
         except (RuntimeMissingError, MiniZincExecutionError, ValueError) as exc:
             raise RuntimeError(str(exc)) from exc
 
+    @mcp.tool(description=INSPECT_MINIZINC_MODEL_DESCRIPTION)
+    def inspect_minizinc_model(
+        model: str,
+        data: str | None = None,
+        solver: str = DEFAULT_SOLVER,
+        timeout_ms: int = DEFAULT_INSPECT_TIMEOUT_MS,
+    ) -> ModelInspectionResult:
+        try:
+            return inspect_model(model, solver=solver, data=data, timeout_ms=timeout_ms)
+        except (RuntimeMissingError, MiniZincExecutionError, ValueError) as exc:
+            raise RuntimeError(str(exc)) from exc
+
     @mcp.tool(description=FIND_UNSAT_CORE_DESCRIPTION)
     def find_unsat_core(
         model: str,
@@ -300,6 +318,23 @@ def create_mcp_server() -> FastMCP:
     ) -> CheckResult:
         try:
             return check_model_path(
+                Path(model_path),
+                solver=solver,
+                data_path=Path(data_path) if data_path is not None else None,
+                timeout_ms=timeout_ms,
+            )
+        except (RuntimeMissingError, MiniZincExecutionError, ValueError) as exc:
+            raise RuntimeError(str(exc)) from exc
+
+    @mcp.tool(description=INSPECT_MINIZINC_FILES_DESCRIPTION)
+    def inspect_minizinc_files(
+        model_path: str,
+        data_path: str | None = None,
+        solver: str = DEFAULT_SOLVER,
+        timeout_ms: int = DEFAULT_INSPECT_TIMEOUT_MS,
+    ) -> ModelInspectionResult:
+        try:
+            return inspect_model_path(
                 Path(model_path),
                 solver=solver,
                 data_path=Path(data_path) if data_path is not None else None,
