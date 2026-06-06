@@ -12,6 +12,7 @@ from ..runtime import RuntimeMissingError, get_minizinc_binary, is_runtime_insta
 from ..schemas import (
     CheckResult,
     CheckStatus,
+    ModelInspectionResult,
     SolverCapabilities,
     SolveResult,
     SolverInfo,
@@ -20,6 +21,7 @@ from ..schemas import (
     UnsatCoreConstraint,
     UnsatCoreResult,
 )
+from .interface import parse_model_interface
 from .stream import _parse_solve_stream
 from .unsat_core import _parse_unsat_core
 
@@ -40,6 +42,16 @@ DEFAULT_CHECK_TIMEOUT_MS: int = DEFAULT_SOLVE_TIMEOUT_MS
 # Named separately from the solve budget so the findMUS call site describes the
 # diagnostic operation even though it uses the same default wall-clock budget.
 DEFAULT_UNSAT_CORE_TIMEOUT_MS: int = DEFAULT_SOLVE_TIMEOUT_MS
+# Inspection is a preflight like check — cheaper, even, since it stops after type
+# analysis — so it shares the check budget rather than an independent literal that
+# could drift. The distinct name keeps the inspect call site from reading as a check.
+DEFAULT_INSPECT_TIMEOUT_MS: int = DEFAULT_CHECK_TIMEOUT_MS
+# MiniZinc's read-only type-analysis flag: it reports the model's interface
+# (required params, output vars, method) and stops without flattening or solving.
+# It coexists with the --solver/--time-limit args _build_minizinc_cmd always
+# injects, but takes none of the solve transport (--json-stream/--statistics) or
+# search-control flags.
+INSPECT_FLAG: str = "--model-interface-only"
 _MODEL_FILENAME: str = "model.mzn"
 _DATA_FILENAME: str = "data.dzn"
 # Solve runs use the json-stream transport: `--json-stream` emits one JSON object
@@ -388,6 +400,54 @@ def _build_check_result(outcome: _RunOutcome, *, solver: str) -> CheckResult:
     )
 
 
+def _build_inspection_result(outcome: _RunOutcome, *, solver: str) -> ModelInspectionResult:
+    """Classify a ``--model-interface-only`` run into a ModelInspectionResult.
+
+    Mirrors ``_build_check_result``'s rc-driven contract — timeout -> ``timeout``,
+    a non-zero exit -> ``error`` with the diagnostic on stderr and no parse — then
+    on a clean exit parses the single interface object. An unparseable interface on
+    rc 0 degrades to ``error`` (with the parse failure folded into stderr) rather
+    than mis-reporting a partial interface. ``interface`` is populated only on ``ok``.
+    """
+    if outcome.timed_out:
+        return ModelInspectionResult(
+            status="timeout",
+            solver=solver,
+            interface=None,
+            stdout=outcome.stdout,
+            stderr=outcome.stderr,
+            elapsed_ms=outcome.elapsed_ms,
+        )
+    if outcome.returncode != 0:
+        return ModelInspectionResult(
+            status="error",
+            solver=solver,
+            interface=None,
+            stdout=outcome.stdout,
+            stderr=outcome.stderr,
+            elapsed_ms=outcome.elapsed_ms,
+        )
+    try:
+        interface = parse_model_interface(outcome.stdout)
+    except ValueError as exc:
+        return ModelInspectionResult(
+            status="error",
+            solver=solver,
+            interface=None,
+            stdout=outcome.stdout,
+            stderr=_merge_stderr(outcome.stderr, [f"interface parse failed: {exc}"]),
+            elapsed_ms=outcome.elapsed_ms,
+        )
+    return ModelInspectionResult(
+        status="ok",
+        solver=solver,
+        interface=interface,
+        stdout=outcome.stdout,
+        stderr=outcome.stderr,
+        elapsed_ms=outcome.elapsed_ms,
+    )
+
+
 def _build_unsat_core_result(
     outcome: _RunOutcome, model: str, *, model_filename: str = _MODEL_FILENAME
 ) -> UnsatCoreResult:
@@ -550,6 +610,29 @@ def check_model(
     return _build_check_result(outcome, solver=solver)
 
 
+def inspect_model(
+    model: str,
+    *,
+    solver: str = DEFAULT_SOLVER,
+    data: str | None = None,
+    timeout_ms: int = DEFAULT_INSPECT_TIMEOUT_MS,
+) -> ModelInspectionResult:
+    """Inspect a MiniZinc model's interface WITHOUT solving it.
+
+    Wraps the managed runtime's ``--model-interface-only`` flag: it reports which
+    parameters the model still needs as data (``required_parameters``), its output
+    variables, their types, and the solve method, stopping after type analysis —
+    no flattening, no search. With no ``data`` the required set is the model's full
+    parameter list; supplying the matching ``data`` shrinks it, so an empty
+    ``required_parameters`` signals the data is complete. ``status="ok"`` means
+    only that the interface was extracted — NOT that the data is complete.
+    """
+    outcome = _run_managed_minizinc(
+        model, solver=solver, timeout_ms=timeout_ms, extra_args=(INSPECT_FLAG,), data=data
+    )
+    return _build_inspection_result(outcome, solver=solver)
+
+
 def _read_text_utf8(path: Path) -> str:
     """Read ``path`` as UTF-8, surfacing a bad encoding as a clear ValueError.
 
@@ -689,6 +772,30 @@ def check_model_path(
         data_path=data_path,
     )
     return _build_check_result(outcome, solver=solver)
+
+
+def inspect_model_path(
+    model_path: Path,
+    *,
+    solver: str = DEFAULT_SOLVER,
+    data_path: Path | None = None,
+    timeout_ms: int = DEFAULT_INSPECT_TIMEOUT_MS,
+) -> ModelInspectionResult:
+    """Inspect a MiniZinc model read from ``model_path`` via the managed runtime.
+
+    Same CLI-style execution as ``solve_model_path`` (real path, ``cwd`` = the
+    model's parent), so a relative ``include`` resolves against the model's own
+    directory; returns the inline ``inspect_model`` ``ModelInspectionResult`` shape.
+    """
+    model_path, data_path = _validate_model_data_paths(model_path, data_path)
+    outcome = _run_managed_minizinc_paths(
+        model_path,
+        solver=solver,
+        timeout_ms=timeout_ms,
+        extra_args=(INSPECT_FLAG,),
+        data_path=data_path,
+    )
+    return _build_inspection_result(outcome, solver=solver)
 
 
 def find_unsat_core_path(

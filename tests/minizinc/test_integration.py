@@ -19,6 +19,7 @@ from openconstraint_mcp.minizinc.core import (
     check_model_path,
     find_unsat_core,
     find_unsat_core_path,
+    inspect_model,
     list_solvers,
     solve_model,
     solve_model_path,
@@ -354,3 +355,125 @@ def test_find_unsat_core_path_resolves_entry_basename(tmp_path: Path) -> None:
     assert any("x + y > 5" in source for source in normalized_sources)
     assert any("x + y < 3" in source for source in normalized_sources)
     assert all("x != y" not in source for source in normalized_sources)
+
+
+# --- inspect_model (--model-interface-only) --------------------------------
+#
+# Mandatory real-binary coverage for the new CLI flag: a mocked-argv unit test
+# proves the flag string was built, NOT that the managed binary accepts it (the
+# `num_solutions`/`-n` lesson). These exercise the actual runtime.
+
+# Required params (n, capacity) plus two int *arrays* and a var-bool array; the
+# `maximize` objective fixes `method`. `take` is the decision variable.
+_KNAPSACK_MODEL = (
+    "int: n;\n"
+    "int: capacity;\n"
+    "array[1..n] of int: weight;\n"
+    "array[1..n] of int: profit;\n"
+    "array[1..n] of var bool: take;\n"
+    "constraint sum(i in 1..n)(weight[i] * take[i]) <= capacity;\n"
+    "solve maximize sum(i in 1..n)(profit[i] * take[i]);\n"
+)
+_KNAPSACK_DATA = "n = 3;\ncapacity = 10;\nweight = [2, 3, 4];\nprofit = [5, 6, 7];\n"
+
+
+def test_inspect_model_reports_interface_without_data() -> None:
+    result = inspect_model(_KNAPSACK_MODEL)
+
+    assert result.status == "ok"
+    assert result.interface is not None
+    # The objective kind comes straight from the model-interface output.
+    assert result.interface.method == "max"
+    # With no data, every unassigned parameter is still required.
+    assert set(result.interface.required_parameters) == {"n", "capacity", "weight", "profit"}
+    # The int arrays carry dim 1; the scalars carry dim 0.
+    assert result.interface.required_parameters["weight"].dim == 1
+    assert result.interface.required_parameters["n"].dim == 0
+
+
+def test_inspect_model_with_data_reports_complete() -> None:
+    # The SAME model with matching data: the interface must report nothing still
+    # required, proving data threading and the completeness mode end to end.
+    result = inspect_model(_KNAPSACK_MODEL, data=_KNAPSACK_DATA)
+
+    assert result.status == "ok"
+    assert result.interface is not None
+    assert result.interface.required_parameters == {}
+
+
+def test_inspect_model_reports_satisfy_method() -> None:
+    result = inspect_model("var 1..5: x;\nconstraint x > 2;\nsolve satisfy;")
+
+    assert result.status == "ok"
+    assert result.interface is not None
+    assert result.interface.method == "sat"
+
+
+def test_inspect_model_type_error_reports_error() -> None:
+    result = inspect_model("var 1..3: x;\nconstraint xz > 2;\nsolve satisfy;")
+
+    assert result.status == "error"
+    assert result.interface is None
+    assert result.stderr.strip()
+
+
+def test_inspect_model_reports_tuple_and_record_base_types() -> None:
+    # Real-binary proof that `tuple`/`record` are in the parsed vocabulary: a
+    # mocked unit test only proves the Literal accepts the strings, not that the
+    # managed 2.9.7 binary actually emits them (the num_solutions/-n lesson). A
+    # tuple parameter and a record output var are both valid models the tool must
+    # report as ok, not degrade to error.
+    result = inspect_model(
+        "tuple(int, float): pt;\nvar record(int: a, bool: b): r;\nsolve satisfy;"
+    )
+
+    assert result.status == "ok"
+    assert result.interface is not None
+    assert result.interface.required_parameters["pt"].base_type == "tuple"
+    assert result.interface.output_variables["r"].base_type == "record"
+
+
+def test_inspect_model_reports_optional_parameter() -> None:
+    # Real-binary proof that an `opt` parameter surfaces as is_optional rather than
+    # being silently indistinguishable from a required one.
+    result = inspect_model("opt int: g;\nvar 1..3: x;\nconstraint x > 1;\nsolve satisfy;")
+
+    assert result.status == "ok"
+    assert result.interface is not None
+    assert result.interface.required_parameters["g"].base_type == "int"
+    assert result.interface.required_parameters["g"].is_optional is True
+
+
+def test_inspect_model_reports_ann_base_type() -> None:
+    # Real-binary proof that `ann` (the annotation type) is in the parsed
+    # vocabulary. An `array of ann` strategy list feeding `seq_search` is a valid
+    # model the tool must report as ok, not degrade to error (the original `ann`
+    # gap). A mocked unit test only proves the Literal accepts the string, NOT that
+    # the managed 2.9.7 binary emits `{"type": "ann", "dim": 1}` for it.
+    result = inspect_model(
+        "array[1..2] of ann: strategies;\nsolve :: seq_search(strategies) satisfy;"
+    )
+
+    assert result.status == "ok"
+    assert result.interface is not None
+    assert result.interface.required_parameters["strategies"].base_type == "ann"
+    assert result.interface.required_parameters["strategies"].dim == 1
+
+
+def test_inspect_model_reports_globals_from_real_binary() -> None:
+    # Real-binary proof that the `globals` passthrough is populated by the managed
+    # binary, not merely parseable from hand-written stdout (the same standard the
+    # type fields are held to). An `alldifferent` model must surface
+    # globals == ["alldifferent"]; the binary pads the JSON array with cosmetic
+    # whitespace (`[    "alldifferent"]`), which json.loads absorbs.
+    result = inspect_model(
+        'include "globals.mzn";\n'
+        "int: n;\n"
+        "array[1..n] of var 1..n: q;\n"
+        "constraint alldifferent(q);\n"
+        "solve satisfy;\n"
+    )
+
+    assert result.status == "ok"
+    assert result.interface is not None
+    assert result.interface.globals == ["alldifferent"]

@@ -11,7 +11,10 @@ MCP_SERVER_INSTRUCTIONS = (
     "validation, and solver statistics. For natural-language problems, prefer "
     "the solve_constraint_problem prompt when the client supports MCP prompts; "
     "otherwise draft MiniZinc in the client LLM, check it with "
-    "check_minizinc_model, then solve with solve_minizinc_model. When the "
+    "check_minizinc_model, then solve with solve_minizinc_model. To discover "
+    "which parameters a model needs as data before building a `.dzn` (and its "
+    "output variables and solve method), inspect its interface with "
+    "inspect_minizinc_model without solving. When the "
     "model (and any data) already exist as local files, pass their paths to "
     "check_minizinc_files / solve_minizinc_files instead of reading the files "
     "into the string tools — the path-based tools run from the model's own "
@@ -108,6 +111,27 @@ CHECK_MINIZINC_MODEL_DESCRIPTION = (
     "is satisfiable."
 )
 
+INSPECT_MINIZINC_MODEL_DESCRIPTION = (
+    "Inspect a MiniZinc model's INTERFACE through the managed local runtime "
+    "WITHOUT solving it — report which parameters it needs as data, which "
+    "variables it outputs, their types (array `dim`, set-ness), and the solve "
+    "`method` (`sat`/`min`/`max`), so you can build correct `.dzn` data before "
+    "spending a solve. Optional `data` is `.dzn` text run beside the model "
+    "(omit it when the model needs none). Returns a ModelInspectionResult: "
+    "`status` (`ok`/`error`/`timeout`), `solver`, raw `stdout`/`stderr`, "
+    "`elapsed_ms`, and — only when `ok` — a structured `interface` with "
+    "`method`, `required_parameters`, `output_variables`, `has_output_item`, "
+    "`globals`, `included_files`. `required_parameters` is the set of "
+    "parameters STILL needing a value given any `data` you passed: with no "
+    "data it is the model's full required set; supplying the matching data "
+    "shrinks it, and an empty `required_parameters` means the data is "
+    "complete. IMPORTANT: `status=\"ok\"` means only that the interface was "
+    "extracted — it is NOT a data-completeness signal; only "
+    "`required_parameters == {}` is. `output_variables` is advisory (the "
+    "model's output variables, not necessarily every decision variable). "
+    "Enum-typed entries appear as `int`; enum names are not surfaced in v1."
+)
+
 FIND_UNSAT_CORE_DESCRIPTION = (
     "Diagnose an unsatisfiable MiniZinc model by computing a minimal "
     "unsatisfiable subset (MUS) of its constraints via the managed "
@@ -173,6 +197,19 @@ FIND_UNSAT_CORE_FILES_DESCRIPTION = (
     "only, so a MUS member in an INCLUDED file appears in authoritative "
     "`stdout` but NOT in `core`. The subset is MINIMAL but not necessarily "
     "the globally smallest."
+)
+
+INSPECT_MINIZINC_FILES_DESCRIPTION = (
+    "Inspect a MiniZinc model's INTERFACE from local file paths WITHOUT "
+    "solving it — the path-based sibling of `inspect_minizinc_model`. "
+    + _FILE_TOOL_SHARED_DESCRIPTION
+    + " Returns the same ModelInspectionResult shape (`status` "
+    "`ok`/`error`/`timeout`, `solver`, `stdout`, `stderr`, `elapsed_ms`, and "
+    "the structured `interface` only when `ok`). `required_parameters` lists "
+    "the parameters still needing a value given any `data_path`; an empty "
+    "`required_parameters` means the data is complete, but `status=\"ok\"` "
+    "alone does NOT — it means only that the interface was extracted. Enum "
+    "names are not surfaced in v1."
 )
 
 SOLVE_CONSTRAINT_PROBLEM_PROMPT_DESCRIPTION = (

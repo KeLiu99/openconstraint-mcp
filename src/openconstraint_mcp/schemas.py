@@ -88,6 +88,76 @@ class CheckResult(BaseModel):
     elapsed_ms: int
 
 
+# MiniZinc 2.9.7 `--model-interface-only` base-type vocabulary, verified against
+# the managed binary. `set of`/array/`opt` are reported as MODIFIERS on a base
+# type (`set`/`dim`/`optional`), not as their own tags, so they are absent here;
+# an enum collapses to "int" (the enum name lives only in `--model-types-only`).
+# `tuple`/`record` get their own tag with no component breakdown in this mode.
+# `ann` is MiniZinc's annotation type (e.g. a `seq_search` strategy list); like
+# any base type it can carry `dim`, so `array of ann` reports `ann` at dim 1.
+InterfaceBaseType = Literal["int", "bool", "float", "string", "tuple", "record", "ann"]
+# MiniZinc's "method" value — the solve kind, directly from the interface output.
+SolveMethod = Literal["sat", "min", "max"]
+InspectStatus = Literal[
+    "ok",  # rc == 0 — the interface was extracted (NOT a data-completeness signal)
+    "error",  # rc != 0, or rc 0 with unparseable interface output (see stderr)
+    "timeout",  # subprocess wall-clock cap fired during type analysis
+]
+
+
+class InterfaceType(BaseModel):
+    """One model-interface entry's type, mapped from MiniZinc's interface JSON.
+
+    Plain public fields with NO Pydantic aliases: ``parse_model_interface`` maps
+    MiniZinc's raw ``type``/``set``/``dim``/``optional`` keys onto these names as it
+    builds each entry, so both the advertised ``outputSchema`` and the emitted
+    ``structuredContent`` use ``base_type``/``is_set``/``is_optional`` and cannot
+    disagree.
+    """
+
+    base_type: InterfaceBaseType
+    dim: int = 0  # array dimensionality (0 = scalar)
+    is_set: bool = False
+    is_optional: bool = False  # MiniZinc `opt` type (reported as "optional": true)
+
+
+class ModelInterface(BaseModel):
+    """A MiniZinc model's interface, extracted without solving.
+
+    ``required_parameters`` are the parameters still needing a value given any
+    data supplied (MiniZinc's ``input``); an empty map means the data is
+    complete. ``output_variables`` (MiniZinc's ``output``) are advisory — with an
+    ``output`` item they track the model's output variables and exclude
+    functionally-defined vars; treat them as "the model's output variables", not
+    "every decision variable".
+    """
+
+    method: SolveMethod
+    required_parameters: dict[str, InterfaceType]
+    output_variables: dict[str, InterfaceType]
+    has_output_item: bool
+    globals: list[str] = Field(default_factory=list)
+    included_files: list[str] = Field(default_factory=list)
+
+
+class ModelInspectionResult(BaseModel):
+    """Outcome of inspecting a MiniZinc model's interface (no solving).
+
+    ``status="ok"`` means only that the interface was *extracted* — it is NOT a
+    data-completeness signal. A no-data inspection is ``ok`` with a non-empty
+    ``required_parameters`` (the whole point of the tool); completeness is
+    signalled solely by ``interface.required_parameters == {}``. ``interface`` is
+    populated only when ``status == "ok"``.
+    """
+
+    status: InspectStatus
+    solver: str
+    interface: ModelInterface | None = None
+    stdout: str
+    stderr: str
+    elapsed_ms: int
+
+
 class UnsatCoreConstraint(BaseModel):
     line: int | None = None
     column: int | None = None

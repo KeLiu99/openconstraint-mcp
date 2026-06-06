@@ -13,10 +13,23 @@ from openconstraint_mcp.minizinc.core import (
     _validate_model_data_paths,
     check_model_path,
     find_unsat_core_path,
+    inspect_model_path,
     solve_model_path,
 )
 from openconstraint_mcp.runtime import RuntimeMissingError
-from openconstraint_mcp.schemas import CheckResult, SolveResult, UnsatCoreResult
+from openconstraint_mcp.schemas import (
+    CheckResult,
+    ModelInspectionResult,
+    SolveResult,
+    UnsatCoreResult,
+)
+
+# A minimal single-line interface object for `_MODEL_SRC` (no params, one output
+# var, satisfy) as the managed binary would emit under `--model-interface-only`.
+_INSPECT_STDOUT = (
+    '{"type": "interface", "input": {}, "output": {"x": {"type": "int"}}, '
+    '"method": "sat", "has_output_item": false, "included_files": [], "globals": []}'
+)
 
 _MODEL_SRC = "var 1..5: x;\nconstraint x > 2;\nsolve satisfy;\n"
 
@@ -170,6 +183,63 @@ def test_check_passes_compile_flag_on_real_path(
     assert "--statistics" not in cmd
     assert cmd[-1] == str(model_path.resolve())
     assert calls[0]["kwargs"]["cwd"] == str(model_path.resolve().parent)
+
+
+def test_inspect_passes_interface_flag_on_real_path(
+    tmp_path: Path,
+    fake_minizinc_binary: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    model_path = tmp_path / "entry.mzn"
+    model_path.write_text(_MODEL_SRC)
+    calls = _record_run(
+        monkeypatch, _FakeCompletedProcess(stdout=_INSPECT_STDOUT, stderr="", returncode=0)
+    )
+
+    result = inspect_model_path(model_path)
+
+    cmd = calls[0]["cmd"]
+    assert isinstance(result, ModelInspectionResult)
+    assert result.status == "ok"
+    assert result.interface is not None
+    assert result.interface.method == "sat"
+    assert "--model-interface-only" in cmd
+    # Read-only inspection: never the solve transport or any search control.
+    assert "--json-stream" not in cmd
+    assert "--statistics" not in cmd
+    assert not ({"-a", "-f", "-p", "-r", "-n"} & set(cmd))
+    # Runs the real path from the model's own parent dir (CLI-style include resolution).
+    assert cmd[-1] == str(model_path.resolve())
+    assert calls[0]["kwargs"]["cwd"] == str(model_path.resolve().parent)
+
+
+def test_inspect_data_is_positional_after_model(
+    tmp_path: Path,
+    fake_minizinc_binary: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    model_path = tmp_path / "entry.mzn"
+    model_path.write_text("int: n;\nvar 1..n: x;\nsolve satisfy;\n")
+    data_path = tmp_path / "data.dzn"
+    data_path.write_text("n = 3;\n")
+    empty_interface = (
+        '{"type": "interface", "input": {}, "output": {"x": {"type": "int"}}, '
+        '"method": "sat", "has_output_item": false}'
+    )
+    calls = _record_run(
+        monkeypatch, _FakeCompletedProcess(stdout=empty_interface, stderr="", returncode=0)
+    )
+
+    result = inspect_model_path(model_path, data_path=data_path)
+
+    cmd = calls[0]["cmd"]
+    assert "--model-interface-only" in cmd
+    assert Path(cmd[-2]).suffix == ".mzn"
+    assert cmd[-1] == str(data_path.resolve())
+    # Data supplied -> the interface reports nothing still required (completeness).
+    assert result.status == "ok"
+    assert result.interface is not None
+    assert result.interface.required_parameters == {}
 
 
 def test_find_unsat_core_filters_by_real_basename(
@@ -347,7 +417,12 @@ def test_validate_allows_empty_data(tmp_path: Path) -> None:
 
 # --- every public function validates before any run ------------------------
 
-_PATH_FUNCS: list[Callable[..., Any]] = [solve_model_path, check_model_path, find_unsat_core_path]
+_PATH_FUNCS: list[Callable[..., Any]] = [
+    solve_model_path,
+    check_model_path,
+    find_unsat_core_path,
+    inspect_model_path,
+]
 
 
 @pytest.mark.parametrize("func", _PATH_FUNCS, ids=lambda f: f.__name__)
