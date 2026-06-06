@@ -125,7 +125,7 @@ INSPECT_MINIZINC_MODEL_DESCRIPTION = (
     "parameters STILL needing a value given any `data` you passed: with no "
     "data it is the model's full required set; supplying the matching data "
     "shrinks it, and an empty `required_parameters` means the data is "
-    "complete. IMPORTANT: `status=\"ok\"` means only that the interface was "
+    'complete. IMPORTANT: `status="ok"` means only that the interface was '
     "extracted — it is NOT a data-completeness signal; only "
     "`required_parameters == {}` is. `output_variables` is advisory (the "
     "model's output variables, not necessarily every decision variable). "
@@ -207,7 +207,7 @@ INSPECT_MINIZINC_FILES_DESCRIPTION = (
     "`ok`/`error`/`timeout`, `solver`, `stdout`, `stderr`, `elapsed_ms`, and "
     "the structured `interface` only when `ok`). `required_parameters` lists "
     "the parameters still needing a value given any `data_path`; an empty "
-    "`required_parameters` means the data is complete, but `status=\"ok\"` "
+    '`required_parameters` means the data is complete, but `status="ok"` '
     "alone does NOT — it means only that the interface was extracted. Enum "
     "names are not surfaced in v1."
 )

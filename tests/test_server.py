@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import inspect
 import json
 import subprocess
 from importlib import metadata
@@ -9,11 +10,14 @@ from typing import Any
 import pytest
 from mcp.types import CallToolResult
 
+from openconstraint_mcp.minizinc.core import MiniZincExecutionError
 from openconstraint_mcp.protocol_text.descriptions import (
     LIST_AVAILABLE_SOLVERS_DESCRIPTION,
     MCP_SERVER_INSTRUCTIONS,
 )
+from openconstraint_mcp.runtime import RuntimeMissingError
 from openconstraint_mcp.server import (
+    _as_mcp_error,
     _homepage_url,
     _lifespan,
     _server_version,
@@ -1224,8 +1228,10 @@ async def test_inspect_minizinc_model_happy_path(
     mcp = create_mcp_server()
     result = await mcp.call_tool(
         "inspect_minizinc_model",
-        {"model": "array[1..3] of int: weight;\narray[1..3] of var bool: take;\n"
-         "solve maximize sum(i in 1..3)(weight[i] * take[i]);"},
+        {
+            "model": "array[1..3] of int: weight;\narray[1..3] of var bool: take;\n"
+            "solve maximize sum(i in 1..3)(weight[i] * take[i]);"
+        },
     )
 
     structured = _structured(result)
@@ -1750,3 +1756,193 @@ async def test_boot_diagnostic_writes_nothing_to_stdout(
 
 def test_lifespan_is_wired_into_server() -> None:
     assert create_mcp_server().settings.lifespan is _lifespan
+
+
+# --- _as_mcp_error: the single (domain exc -> RuntimeError) translation home ---
+#
+# RuntimeMissingError and MiniZincExecutionError both subclass RuntimeError, so a
+# bare `pytest.raises(RuntimeError)` cannot tell a *translated* plain RuntimeError
+# apart from the domain subclass passing through untouched. Every translation
+# assertion therefore pins `type(...) is RuntimeError` plus the `__cause__` chain.
+
+
+def _no_subprocess(*args: object, **kwargs: object) -> None:
+    raise AssertionError("subprocess.run must not be invoked: validation precedes it")
+
+
+def _tool_fn(name: str) -> Any:
+    """Return a registered tool's underlying (decorated) function.
+
+    Reaches past ``mcp.call_tool`` — which re-wraps a tool's exception in its own
+    error type — to the decorated function itself, the only seam where a test can
+    observe the exact ``RuntimeError`` type and its preserved ``__cause__``.
+    """
+    return create_mcp_server()._tool_manager.get_tool(name).fn
+
+
+@pytest.mark.parametrize(
+    "exc",
+    [
+        RuntimeMissingError("runtime missing; run install-runtime"),
+        MiniZincExecutionError("managed binary failed: bad config"),
+        ValueError("model must not be empty"),
+    ],
+    ids=["runtime_missing", "execution_error", "value_error"],
+)
+def test_as_mcp_error_translates_default_domain_exceptions(exc: Exception) -> None:
+    @_as_mcp_error()
+    def tool() -> None:
+        raise exc
+
+    with pytest.raises(RuntimeError) as exc_info:
+        tool()
+
+    assert type(exc_info.value) is RuntimeError
+    assert str(exc_info.value) == str(exc)
+    assert exc_info.value.__cause__ is exc
+
+
+def test_as_mcp_error_does_not_translate_unlisted_exception() -> None:
+    boom = KeyError("unexpected")
+
+    @_as_mcp_error()
+    def tool() -> None:
+        raise boom
+
+    with pytest.raises(KeyError) as exc_info:
+        tool()
+    assert exc_info.value is boom
+
+
+def test_as_mcp_error_narrow_set_translates_a_listed_type() -> None:
+    boom = MiniZincExecutionError("bad config")
+
+    @_as_mcp_error(RuntimeMissingError, MiniZincExecutionError)
+    def tool() -> None:
+        raise boom
+
+    with pytest.raises(RuntimeError) as exc_info:
+        tool()
+    assert type(exc_info.value) is RuntimeError
+    assert exc_info.value.__cause__ is boom
+
+
+def test_as_mcp_error_narrow_set_skips_unlisted_value_error() -> None:
+    # The list_available_solvers caught set omits ValueError; it must propagate.
+    boom = ValueError("model must not be empty")
+
+    @_as_mcp_error(RuntimeMissingError, MiniZincExecutionError)
+    def tool() -> None:
+        raise boom
+
+    with pytest.raises(ValueError) as exc_info:
+        tool()
+    assert exc_info.value is boom
+
+
+def test_as_mcp_error_returns_value_on_success() -> None:
+    @_as_mcp_error()
+    def tool() -> str:
+        return "ok"
+
+    assert tool() == "ok"
+
+
+def test_as_mcp_error_preserves_signature_for_fastmcp() -> None:
+    # FastMCP derives each tool's schema from the wrapped function's signature;
+    # functools.wraps must keep it visible through the decorator.
+    def tool(model: str, timeout_ms: int = 5) -> bool:
+        return True
+
+    decorated = _as_mcp_error()(tool)
+
+    assert decorated.__wrapped__ is tool  # type: ignore[attr-defined]
+    assert decorated.__name__ == "tool"
+    assert inspect.signature(decorated) == inspect.signature(tool)
+
+
+# --- per-tool wiring: each tool carries the correct caught set --------------
+
+
+@pytest.mark.parametrize(
+    "tool_name",
+    ["solve_minizinc_model", "check_minizinc_model", "inspect_minizinc_model", "find_unsat_core"],
+)
+def test_string_tools_translate_value_error_with_cause(
+    tool_name: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # An empty model raises ValueError before the runtime gate; the default caught
+    # set must convert it to a plain RuntimeError with the cause preserved.
+    monkeypatch.setattr("openconstraint_mcp.minizinc.core.subprocess.run", _no_subprocess)
+    fn = _tool_fn(tool_name)
+
+    with pytest.raises(RuntimeError) as exc_info:
+        fn(model="")
+
+    assert type(exc_info.value) is RuntimeError
+    assert "empty" in str(exc_info.value)
+    assert isinstance(exc_info.value.__cause__, ValueError)
+
+
+@pytest.mark.parametrize(
+    "tool_name",
+    [
+        "solve_minizinc_files",
+        "check_minizinc_files",
+        "inspect_minizinc_files",
+        "find_unsat_core_files",
+    ],
+)
+def test_file_tools_translate_value_error_with_cause(
+    tool_name: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # A missing model path raises ValueError before the runtime gate; same
+    # translation invariant on the path-based tools.
+    monkeypatch.setattr("openconstraint_mcp.minizinc.core.subprocess.run", _no_subprocess)
+    missing = tmp_path / "nope.mzn"
+    fn = _tool_fn(tool_name)
+
+    with pytest.raises(RuntimeError) as exc_info:
+        fn(model_path=str(missing))
+
+    assert type(exc_info.value) is RuntimeError
+    assert "does not exist" in str(exc_info.value)
+    assert isinstance(exc_info.value.__cause__, ValueError)
+
+
+def test_list_available_solvers_translates_execution_error_with_cause(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    boom = MiniZincExecutionError("bad config")
+
+    def _raise() -> object:
+        raise boom
+
+    monkeypatch.setattr("openconstraint_mcp.server.list_solvers", _raise)
+    fn = _tool_fn("list_available_solvers")
+
+    with pytest.raises(RuntimeError) as exc_info:
+        fn()
+
+    assert type(exc_info.value) is RuntimeError
+    assert str(exc_info.value) == "bad config"
+    assert exc_info.value.__cause__ is boom
+
+
+def test_list_available_solvers_does_not_translate_value_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Its narrower caught set omits ValueError: a ValueError here is a real bug,
+    # so it must propagate untouched rather than masquerade as an actionable
+    # RuntimeError message.
+    boom = ValueError("unexpected internal error")
+
+    def _raise() -> object:
+        raise boom
+
+    monkeypatch.setattr("openconstraint_mcp.server.list_solvers", _raise)
+    fn = _tool_fn("list_available_solvers")
+
+    with pytest.raises(ValueError) as exc_info:
+        fn()
+    assert exc_info.value is boom

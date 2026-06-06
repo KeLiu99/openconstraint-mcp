@@ -35,7 +35,10 @@ docs/*
 *.log
 *.pid
 
+# MiniZinc compilation artifacts (generated from .mzn/.dzn sources)
+*.fzn
+*.ozn
+
 # macOS
 .DS_Store
 ._*
-models/balanced_assignment/
