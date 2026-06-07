@@ -44,6 +44,7 @@ from .protocol_text.descriptions import (
 )
 from .protocol_text.prompts import SOLVE_CONSTRAINT_PROBLEM_PROMPT
 from .protocol_text.results import (
+    SOLUTION_CHECK_NON_ADJUDICATION_NOTE,
     SOLVER_CAPABILITY_METADATA_NOTE,
     SOLVER_INVENTORY_PRESENTATION_REQUIREMENT,
     SOLVER_NUM_SOLUTIONS_NOTE,
@@ -136,17 +137,27 @@ def _format_solve_result_content(result: SolveResult) -> str:
 
     if result.statistics:
         lines.extend(["", STATS_PRESENTATION_REQUIREMENT, "Statistics:"])
-        seen: set[str] = set()
-        for key in _PREFERRED_STAT_KEYS:
-            value = result.statistics.get(key)
-            if value is not None:
-                lines.append(f"- {key}: {value}")
-                seen.add(key)
-        for key, value in result.statistics.items():
-            if key not in seen:
-                lines.append(f"- {key}: {value}")
+        preferred = [k for k in _PREFERRED_STAT_KEYS if k in result.statistics]
+        others = [k for k in result.statistics if k not in _PREFERRED_STAT_KEYS]
+        lines.extend([f"- {key}: {result.statistics[key]}" for key in (preferred + others)])
 
-    return "\n".join(lines)
+    solve_text = "\n".join(lines)
+    if result.checker is None:
+        return solve_text
+
+    violations = sum(1 for check in result.checker.checks if check.violation)
+    return "\n".join(
+        [
+            f"Checker status: {result.checker.status}",
+            f"Solve status: {result.status}",
+            f"Solutions produced: {len(result.solutions)}",
+            f"Violations: {violations}",
+            "",
+            SOLUTION_CHECK_NON_ADJUDICATION_NOTE,
+            "",
+            solve_text,
+        ]
+    )
 
 
 def _wrap_solve_result(result: SolveResult) -> CallToolResult:
@@ -275,6 +286,7 @@ def create_mcp_server() -> FastMCP:
     def solve_minizinc_model(
         model: str,
         data: str | None = None,
+        checker: str | None = None,
         solver: str = DEFAULT_SOLVER,
         timeout_ms: int = DEFAULT_SOLVE_TIMEOUT_MS,
         free_search: bool = False,
@@ -287,6 +299,7 @@ def create_mcp_server() -> FastMCP:
             model,
             solver=solver,
             data=data,
+            checker=checker,
             timeout_ms=timeout_ms,
             free_search=free_search,
             parallel=parallel,
@@ -360,6 +373,7 @@ def create_mcp_server() -> FastMCP:
     def solve_minizinc_files(
         model_path: str,
         data_path: str | None = None,
+        checker_path: str | None = None,
         solver: str = DEFAULT_SOLVER,
         timeout_ms: int = DEFAULT_SOLVE_TIMEOUT_MS,
         free_search: bool = False,
@@ -372,6 +386,7 @@ def create_mcp_server() -> FastMCP:
             Path(model_path),
             solver=solver,
             data_path=Path(data_path) if data_path is not None else None,
+            checker_path=Path(checker_path) if checker_path is not None else None,
             timeout_ms=timeout_ms,
             free_search=free_search,
             parallel=parallel,
@@ -379,7 +394,6 @@ def create_mcp_server() -> FastMCP:
             all_solutions=all_solutions,
             num_solutions=num_solutions,
         )
-
         return _wrap_solve_result(result)
 
     @mcp.tool(description=FIND_UNSAT_CORE_FILES_DESCRIPTION)

@@ -10,9 +10,12 @@ from typing import Any, NamedTuple
 
 from ..runtime import RuntimeMissingError, get_minizinc_binary, is_runtime_installed
 from ..schemas import (
+    CheckerReport,
+    CheckerStatus,
     CheckResult,
     CheckStatus,
     ModelInspectionResult,
+    SolutionCheck,
     SolverCapabilities,
     SolveResult,
     SolverInfo,
@@ -21,6 +24,7 @@ from ..schemas import (
     UnsatCoreConstraint,
     UnsatCoreResult,
 )
+from .checker import _parse_checker_stream
 from .interface import parse_model_interface
 from .stream import _parse_solve_stream
 from .unsat_core import _parse_unsat_core
@@ -46,6 +50,11 @@ DEFAULT_UNSAT_CORE_TIMEOUT_MS: int = DEFAULT_SOLVE_TIMEOUT_MS
 # analysis — so it shares the check budget rather than an independent literal that
 # could drift. The distinct name keeps the inspect call site from reading as a check.
 DEFAULT_INSPECT_TIMEOUT_MS: int = DEFAULT_CHECK_TIMEOUT_MS
+# MiniZinc rejects a `--solution-checker` whose filename does not end in `.mzc`
+# or `.mzc.mzn` at argument parsing. Matched on the full `name`, NOT `Path.suffix`
+# (which returns `.mzn` for `model.mzc.mzn`), so the validator rejects the wrong
+# suffix server-side before the doomed run.
+_CHECKER_SUFFIXES: tuple[str, ...] = (".mzc", ".mzc.mzn")
 # MiniZinc's read-only type-analysis flag: it reports the model's interface
 # (required params, output vars, method) and stops without flattening or solving.
 # It coexists with the --solver/--time-limit args _build_minizinc_cmd always
@@ -54,6 +63,7 @@ DEFAULT_INSPECT_TIMEOUT_MS: int = DEFAULT_CHECK_TIMEOUT_MS
 INSPECT_FLAG: str = "--model-interface-only"
 _MODEL_FILENAME: str = "model.mzn"
 _DATA_FILENAME: str = "data.dzn"
+_CHECKER_FILENAME: str = "checker.mzc.mzn"
 # Solve runs use the json-stream transport: `--json-stream` emits one JSON object
 # per line (each solution carries both the human `default` text and the `json`
 # variable values; status and statistics arrive as their own sibling objects),
@@ -260,6 +270,7 @@ def _run_managed_minizinc(
     timeout_ms: int,
     extra_args: Sequence[str],
     data: str | None = None,
+    checker: str | None = None,
 ) -> _RunOutcome:
     """Run the managed MiniZinc binary on ``model`` and report the raw outcome.
 
@@ -277,6 +288,11 @@ def _run_managed_minizinc(
     including the findMUS meta-solver. ``None`` means no data file and no extra
     argument — byte-identical to a dataless run. An empty string is a valid
     "no parameters" input, so it is *not* rejected.
+
+    When ``checker`` is not ``None`` it is written beside the model as a
+    ``.mzc.mzn`` file and added to ``extra_args`` before the command is built, so
+    ``_build_minizinc_cmd`` remains the single place that orders flags before
+    positional model/data arguments.
     """
     if not model.strip():
         raise ValueError("model must not be empty")
@@ -292,11 +308,20 @@ def _run_managed_minizinc(
             data_file = tmp_dir / _DATA_FILENAME
             data_file.write_text(data, encoding="utf-8")
             data_args = [str(data_file)]
+        effective_extra_args = tuple(extra_args)
+        if checker is not None:
+            checker_file = tmp_dir / _CHECKER_FILENAME
+            checker_file.write_text(checker, encoding="utf-8")
+            effective_extra_args = (
+                *effective_extra_args,
+                "--solution-checker",
+                str(checker_file),
+            )
         cmd = _build_minizinc_cmd(
             binary,
             solver=solver,
             timeout_ms=timeout_ms,
-            extra_args=extra_args,
+            extra_args=effective_extra_args,
             model_arg=str(model_file),
             data_args=data_args,
         )
@@ -492,6 +517,45 @@ def _build_unsat_core_result(
     )
 
 
+def _derive_checker_status(solve: SolveResult, checks: Sequence[SolutionCheck]) -> CheckerStatus:
+    """Map a built ``SolveResult`` + parsed checks to the honest aggregate (D4).
+
+    First match wins, so a stream-reported solve error is never hidden behind
+    ``no_solution``/``completed``: ``timeout`` (the subprocess cap fired); then
+    ``error`` — the solve verdict is ``error`` (a stream ``ERROR`` maps there
+    independently of return code), the return code is a nonzero int (broken /
+    missing checker, wrong suffix), or the verdict count misaligns with the
+    produced solutions (a solution went unchecked); then ``no_solution`` (a clean
+    run produced nothing, so no checker ran and both counts are zero); then
+    ``violation`` (any per-solution checker rejection — the one verdict the
+    server asserts on its own); else ``completed`` (the checker ran for every
+    produced solution with no machine-readable violation — NOT "all author-correct").
+    """
+    if solve.timed_out:
+        return "timeout"
+    if (
+        solve.status == "error"
+        or (isinstance(solve.return_code, int) and solve.return_code != 0)
+        or len(checks) != len(solve.solutions)
+    ):
+        return "error"
+    if not solve.solutions:
+        return "no_solution"
+    if any(check.violation for check in checks):
+        return "violation"
+    return "completed"
+
+
+def _build_checker_report(outcome: _RunOutcome, solve: SolveResult) -> CheckerReport:
+    """Compose the nested checker report for a solve using ``--solution-checker``."""
+    checks = _parse_checker_stream(outcome.stdout)
+    return CheckerReport(
+        status=_derive_checker_status(solve, checks),
+        checks=checks,
+        transcript=outcome.stdout,
+    )
+
+
 def find_unsat_core(
     model: str,
     *,
@@ -573,6 +637,7 @@ def solve_model(
     *,
     solver: str = DEFAULT_SOLVER,
     data: str | None = None,
+    checker: str | None = None,
     timeout_ms: int = DEFAULT_SOLVE_TIMEOUT_MS,
     free_search: bool = False,
     parallel: int | None = None,
@@ -593,8 +658,12 @@ def solve_model(
             num_solutions=num_solutions,
         ),
         data=data,
+        checker=checker,
     )
-    return _build_solve_result(outcome, solver=solver)
+    result = _build_solve_result(outcome, solver=solver)
+    if checker is not None:
+        result.checker = _build_checker_report(outcome, result)
+    return result
 
 
 def check_model(
@@ -680,6 +749,29 @@ def _validate_model_data_paths(
     return model_path, data_path
 
 
+def _validate_checker_path(checker_path: Path) -> Path:
+    """Resolve, validate, and return the checker path before any subprocess.
+
+    A sibling of ``_validate_model_data_paths`` for the ``--solution-checker``
+    argument: resolves to absolute (so the flag is unambiguous regardless of
+    cwd), then rejects — with a clear ``ValueError`` naming the path — a checker
+    whose filename does not end in ``.mzc``/``.mzc.mzn`` (MiniZinc rejects other
+    suffixes at argument parsing; the check is on ``name``, not ``Path.suffix``,
+    which returns ``.mzn`` for ``model.mzc.mzn``), a missing or non-regular-file
+    checker, and a non-UTF-8 checker. The resolved absolute path is returned so
+    the caller uses the same path the validation ran against.
+    """
+    checker_path = checker_path.resolve()
+    if not checker_path.name.endswith(_CHECKER_SUFFIXES):
+        raise ValueError(f"checker_path must end in .mzc or .mzc.mzn: {checker_path}")
+    if not checker_path.exists():
+        raise ValueError(f"checker_path does not exist: {checker_path}")
+    if not checker_path.is_file():
+        raise ValueError(f"checker_path is not a file: {checker_path}")
+    _read_text_utf8(checker_path)  # reject non-UTF-8 with a clear ValueError
+    return checker_path
+
+
 def _run_managed_minizinc_paths(
     model_path: Path,
     *,
@@ -718,6 +810,7 @@ def solve_model_path(
     *,
     solver: str = DEFAULT_SOLVER,
     data_path: Path | None = None,
+    checker_path: Path | None = None,
     timeout_ms: int = DEFAULT_SOLVE_TIMEOUT_MS,
     free_search: bool = False,
     parallel: int | None = None,
@@ -731,24 +824,34 @@ def solve_model_path(
     parent, like normal MiniZinc CLI usage, so a relative ``include`` resolves
     against the model's own directory. Returns the inline tool's ``SolveResult``
     shape. The optional solver/search-control flags behave exactly as in
-    ``solve_model`` (see ``_solve_extra_args``).
+    ``solve_model`` (see ``_solve_extra_args``). When ``checker_path`` is
+    supplied, it is validated as a ``.mzc``/``.mzc.mzn`` checker and added to the
+    same solve invocation; the returned ``SolveResult.checker`` then carries the
+    per-solution checker report.
     """
     model_path, data_path = _validate_model_data_paths(model_path, data_path)
+    checker_path = _validate_checker_path(checker_path) if checker_path is not None else None
+    extra_args = _solve_extra_args(
+        solver=solver,
+        free_search=free_search,
+        parallel=parallel,
+        random_seed=random_seed,
+        all_solutions=all_solutions,
+        num_solutions=num_solutions,
+    )
+    if checker_path is not None:
+        extra_args = (*extra_args, "--solution-checker", str(checker_path))
     outcome = _run_managed_minizinc_paths(
         model_path,
         solver=solver,
         timeout_ms=timeout_ms,
-        extra_args=_solve_extra_args(
-            solver=solver,
-            free_search=free_search,
-            parallel=parallel,
-            random_seed=random_seed,
-            all_solutions=all_solutions,
-            num_solutions=num_solutions,
-        ),
+        extra_args=extra_args,
         data_path=data_path,
     )
-    return _build_solve_result(outcome, solver=solver)
+    result = _build_solve_result(outcome, solver=solver)
+    if checker_path is not None:
+        result.checker = _build_checker_report(outcome, result)
+    return result
 
 
 def check_model_path(

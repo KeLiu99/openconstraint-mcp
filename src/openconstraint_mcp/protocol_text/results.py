@@ -30,6 +30,14 @@ SOLVER_RUNTIME_CONFIG_CAUTION = (
     "COIN-BC may still require separate installed binaries, licenses, or "
     "solver-specific setup before they can successfully solve a model."
 )
+SOLUTION_CHECK_NON_ADJUDICATION_NOTE = (
+    "Note: a checker's author `CORRECT`/`INCORRECT` text is surfaced verbatim in "
+    "each `checks` entry and is NOT interpreted by the server — only a "
+    "constraint-style rejection (a nested UNSATISFIABLE) counts as a `violation`. "
+    "`solve.solutions` includes checker-rejected solutions, so on a violation "
+    "consult the per-solution `checks`. The checker never proves optimality; "
+    "`solve.status` remains the proof of completeness."
+)
 SOLVER_CAPABILITY_METADATA_NOTE = (
     "To inspect detailed solver capabilities, ask for them explicitly. The "
     "structured result includes `capabilities.supports_all_solutions`, "

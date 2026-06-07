@@ -14,6 +14,8 @@ from openconstraint_mcp.minizinc.core import MiniZincExecutionError
 from openconstraint_mcp.protocol_text.descriptions import (
     LIST_AVAILABLE_SOLVERS_DESCRIPTION,
     MCP_SERVER_INSTRUCTIONS,
+    SOLVE_MINIZINC_FILES_DESCRIPTION,
+    SOLVE_MINIZINC_MODEL_DESCRIPTION,
 )
 from openconstraint_mcp.runtime import RuntimeMissingError
 from openconstraint_mcp.server import (
@@ -757,6 +759,7 @@ async def test_solve_minizinc_model_tool_is_listed() -> None:
         "random_seed",
         "all_solutions",
         "num_solutions",
+        "checker",
     } <= set(properties.keys())
 
 
@@ -795,6 +798,7 @@ async def test_solve_minizinc_model_happy_path(
     assert structured["solution"] == {"x": 3}
     assert structured["solutions"] == [{"x": 3}]
     assert structured["objective"] is None
+    assert structured["checker"] is None
     # Parsed statistics objects flow through FastMCP structured content.
     assert structured["statistics"] == {"solveTime": "0.01"}
 
@@ -809,6 +813,43 @@ async def test_solve_minizinc_model_happy_path(
     assert "selected fields" in lower_text
     assert "Statistics:" in text
     assert "- solveTime: 0.01" in text
+
+
+@pytest.mark.asyncio
+async def test_solve_minizinc_model_accepts_inline_checker(
+    fake_minizinc_binary: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        "openconstraint_mcp.minizinc.core.subprocess.run",
+        lambda *args, **kwargs: _FakeCompletedProcess(
+            stdout=_stream(
+                _checker_pass("CORRECT\n"),
+                _solution_obj("x = 1; y = 2;\n", {"x": 1, "y": 2}),
+                {"type": "status", "status": "SATISFIED"},
+            ),
+            stderr="",
+            returncode=0,
+        ),
+    )
+
+    mcp = create_mcp_server()
+    result = await mcp.call_tool(
+        "solve_minizinc_model",
+        {
+            "model": "var 1..3: x;\nvar 1..3: y;\nconstraint x < y;\nsolve satisfy;",
+            "checker": _CHECKER_SRC,
+        },
+    )
+
+    structured = _structured(result)
+    assert structured["status"] == "satisfied"
+    assert structured["checker"]["status"] == "completed"
+    assert structured["checker"]["checks"] == [{"violation": False, "output": "CORRECT\n"}]
+    assert '"type": "checker"' in structured["checker"]["transcript"]
+    text = _content_text(result)
+    assert text.startswith("Checker status: completed")
+    assert "not interpreted" in text or "NOT interpreted" in text
     assert '"statistics"' not in text
 
 
@@ -1401,6 +1442,7 @@ async def test_file_tools_are_listed_with_expected_properties() -> None:
 
     for name in ("solve_minizinc_files", "check_minizinc_files", "find_unsat_core_files"):
         assert name in by_name
+    assert "solve_and_check_minizinc_files" not in by_name
 
     for name in ("solve_minizinc_files", "check_minizinc_files"):
         properties = by_name[name].inputSchema.get("properties", {})
@@ -1413,8 +1455,10 @@ async def test_file_tools_are_listed_with_expected_properties() -> None:
     _search_flags = {"free_search", "parallel", "random_seed", "all_solutions", "num_solutions"}
     solve_files_props = by_name["solve_minizinc_files"].inputSchema.get("properties", {})
     assert _search_flags <= set(solve_files_props.keys())
+    assert "checker_path" in solve_files_props
     check_files_props = by_name["check_minizinc_files"].inputSchema.get("properties", {})
     assert not (_search_flags & set(check_files_props.keys()))
+    assert "checker_path" not in check_files_props
 
     findmus_props = by_name["find_unsat_core_files"].inputSchema.get("properties", {})
     assert {"model_path", "data_path", "timeout_ms"} <= set(findmus_props.keys())
@@ -1447,6 +1491,7 @@ async def test_solve_minizinc_files_happy_path(
     assert structured["solution"] == {"x": 3}
     assert structured["solutions"] == [{"x": 3}]
     assert structured["objective"] is None
+    assert structured["checker"] is None
     # The statistics field is exposed even when no statistics object was emitted.
     assert structured["statistics"] == {}
     assert "Statistics:" not in _content_text(result)
@@ -1659,6 +1704,310 @@ async def test_solve_minizinc_files_runtime_missing_surfaces_actionable_error(
     message = str(exc_info.value)
     assert "install-runtime" in message
     assert "MiniZinc" in message
+
+
+# --- solution checker on solve_minizinc_files -------------------------------
+
+_CHECKER_MODEL_SRC = "var 1..3: x;\nvar 1..3: y;\nconstraint x < y;\nsolve satisfy;\n"
+_CHECKER_SRC = (
+    'int: x;\nint: y;\noutput [ if x < y then "CORRECT\\n" else "INCORRECT\\n" endif ];\n'
+)
+
+
+def _checker_pass(default_text: str) -> dict[str, Any]:
+    return {
+        "type": "checker",
+        "messages": [{"type": "solution", "output": {"default": default_text}}],
+        "output": {"default": default_text},
+    }
+
+
+def _checker_violation() -> dict[str, Any]:
+    return {
+        "type": "checker",
+        "messages": [
+            {"type": "warning", "message": "model inconsistency detected"},
+            {"type": "status", "status": "UNSATISFIABLE"},
+        ],
+    }
+
+
+def _write_solve_and_check_inputs(tmp_path: Path) -> tuple[Path, Path]:
+    model_path = tmp_path / "model.mzn"
+    model_path.write_text(_CHECKER_MODEL_SRC)
+    checker_path = tmp_path / "model.mzc.mzn"
+    checker_path.write_text(_CHECKER_SRC)
+    return model_path, checker_path
+
+
+@pytest.mark.asyncio
+async def test_solution_checker_is_folded_into_solve_minizinc_files() -> None:
+    mcp = create_mcp_server()
+    tools = await mcp.list_tools()
+
+    names = {tool.name for tool in tools}
+    assert "solve_and_check_minizinc_files" not in names
+
+    tool = next(t for t in tools if t.name == "solve_minizinc_files")
+    properties = tool.inputSchema.get("properties", {})
+    assert {"model_path", "checker_path", "data_path", "solver", "timeout_ms"} <= set(properties)
+    assert _SOLVE_ONLY_CONTROLS <= set(properties)
+
+
+@pytest.mark.asyncio
+async def test_solve_minizinc_files_with_checker_happy_path(
+    tmp_path: Path,
+    fake_minizinc_binary: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    model_path, checker_path = _write_solve_and_check_inputs(tmp_path)
+    _record_run_capturing_cwd(
+        monkeypatch,
+        _FakeCompletedProcess(
+            stdout=_stream(
+                _checker_pass("CORRECT\n"),
+                _solution_obj("x = 1; y = 2;\n", {"x": 1, "y": 2}),
+                {"type": "status", "status": "SATISFIED"},
+            ),
+            stderr="",
+            returncode=0,
+        ),
+    )
+
+    mcp = create_mcp_server()
+    result = await mcp.call_tool(
+        "solve_minizinc_files",
+        {"model_path": str(model_path), "checker_path": str(checker_path)},
+    )
+
+    structured = _structured(result)
+    assert structured["checker"]["status"] == "completed"
+    assert structured["status"] == "satisfied"
+    assert structured["checker"]["checks"] == [{"violation": False, "output": "CORRECT\n"}]
+    # The raw transcript (checker objects intact) is the authoritative record.
+    assert '"type": "checker"' in structured["checker"]["transcript"]
+    # The model-visible text leads with the checker verdict and the solve status.
+    text = _content_text(result)
+    assert "completed" in text
+    assert "satisfied" in text
+
+
+@pytest.mark.asyncio
+async def test_solve_minizinc_files_with_checker_text_notes_author_text_not_adjudicated(
+    tmp_path: Path,
+    fake_minizinc_binary: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # The model-visible text must warn that author CORRECT/INCORRECT text is NOT
+    # interpreted by the server (only a constraint-style rejection is a violation),
+    # so a client never treats the verbatim verdict as a server judgement.
+    model_path, checker_path = _write_solve_and_check_inputs(tmp_path)
+    _record_run_capturing_cwd(
+        monkeypatch,
+        _FakeCompletedProcess(
+            stdout=_stream(
+                _checker_pass("INCORRECT\n"),
+                _solution_obj("x = 3; y = 1;\n", {"x": 3, "y": 1}),
+                {"type": "status", "status": "SATISFIED"},
+            ),
+            stderr="",
+            returncode=0,
+        ),
+    )
+
+    mcp = create_mcp_server()
+    result = await mcp.call_tool(
+        "solve_minizinc_files",
+        {"model_path": str(model_path), "checker_path": str(checker_path)},
+    )
+
+    text = _content_text(result).lower()
+    assert "not interpreted" in text or "not adjudicated" in text
+    assert "checks" in text
+
+
+@pytest.mark.asyncio
+async def test_solve_minizinc_files_with_checker_visible_content_includes_statistics(
+    tmp_path: Path,
+    fake_minizinc_binary: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # The solve portion reuses _format_solve_result_content, so the Statistics
+    # section and its copy-entire-section requirement appear verbatim whenever the
+    # nested solve carries statistics.
+    model_path, checker_path = _write_solve_and_check_inputs(tmp_path)
+    _record_run_capturing_cwd(
+        monkeypatch,
+        _FakeCompletedProcess(
+            stdout=_stream(
+                _checker_pass("CORRECT\n"),
+                _solution_obj("x = 1; y = 2;\n", {"x": 1, "y": 2}),
+                {"type": "statistics", "statistics": {"failures": 2}},
+                {"type": "status", "status": "SATISFIED"},
+            ),
+            stderr="",
+            returncode=0,
+        ),
+    )
+
+    mcp = create_mcp_server()
+    result = await mcp.call_tool(
+        "solve_minizinc_files",
+        {"model_path": str(model_path), "checker_path": str(checker_path)},
+    )
+
+    assert _structured(result)["statistics"] == {"failures": "2"}
+    text = _content_text(result)
+    assert "entire Statistics section" in text
+    assert "Statistics:" in text
+    assert "- failures: 2" in text
+
+
+@pytest.mark.asyncio
+async def test_solve_minizinc_files_with_checker_omits_statistics_when_empty(
+    tmp_path: Path,
+    fake_minizinc_binary: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    model_path, checker_path = _write_solve_and_check_inputs(tmp_path)
+    _record_run_capturing_cwd(
+        monkeypatch,
+        _FakeCompletedProcess(
+            stdout=_stream(
+                _checker_pass("CORRECT\n"),
+                _solution_obj("x = 1; y = 2;\n", {"x": 1, "y": 2}),
+                {"type": "status", "status": "SATISFIED"},
+            ),
+            stderr="",
+            returncode=0,
+        ),
+    )
+
+    mcp = create_mcp_server()
+    result = await mcp.call_tool(
+        "solve_minizinc_files",
+        {"model_path": str(model_path), "checker_path": str(checker_path)},
+    )
+
+    assert _structured(result)["statistics"] == {}
+    assert "Statistics:" not in _content_text(result)
+
+
+@pytest.mark.asyncio
+async def test_solve_minizinc_files_with_checker_violation_surfaces_in_structured(
+    tmp_path: Path,
+    fake_minizinc_binary: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    model_path, checker_path = _write_solve_and_check_inputs(tmp_path)
+    _record_run_capturing_cwd(
+        monkeypatch,
+        _FakeCompletedProcess(
+            stdout=_stream(
+                _checker_violation(),
+                _solution_obj("x = 1; y = 2;\n", {"x": 1, "y": 2}),
+                {"type": "status", "status": "SATISFIED"},
+            ),
+            stderr="",
+            returncode=0,
+        ),
+    )
+
+    mcp = create_mcp_server()
+    result = await mcp.call_tool(
+        "solve_minizinc_files",
+        {"model_path": str(model_path), "checker_path": str(checker_path)},
+    )
+
+    structured = _structured(result)
+    assert structured["checker"]["status"] == "violation"
+    assert structured["checker"]["checks"][0]["violation"] is True
+    # The rejected solution stays in solutions (fact 5).
+    assert structured["solutions"] == [{"x": 1, "y": 2}]
+
+
+@pytest.mark.asyncio
+async def test_solve_minizinc_files_with_checker_runs_from_model_parent_with_checker_flag(
+    tmp_path: Path,
+    fake_minizinc_binary: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    model_path, checker_path = _write_solve_and_check_inputs(tmp_path)
+    calls = _record_run_capturing_cwd(
+        monkeypatch,
+        _FakeCompletedProcess(
+            stdout=_stream(
+                _checker_pass("CORRECT\n"), _solution_obj("x = 1; y = 2;\n", {"x": 1, "y": 2})
+            ),
+            stderr="",
+            returncode=0,
+        ),
+    )
+
+    mcp = create_mcp_server()
+    await mcp.call_tool(
+        "solve_minizinc_files",
+        {"model_path": str(model_path), "checker_path": str(checker_path)},
+    )
+
+    cmd = calls[0]["cmd"]
+    assert cmd[cmd.index("--solution-checker") + 1] == str(checker_path.resolve())
+    assert calls[0]["cwd"] == str(model_path.resolve().parent)
+
+
+@pytest.mark.asyncio
+async def test_solve_minizinc_files_bad_checker_suffix_surfaces_actionable_error(
+    tmp_path: Path,
+    fake_minizinc_binary: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    model_path = tmp_path / "model.mzn"
+    model_path.write_text(_CHECKER_MODEL_SRC)
+    bad_checker = tmp_path / "checker.mzn"  # wrong suffix
+    bad_checker.write_text(_CHECKER_SRC)
+
+    def _fail_if_called(*args: object, **kwargs: object) -> None:
+        raise AssertionError("subprocess.run must not be invoked for a bad checker suffix")
+
+    monkeypatch.setattr("openconstraint_mcp.minizinc.core.subprocess.run", _fail_if_called)
+
+    mcp = create_mcp_server()
+    with pytest.raises(Exception) as exc_info:
+        await mcp.call_tool(
+            "solve_minizinc_files",
+            {"model_path": str(model_path), "checker_path": str(bad_checker)},
+        )
+    assert "mzc" in str(exc_info.value)
+
+
+@pytest.mark.asyncio
+async def test_solve_minizinc_files_with_checker_runtime_missing_surfaces_actionable_error(
+    tmp_path: Path,
+    fake_runtime_dir: Path,
+) -> None:
+    model_path, checker_path = _write_solve_and_check_inputs(tmp_path)
+
+    mcp = create_mcp_server()
+    with pytest.raises(Exception) as exc_info:
+        await mcp.call_tool(
+            "solve_minizinc_files",
+            {"model_path": str(model_path), "checker_path": str(checker_path)},
+        )
+
+    message = str(exc_info.value)
+    assert "install-runtime" in message
+    assert "MiniZinc" in message
+
+
+def test_solve_descriptions_state_checker_suffix_and_nested_report() -> None:
+    # The protocol descriptions must state plainly that checking is a solve option,
+    # requires a `.mzc`/`.mzc.mzn` checker on the path side, and returns the nested
+    # report fields clients need to inspect.
+    combined = SOLVE_MINIZINC_MODEL_DESCRIPTION + SOLVE_MINIZINC_FILES_DESCRIPTION
+    assert "checker" in combined.lower()
+    assert ".mzc" in SOLVE_MINIZINC_FILES_DESCRIPTION
+    assert "CheckerReport" in combined
+    assert "transcript" in combined
 
 
 # --- website_url metadata --------------------------------------------------

@@ -10,6 +10,7 @@ machine where ``install-runtime`` has placed a runtime.
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import pytest
@@ -477,3 +478,140 @@ def test_inspect_model_reports_globals_from_real_binary() -> None:
     assert result.status == "ok"
     assert result.interface is not None
     assert result.interface.globals == ["alldifferent"]
+
+
+# --- solve_model_path(checker_path=...) (--solution-checker) ---------------
+#
+# Mandatory real-binary coverage: a built `--solution-checker` flag string is NOT
+# proof the managed binary accepts it and emits the checker stream (the
+# num_solutions/-n lesson). These exercise the actual runtime end to end.
+
+# A fully-pinned solution (x=1, y=2) so the checker verdict is deterministic.
+_PINNED_MODEL = (
+    "var 1..3: x;\n"
+    "var 1..3: y;\n"
+    "constraint x = 1;\n"
+    "constraint y = 2;\n"
+    "constraint x < y;\n"
+    "solve satisfy;\n"
+    'output ["x=\\(x) y=\\(y)\\n"];\n'
+)
+# Output-style checker: re-declares the model's output vars as par and emits the
+# author verdict text. Explicit par logic (a bare global would resolve to its var
+# overload and fail to compile as a checker).
+_OUTPUT_CHECKER = (
+    'int: x;\nint: y;\noutput [ if x < y then "CORRECT\\n" else "INCORRECT\\n" endif ];\n'
+)
+# Constraint-style checker: validation as a hard constraint — the only idiom that
+# yields a machine-readable failure. `x != 1` rejects the pinned x=1 solution.
+_VIOLATION_CHECKER = 'int: x;\nint: y;\nconstraint x != 1;\noutput ["checked\\n"];\n'
+# Broken checker: references an undeclared identifier, so it fails to compile
+# (rc != 0) rather than producing a verdict.
+_BROKEN_CHECKER = 'int: x;\nint: y;\nconstraint x = zzz;\noutput ["bad\\n"];\n'
+# Evaluation-error checker: compiles with an unassigned `x` parameter, then
+# fails only when MiniZinc evaluates the checker against the pinned solution.
+_EVALUATION_ERROR_CHECKER = (
+    "int: x;\n"
+    "array[1..1] of int: witness = [10];\n"
+    'output ["value=\\(witness[x])\\n"];\n'
+)
+
+
+def _write_pair(tmp_path: Path, model_src: str, checker_src: str) -> tuple[Path, Path]:
+    model_path = tmp_path / "model.mzn"
+    model_path.write_text(model_src)
+    checker_path = tmp_path / "model.mzc.mzn"
+    checker_path.write_text(checker_src)
+    return model_path, checker_path
+
+
+def test_solve_model_path_with_checker_valid_solution_completes(tmp_path: Path) -> None:
+    model_path, checker_path = _write_pair(tmp_path, _PINNED_MODEL, _OUTPUT_CHECKER)
+
+    result = solve_model_path(model_path, checker_path=checker_path)
+
+    assert result.status in {"satisfied", "optimal"}
+    assert result.checker is not None
+    assert result.checker.status == "completed"
+    assert len(result.checker.checks) == 1
+    assert result.checker.checks[0].violation is False
+    # The author verdict text must be surfaced from the real transcript, not lost
+    # to an empty string — proving the verdict is recovered from whichever shape
+    # (top-level or nested-solution `output.default`) the binary actually emits.
+    assert "CORRECT" in result.checker.checks[0].output
+
+
+def test_solve_model_path_with_checker_constraint_violation_keeps_solution(tmp_path: Path) -> None:
+    model_path, checker_path = _write_pair(tmp_path, _PINNED_MODEL, _VIOLATION_CHECKER)
+
+    result = solve_model_path(model_path, checker_path=checker_path)
+
+    # The constraint-style checker rejects the pinned x=1 solution...
+    assert result.checker is not None
+    assert result.checker.status == "violation"
+    assert result.checker.checks[0].violation is True
+    # ...but the rejected solution is still emitted in solutions (fact 5).
+    assert result.solutions
+
+
+def test_solve_model_path_with_checker_broken_checker_is_error(tmp_path: Path) -> None:
+    model_path, checker_path = _write_pair(tmp_path, _PINNED_MODEL, _BROKEN_CHECKER)
+
+    result = solve_model_path(model_path, checker_path=checker_path)
+
+    # A checker that fails to compile gives a nonzero return code, not a verdict.
+    assert result.checker is not None
+    assert result.checker.status == "error"
+    assert result.return_code not in (0, None)
+
+
+def test_solve_model_path_with_checker_evaluation_error_is_error(tmp_path: Path) -> None:
+    model_path, checker_path = _write_pair(
+        tmp_path,
+        "var 1..3: x;\nconstraint x = 2;\nsolve satisfy;\n",
+        _EVALUATION_ERROR_CHECKER,
+    )
+
+    result = solve_model_path(model_path, checker_path=checker_path)
+
+    assert result.checker is not None
+    assert result.checker.status == "error"
+    assert result.status == "error"
+    # MiniZinc emits checker evaluation errors as top-level error objects, so
+    # the solve stream verdict drives the checker aggregate.
+    objects = [json.loads(line) for line in result.checker.transcript.splitlines()]
+    assert any(obj.get("type") == "error" for obj in objects)
+
+
+# Unique-optimum maximization (x forced to 5): the default optimization stream
+# emits ONE final checker/solution pair, not an improving sequence — so a verdict
+# is NOT a proof of optimality (solve.status carries that, separately).
+_OPT_MODEL = 'var 1..5: x;\nconstraint x > 2;\nsolve maximize x;\noutput ["x=\\(x)\\n"];\n'
+_OPT_CHECKER = 'int: x;\noutput [ if x >= 3 then "CORRECT\\n" else "INCORRECT\\n" endif ];\n'
+
+
+def test_solve_model_path_with_checker_optimization_completes_with_single_check(
+    tmp_path: Path,
+) -> None:
+    model_path, checker_path = _write_pair(tmp_path, _OPT_MODEL, _OPT_CHECKER)
+
+    result = solve_model_path(model_path, checker_path=checker_path)
+
+    # The checker re-emits a verdict; optimality is proved only by solve.status.
+    assert result.status == "optimal"
+    assert result.checker is not None
+    assert result.checker.status == "completed"
+    assert len(result.checker.checks) == 1
+
+
+def test_solve_model_path_with_checker_composes_with_all_solutions(tmp_path: Path) -> None:
+    model_path, checker_path = _write_pair(tmp_path, _ALL_SOLUTIONS_MODEL, _OUTPUT_CHECKER)
+
+    result = solve_model_path(model_path, checker_path=checker_path, all_solutions=True)
+
+    assert result.status == "satisfied"
+    assert len(result.solutions) >= 2
+    assert result.checker is not None
+    assert result.checker.status == "completed"
+    assert len(result.checker.checks) == len(result.solutions)
+    assert all(check.violation is False for check in result.checker.checks)

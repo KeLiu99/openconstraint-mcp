@@ -54,6 +54,55 @@ SolveStatus = Literal[
 ]
 
 
+# A `--solution-checker` aggregate verdict — honest, NOT pass/fail (Decision D4).
+# `completed` means the checker ran for every produced solution with no nested
+# UNSATISFIABLE; it does NOT mean "all author-correct" (author CORRECT/INCORRECT
+# text is a convention the server never adjudicates). `violation` is the one
+# verdict the server asserts on its own (a constraint-style checker rejected a
+# solution). `error` covers a stream ERROR, a nonzero return code (broken/missing
+# checker, wrong suffix), or a checker-verdict count that misaligns with the
+# produced solutions.
+CheckerStatus = Literal["completed", "violation", "no_solution", "error", "timeout"]
+
+
+class SolutionCheck(BaseModel):
+    """One produced solution's checker verdict, index-aligned with the solve's ``solutions``.
+
+    ``violation`` is the one machine-readable signal — True iff this solution
+    carried a nested checker ``status: UNSATISFIABLE`` (a constraint-style
+    rejection). ``output`` is the best-effort per-solution verdict text (the
+    author's ``CORRECT``/``INCORRECT`` text, surfaced verbatim and NOT
+    interpreted) or, for a rejection, the violation diagnostic; the verbatim
+    record lives in ``CheckerReport.transcript``.
+    """
+
+    violation: bool
+    output: str
+
+
+class CheckerReport(BaseModel):
+    """A ``--solution-checker`` run's per-solution verdicts and honest aggregate.
+
+    Populated on a ``SolveResult`` only when a checker was supplied (otherwise
+    ``SolveResult.checker`` is ``None``). ``checks`` is the best-effort structured
+    view, one entry per produced solution, index-aligned with the solve's
+    ``solutions`` when ``status`` is ``completed`` or ``violation`` — and that
+    ``solutions`` list INCLUDES checker-rejected solutions (a violation does not
+    suppress the solution), so on ``status == "violation"`` consult the
+    per-solution ``checks`` rather than assuming every produced solution is valid.
+    ``transcript`` is the raw ``--json-stream`` transcript (solve + checker
+    objects) exactly as the subprocess emitted it — the AUTHORITATIVE checker
+    record; ``SolveResult.stdout`` carries only the reconstructed solution text
+    (the solve parser drops checker objects), which is why the transcript is
+    preserved here. The checker never proves optimality — ``SolveResult.status``
+    remains the only proof of completeness/optimality.
+    """
+
+    status: CheckerStatus
+    checks: list[SolutionCheck] = Field(default_factory=list)
+    transcript: str
+
+
 class SolveResult(BaseModel):
     status: SolveStatus
     solver: str
@@ -71,6 +120,10 @@ class SolveResult(BaseModel):
     solution: dict[str, Any] | None = None
     solutions: list[dict[str, Any]] = Field(default_factory=list)
     objective: int | float | None = None
+    # Populated iff a solution checker was supplied to the solve (the optional
+    # `--solution-checker`); None for an ordinary solve. The checker validates
+    # each produced solution; it never proves optimality (see CheckerReport).
+    checker: CheckerReport | None = None
 
 
 CheckStatus = Literal[
