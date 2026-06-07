@@ -137,7 +137,9 @@ The package exposes five commands:
 The stdio server exposes two runtime-introspection tools, a model-check tool, a
 model-inspection tool, an execution tool, and an unsat-core diagnostic tool —
 each of the latter four in an **inline-source** form (below) and a **path-based
-file** sibling ([Path-based file tools](#path-based-file-tools)):
+file** sibling ([Path-based file tools](#path-based-file-tools)). The two solve
+tools also accept optional solution checkers, so a normal solve can validate each
+produced solution against a checker model without changing result shape:
 
 - **`check_runtime`** — returns a `RuntimeStatus` with fields
   `installed: bool`, `runtime_dir: str`, and `minizinc_binary: str | None`.
@@ -296,6 +298,9 @@ file** sibling ([Path-based file tools](#path-based-file-tools)):
     It is written to a private temp file alongside the model and passed to
     the managed runtime as a positional `.dzn` data file (MiniZinc's
     `model.mzn data.dzn` order) — never a client-supplied path.
+  - `checker: str | None = None` — optional inline MiniZinc checker source,
+    written beside the model as `checker.mzc.mzn` and passed through
+    MiniZinc's `--solution-checker` flag. Omit it for an ordinary solve.
   - `solver: str = "cp-sat"` — passed through verbatim to MiniZinc's
     `--solver` flag.
   - `timeout_ms: int = 30000` — solving budget in milliseconds. Must be
@@ -346,8 +351,8 @@ file** sibling ([Path-based file tools](#path-based-file-tools)):
     synthesized as `name = <value>;` lines from its variable map (objective
     excluded) — the solution is shown either way. Solve runs use MiniZinc's
     `--json-stream` transport, so this is the rendered solution text, not the
-    literal process bytes (which are line-delimited JSON); the raw stream is
-    never surfaced.
+    literal process bytes (which are line-delimited JSON); when no checker is
+    supplied, the raw stream is not surfaced.
   - `stderr: str` — the run's **diagnostic channel**: the managed process's
     real stderr plus any solve-stream `error`/`warning` messages folded in
     (deduplicated). `--json-stream` may route model/solver diagnostics into
@@ -370,6 +375,32 @@ file** sibling ([Path-based file tools](#path-based-file-tools)):
     solver- and version-defined, **not** a stable contract. Unlike the prior
     stdout scrape, these are **driver-emitted** sibling stream objects, so a
     model's `output` block can no longer forge them.
+  - `checker: CheckerReport | None` — `null` unless a checker was supplied.
+    When present, it carries:
+    - `status: str` — one of `"completed"`, `"violation"`, `"no_solution"`,
+      `"error"`, `"timeout"`.
+    - `checks: list[SolutionCheck]` — one checker verdict per produced solution,
+      index-aligned with `solutions` when checking completed or found a
+      violation. Each entry has `violation: bool` and `output: str`.
+    - `transcript: str` — the authoritative raw `--json-stream` transcript,
+      including both solve and checker objects. `stdout` remains the
+      reconstructed solution text only.
+
+  **Solution checking.** Checking augments a normal solve: it adds exactly
+  `--solution-checker` to the same managed MiniZinc invocation, so `free_search`,
+  `parallel`, `random_seed`, `all_solutions`, and supported `num_solutions` all
+  compose with it. A checker's `CORRECT`/`INCORRECT` text is surfaced verbatim in
+  `checker.checks[].output` and is **not** interpreted by the server; only a
+  nested `UNSATISFIABLE` makes `checker.status="violation"`. Rejected solutions
+  still appear in `solutions`, so consult the aligned checks before treating each
+  produced solution as valid. A checker validates solution correctness and can
+  recompute an objective, but it never proves optimality — `status` remains the
+  completeness/optimality signal.
+
+  Inline checkers run in the same private temp directory as the inline model, so
+  they may include the co-located `model.mzn` but cannot resolve arbitrary
+  project-relative local includes. For multi-file checker projects, use
+  `solve_minizinc_files` with `checker_path`.
 
   The MCP response also includes model-visible text content with status,
   solver metadata, stdout/stderr, and a `Statistics:` section whenever
@@ -474,6 +505,9 @@ unchanged and remain the right choice for ephemeral, isolated text workflows.
   server. Required; must exist and be a regular file.
 - `data_path: str | None = None` — path to a local `.dzn` file, or `null`. An
   empty data file is allowed (a valid "no parameters" input).
+- `checker_path: str | None = None` — `solve_minizinc_files` only. Optional
+  path to a MiniZinc checker whose filename must end in `.mzc` or `.mzc.mzn`;
+  it is resolved to absolute and validated before any run.
 - `solver: str = "cp-sat"` — `solve`/`check`/`inspect` only (not
   `find_unsat_core_files`, which always uses findMUS).
 - `timeout_ms: int = 30000` — same semantics as the inline tools; must be
@@ -482,7 +516,8 @@ unchanged and remain the right choice for ephemeral, isolated text workflows.
 `solve_minizinc_files` additionally accepts the same optional, solve-only
 search controls as `solve_minizinc_model` — `free_search`, `parallel`,
 `random_seed`, `all_solutions`, and the solver-gated, satisfaction-only
-`num_solutions` (see above for semantics and defaults).
+`num_solutions` (see above for semantics and defaults) — plus `checker_path`
+for solution checking.
 
 **Includes (MiniZinc CLI style).** The file tools run the managed binary on the
 real `model_path` with the working directory set to the model's own directory,
@@ -571,7 +606,8 @@ The stdio server also exposes one MCP prompt for client-side LLMs to use:
 
 The `examples/` directory holds small, self-contained MiniZinc models you can
 point the path-based file tools at (or run by hand through the managed
-runtime). Each is a `model.mzn` plus a matching `data.dzn`:
+runtime). Each is a `model.mzn` — usually with a matching `data.dzn`, and one
+also ships a `model.mzc.mzn` solution checker:
 
 - **`examples/knapsack`** — bounded knapsack: choose how many of each item type
   to pack to maximize total value without exceeding the weight `capacity`
@@ -582,6 +618,11 @@ runtime). Each is a `model.mzn` plus a matching `data.dzn`:
   groups of `group_size` golfers over `n_weeks` weeks so no pair ever shares a
   group twice (`solve satisfy`). The shipped data is the 15-golfer instance
   (5 groups of 3 over 7 weeks — Kirkman's schoolgirls, full socialisation).
+- **`examples/australia_map_coloring`** — colour Australia's seven
+  states/territories with three colours so no two bordering regions share one
+  (`solve satisfy`). Its data (`nc = 3`) is inline, so there is no `data.dzn`;
+  instead it ships a `model.mzc.mzn` solution checker, so it doubles as a
+  demonstration of the checker feature (see below).
 
 For instance, to solve the knapsack example end to end:
 
@@ -594,6 +635,20 @@ For instance, to solve the knapsack example end to end:
 ```
 
 (prefer absolute paths in real MCP calls — see *Path-based file tools* above).
+
+To run the Australia example *with* its solution checker, point `checker_path`
+at the shipped `.mzc.mzn`:
+
+```jsonc
+// solve_minizinc_files
+{
+  "model_path": "examples/australia_map_coloring/model.mzn",
+  "checker_path": "examples/australia_map_coloring/model.mzc.mzn"
+}
+```
+
+The resulting `SolveResult.checker` report then carries the checker's
+per-solution verdict (here, `CORRECT`).
 
 The social-golfers model is parameterized through its `data.dzn`, which enables
 two workflows beyond a single solve:

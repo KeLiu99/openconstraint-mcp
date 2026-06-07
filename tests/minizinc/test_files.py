@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import subprocess
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
@@ -10,6 +11,7 @@ import pytest
 from openconstraint_mcp.minizinc.core import (
     FINDMUS_SOLVER,
     MiniZincExecutionError,
+    _validate_checker_path,
     _validate_model_data_paths,
     check_model_path,
     find_unsat_core_path,
@@ -65,14 +67,15 @@ def _record_run(
     """Patch subprocess.run to record the model/data args and cwd at call time.
 
     File tools run the real on-disk model, so the recorded model/data args are
-    the caller's resolved paths. Args are located by ``.mzn`` / ``.dzn`` suffix.
+    the caller's resolved positional paths. A checker path may also end in
+    ``.mzn`` but lives in the flags slot, before the model/data positionals.
     """
     calls: list[dict[str, Any]] = []
 
     def _fake_run(*args: Any, **kwargs: Any) -> _FakeCompletedProcess:
         cmd = args[0]
-        model_arg = next((arg for arg in cmd if str(arg).endswith(".mzn")), cmd[-1])
-        data_arg = next((arg for arg in cmd if str(arg).endswith(".dzn")), None)
+        data_arg = cmd[-1] if str(cmd[-1]).endswith(".dzn") else None
+        model_arg = cmd[-2] if data_arg is not None else cmd[-1]
         calls.append(
             {
                 "cmd": list(cmd),
@@ -114,9 +117,11 @@ def test_solve_runs_real_path_from_parent(
     # A single `satisfy` emits no status object; the parser's return-code
     # fallback resolves a clean exit with a solution to "satisfied".
     assert result.status == "satisfied"
+    assert result.checker is None
     # The path solve runner requests statistics too, symmetric with the inline
     # solve_model (check/findMUS path runs assert its absence below).
     assert "--statistics" in calls[0]["cmd"]
+    assert "--solution-checker" not in calls[0]["cmd"]
     # The managed binary ran on the resolved REAL path with cwd = its parent,
     # so a relative include resolves against the model's own directory.
     assert calls[0]["model_arg"] == str(model_path.resolve())
@@ -506,3 +511,347 @@ def test_oserror_wraps_as_execution_error(
     with pytest.raises(MiniZincExecutionError) as exc_info:
         solve_model_path(model_path)
     assert "install-runtime" in str(exc_info.value)
+
+
+# --- solve_model_path(checker_path=...) (--solution-checker) ----------------
+#
+# Captured production-transport (`--json-stream --solution-checker`) shapes: the
+# checker object is emitted immediately BEFORE the solution it validated, so the
+# per-checker entries stay positionally aligned with the solve parser's solutions.
+
+_CHECKER_SRC = (
+    'int: x;\nint: y;\noutput [ if x < y then "CORRECT\\n" else "INCORRECT\\n" endif ];\n'
+)
+_VIOLATION_DIAGNOSTIC = "model inconsistency detected: expression evaluated to false"
+
+
+def _checker_pass(default_text: str) -> dict[str, Any]:
+    return {
+        "type": "checker",
+        "messages": [{"type": "solution", "output": {"default": default_text}}],
+        "output": {"default": default_text},
+    }
+
+
+def _checker_violation() -> dict[str, Any]:
+    return {
+        "type": "checker",
+        "messages": [
+            {"type": "warning", "message": _VIOLATION_DIAGNOSTIC},
+            {"type": "status", "status": "UNSATISFIABLE"},
+        ],
+    }
+
+
+def _sol(default: str, values: dict[str, Any]) -> dict[str, Any]:
+    return {"type": "solution", "output": {"default": default, "json": values}}
+
+
+def _checker_stream(*objects: dict[str, Any]) -> str:
+    return "".join(json.dumps(obj) + "\n" for obj in objects)
+
+
+def _write_model_and_checker(tmp_path: Path) -> tuple[Path, Path]:
+    model_path = tmp_path / "model.mzn"
+    model_path.write_text("var 1..3: x;\nvar 1..3: y;\nconstraint x < y;\nsolve satisfy;\n")
+    checker_path = tmp_path / "model.mzc.mzn"
+    checker_path.write_text(_CHECKER_SRC)
+    return model_path, checker_path
+
+
+def test_solve_model_path_with_checker_adds_solution_checker_flag_on_real_path(
+    tmp_path: Path,
+    fake_minizinc_binary: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    model_path, checker_path = _write_model_and_checker(tmp_path)
+    stdout = _checker_stream(
+        _checker_pass("CORRECT\n"),
+        _sol("x=1 y=2\n", {"x": 1, "y": 2}),
+        {"type": "status", "status": "SATISFIED"},
+    )
+    calls = _record_run(monkeypatch, _FakeCompletedProcess(stdout=stdout, stderr="", returncode=0))
+
+    solve_model_path(model_path, checker_path=checker_path)
+
+    cmd = calls[0]["cmd"]
+    # The checker flag carries the RESOLVED ABSOLUTE checker path...
+    checker_arg = cmd[cmd.index("--solution-checker") + 1]
+    assert checker_arg == str(checker_path.resolve())
+    assert Path(checker_arg).is_absolute()
+    # ...layered on top of the full solve transport (not a bare invocation)...
+    for transport_arg in ("--statistics", "--json-stream", "--output-objective"):
+        assert transport_arg in cmd
+    # ...and the run happens from the model's own directory.
+    assert calls[0]["kwargs"]["cwd"] == str(model_path.resolve().parent)
+
+
+def test_solve_model_path_with_checker_completed_when_no_violation(
+    tmp_path: Path,
+    fake_minizinc_binary: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    model_path, checker_path = _write_model_and_checker(tmp_path)
+    stdout = _checker_stream(
+        _checker_pass("CORRECT\n"),
+        _sol("x=1 y=2\n", {"x": 1, "y": 2}),
+        {"type": "status", "status": "SATISFIED"},
+    )
+    _record_run(monkeypatch, _FakeCompletedProcess(stdout=stdout, stderr="", returncode=0))
+
+    result = solve_model_path(model_path, checker_path=checker_path)
+
+    assert isinstance(result, SolveResult)
+    assert result.checker is not None
+    assert result.checker.status == "completed"
+    # One checker verdict per produced solution: the alignment invariant.
+    assert len(result.checker.checks) == len(result.solutions) == 1
+    assert result.checker.checks[0].violation is False
+    assert result.checker.checks[0].output == "CORRECT\n"
+
+
+def test_solve_model_path_with_checker_incorrect_text_is_not_a_violation(
+    tmp_path: Path,
+    fake_minizinc_binary: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # The author's "INCORRECT" text is a convention the server must NOT adjudicate:
+    # it is surfaced verbatim but checker status stays `completed` (only a nested
+    # UNSATISFIABLE flips to `violation`).
+    model_path, checker_path = _write_model_and_checker(tmp_path)
+    stdout = _checker_stream(
+        _checker_pass("INCORRECT\n"),
+        _sol("x=3 y=1\n", {"x": 3, "y": 1}),
+        {"type": "status", "status": "SATISFIED"},
+    )
+    _record_run(monkeypatch, _FakeCompletedProcess(stdout=stdout, stderr="", returncode=0))
+
+    result = solve_model_path(model_path, checker_path=checker_path)
+
+    assert result.checker is not None
+    assert result.checker.status == "completed"
+    assert result.checker.checks[0].violation is False
+    assert result.checker.checks[0].output == "INCORRECT\n"
+
+
+def test_solve_model_path_with_checker_violation_keeps_rejected_solution(
+    tmp_path: Path,
+    fake_minizinc_binary: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # A constraint-style rejection flips checker status to `violation`, but the
+    # rejected solution stays in `solutions` (fact 5) — clients must consult
+    # the per-solution `checks`, not assume every produced solution is valid.
+    model_path, checker_path = _write_model_and_checker(tmp_path)
+    stdout = _checker_stream(
+        _checker_violation(),
+        _sol("x=1 y=2\n", {"x": 1, "y": 2}),
+        {"type": "status", "status": "SATISFIED"},
+    )
+    _record_run(monkeypatch, _FakeCompletedProcess(stdout=stdout, stderr="", returncode=0))
+
+    result = solve_model_path(model_path, checker_path=checker_path)
+
+    assert result.checker is not None
+    assert result.checker.status == "violation"
+    assert result.checker.checks[0].violation is True
+    assert result.solutions == [{"x": 1, "y": 2}]
+
+
+def test_solve_model_path_with_checker_missing_checker_verdict_is_error(
+    tmp_path: Path,
+    fake_minizinc_binary: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # A produced solution with NO checker object: the verdict count (0) misaligns
+    # with the solution count (1), so the aggregate is `error`, not a misleading
+    # `completed` over an unchecked solution.
+    model_path, checker_path = _write_model_and_checker(tmp_path)
+    stdout = _checker_stream(
+        _sol("x=1 y=2\n", {"x": 1, "y": 2}),
+        {"type": "status", "status": "SATISFIED"},
+    )
+    _record_run(monkeypatch, _FakeCompletedProcess(stdout=stdout, stderr="", returncode=0))
+
+    result = solve_model_path(model_path, checker_path=checker_path)
+
+    assert result.checker is not None
+    assert result.checker.status == "error"
+
+
+def test_solve_model_path_with_checker_stream_error_with_zero_rc_is_error(
+    tmp_path: Path,
+    fake_minizinc_binary: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # A stream ERROR verdict maps to `error` independently of the return code, and
+    # the derivation order puts `error` ahead of `no_solution`/`completed` so a
+    # solver error is never hidden behind "no solution produced".
+    model_path, checker_path = _write_model_and_checker(tmp_path)
+    stdout = _checker_stream({"type": "status", "status": "ERROR"})
+    _record_run(monkeypatch, _FakeCompletedProcess(stdout=stdout, stderr="", returncode=0))
+
+    result = solve_model_path(model_path, checker_path=checker_path)
+
+    assert result.status == "error"
+    assert result.checker is not None
+    assert result.checker.status == "error"
+
+
+def test_solve_model_path_with_checker_nonzero_rc_is_error(
+    tmp_path: Path,
+    fake_minizinc_binary: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # A nonzero return code (a broken/missing checker) is `error` even when the
+    # solve stream itself reported a solution and the counts align — the rc branch
+    # of the derivation in isolation.
+    model_path, checker_path = _write_model_and_checker(tmp_path)
+    stdout = _checker_stream(
+        _checker_pass("CORRECT\n"),
+        _sol("x=1 y=2\n", {"x": 1, "y": 2}),
+    )
+    _record_run(monkeypatch, _FakeCompletedProcess(stdout=stdout, stderr="boom", returncode=1))
+
+    result = solve_model_path(model_path, checker_path=checker_path)
+
+    assert result.checker is not None
+    assert result.checker.status == "error"
+
+
+def test_solve_model_path_with_checker_no_solution_status(
+    tmp_path: Path,
+    fake_minizinc_binary: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # A clean unsatisfiable run produces no solution, so no checker ran and the
+    # verdict count matches (both zero): `no_solution`, with the detail in
+    # `solve.status`.
+    model_path, checker_path = _write_model_and_checker(tmp_path)
+    stdout = _checker_stream({"type": "status", "status": "UNSATISFIABLE"})
+    _record_run(monkeypatch, _FakeCompletedProcess(stdout=stdout, stderr="", returncode=0))
+
+    result = solve_model_path(model_path, checker_path=checker_path)
+
+    assert result.status == "unsatisfiable"
+    assert result.checker is not None
+    assert result.checker.status == "no_solution"
+
+
+def test_solve_model_path_with_checker_timeout_status(
+    tmp_path: Path,
+    fake_minizinc_binary: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    model_path, checker_path = _write_model_and_checker(tmp_path)
+
+    def _fake_run(*args: Any, **kwargs: Any) -> Any:
+        raise subprocess.TimeoutExpired(cmd=args[0], timeout=kwargs.get("timeout", 0), output="")
+
+    monkeypatch.setattr("openconstraint_mcp.minizinc.core.subprocess.run", _fake_run)
+
+    result = solve_model_path(model_path, checker_path=checker_path)
+
+    assert result.checker is not None
+    assert result.checker.status == "timeout"
+    assert result.timed_out is True
+
+
+def test_solve_model_path_with_checker_transcript_is_raw_transcript(
+    tmp_path: Path,
+    fake_minizinc_binary: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # `checker.transcript` is the AUTHORITATIVE record: the raw transcript verbatim,
+    # checker objects intact. `solve.stdout` is the reconstructed solution text
+    # only — the solve parser drops checker objects — which is why the transcript
+    # is preserved separately.
+    model_path, checker_path = _write_model_and_checker(tmp_path)
+    stdout = _checker_stream(
+        _checker_pass("CORRECT\n"),
+        _sol("x=1 y=2\n", {"x": 1, "y": 2}),
+    )
+    _record_run(monkeypatch, _FakeCompletedProcess(stdout=stdout, stderr="", returncode=0))
+
+    result = solve_model_path(model_path, checker_path=checker_path)
+
+    assert result.checker is not None
+    assert result.checker.transcript == stdout
+    assert "checker" in result.checker.transcript
+    assert "checker" not in result.stdout
+
+
+# --- _validate_checker_path -------------------------------------------------
+
+
+def test_validate_checker_returns_resolved_absolute_path(tmp_path: Path) -> None:
+    checker_path = tmp_path / "c.mzc.mzn"
+    checker_path.write_text(_CHECKER_SRC)
+
+    resolved = _validate_checker_path(checker_path)
+
+    assert resolved == checker_path.resolve()
+    assert resolved.is_absolute()
+
+
+def test_validate_checker_accepts_bare_mzc_suffix(tmp_path: Path) -> None:
+    checker_path = tmp_path / "c.mzc"
+    checker_path.write_text(_CHECKER_SRC)
+
+    assert _validate_checker_path(checker_path) == checker_path.resolve()
+
+
+@pytest.mark.parametrize("name", ["checker.mzn", "checker.mzc.txt"])
+def test_validate_checker_rejects_bad_suffix(tmp_path: Path, name: str) -> None:
+    # `.mzn` (the model suffix) and a `.mzc.txt` decoy both fail: MiniZinc rejects
+    # any checker not ending in `.mzc`/`.mzc.mzn` at argument parsing, and the check
+    # is on `name`, not `Path.suffix` (which returns `.mzn` for `c.mzc.mzn`).
+    checker_path = tmp_path / name
+    checker_path.write_text(_CHECKER_SRC)
+    with pytest.raises(ValueError, match="mzc"):
+        _validate_checker_path(checker_path)
+
+
+def test_validate_checker_rejects_missing(tmp_path: Path) -> None:
+    with pytest.raises(ValueError, match="does not exist"):
+        _validate_checker_path(tmp_path / "missing.mzc.mzn")
+
+
+def test_validate_checker_rejects_directory(tmp_path: Path) -> None:
+    checker_dir = tmp_path / "dir.mzc.mzn"
+    checker_dir.mkdir()
+    with pytest.raises(ValueError, match="not a file"):
+        _validate_checker_path(checker_dir)
+
+
+def test_validate_checker_rejects_non_utf8(tmp_path: Path) -> None:
+    checker_path = tmp_path / "bad.mzc.mzn"
+    checker_path.write_bytes(b"\xff\xfe garbage")
+    with pytest.raises(ValueError, match="UTF-8"):
+        _validate_checker_path(checker_path)
+
+
+def test_solve_model_path_rejects_bad_checker_before_run(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    model_path = tmp_path / "model.mzn"
+    model_path.write_text(_MODEL_SRC)
+    bad_checker = tmp_path / "checker.mzn"  # wrong suffix
+    bad_checker.write_text(_CHECKER_SRC)
+    _fail_if_run_called(monkeypatch)
+
+    with pytest.raises(ValueError, match="mzc"):
+        solve_model_path(model_path, checker_path=bad_checker)
+
+
+def test_solve_model_path_with_checker_rejects_missing_model_before_run(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    checker_path = tmp_path / "model.mzc.mzn"
+    checker_path.write_text(_CHECKER_SRC)
+    _fail_if_run_called(monkeypatch)
+
+    with pytest.raises(ValueError, match="does not exist"):
+        solve_model_path(tmp_path / "nope.mzn", checker_path=checker_path)
