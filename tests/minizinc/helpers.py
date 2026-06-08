@@ -72,3 +72,87 @@ def checker_violation() -> dict[str, Any]:
             {"type": "status", "status": "UNSATISFIABLE"},
         ],
     }
+
+
+# Canonical assembled `--json-stream` solve transcripts. They are shared by the
+# stream parser's own tests and by the solve_model orchestration tests that feed
+# them as a fake `subprocess` stdout, so the captured shapes live here once rather
+# than being rebuilt (or drifting) in each module.
+
+# Optimization proven optimal: one solution, OPTIMAL_SOLUTION, then statistics.
+STREAM_OPTIMAL = stream(
+    {"type": "statistics", "statistics": {"method": "maximize", "flatTime": 0.04}},
+    solution_obj("x=2 y=10 total=22\n", {"x": 2, "y": 10, "_objective": 22}),
+    {"type": "status", "status": "OPTIMAL_SOLUTION"},
+    {"type": "statistics", "statistics": {"nSolutions": 1}},
+    {"type": "statistics", "statistics": {"objective": 22, "failures": 0, "solveTime": 0.0005}},
+)
+
+# Optimization with `-a`: one solution per improving step (objectives 0, 4, 22),
+# then OPTIMAL_SOLUTION. `solution` is the last/best element.
+STREAM_OPTIMAL_MULTI = stream(
+    solution_obj("x=0 y=0 total=0\n", {"x": 0, "y": 0, "_objective": 0}),
+    solution_obj("x=0 y=2 total=4\n", {"x": 0, "y": 2, "_objective": 4}),
+    solution_obj("x=2 y=10 total=22\n", {"x": 2, "y": 10, "_objective": 22}),
+    {"type": "status", "status": "OPTIMAL_SOLUTION"},
+    {"type": "statistics", "statistics": {"nSolutions": 3, "objective": 22}},
+)
+
+# A single `satisfy` solve: a solution and statistics, but NO status object —
+# search stops at the first solution, so there is no completeness verdict.
+STREAM_SATISFY = stream(
+    {"type": "statistics", "statistics": {"method": "satisfy", "flatTime": 0.04}},
+    solution_obj("x=1 y=2\n", {"x": 1, "y": 2}),
+    {"type": "statistics", "statistics": {"nSolutions": 1}},
+)
+
+# A `satisfy` solve with `-a`: every solution in order, then ALL_SOLUTIONS.
+STREAM_SATISFY_ALL = stream(
+    solution_obj("x=1 y=2\n", {"x": 1, "y": 2}),
+    solution_obj("x=1 y=3\n", {"x": 1, "y": 3}),
+    solution_obj("x=2 y=3\n", {"x": 2, "y": 3}),
+    {"type": "status", "status": "ALL_SOLUTIONS"},
+    {"type": "statistics", "statistics": {"nSolutions": 3}},
+)
+
+# UNSAT: an optional warning, statistics, then UNSATISFIABLE and no solution.
+STREAM_UNSAT = stream(
+    {"type": "warning", "message": "model inconsistency detected"},
+    {"type": "statistics", "statistics": {"method": "satisfy", "flatTime": 0.04}},
+    {"type": "status", "status": "UNSATISFIABLE"},
+)
+
+# A syntax/compile error: a single error object on the stdout stream (the real
+# process stderr stays empty), and no status object.
+STREAM_ERROR = stream(
+    {
+        "type": "error",
+        "what": "syntax error",
+        "location": {"filename": "model.mzn", "firstLine": 2},
+        "message": "unexpected item, expecting ';' or end of file",
+    }
+)
+
+# A findMUS run over an over-constrained model, with the noisy preamble the real
+# binary emits (FznSubProblem/Brief lines) plus a MUS line and pipe-delimited
+# trace spans — two from the entry model and one from an included file. Shared by
+# the unsat-core parser tests and the find_unsat_core orchestration tests.
+UNSAT_CORE_MODEL = (
+    "var 0..10: x;\n"
+    "var 0..10: y;\n"
+    "\n"
+    "constraint x + y > 5;\n"
+    "constraint x + y < 3;\n"
+    "constraint x != y;\n"
+    "\n"
+    "solve satisfy;\n"
+)
+
+UNSAT_CORE_STDOUT = (
+    "FznSubProblem:  hard cons: 0    soft cons: 3   leaves: 3      "
+    "branches: 4    Built tree in 0.01 seconds.\n"
+    "MUS: 1 2\n"
+    "Brief: int_lin_le, int_lin_le\n"
+    "Traces: model.mzn|4|12|4|20|;model.mzn|5|12|5|20|;"
+    "redefinitions.mzn|10|1|10|5|\n"
+)

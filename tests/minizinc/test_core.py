@@ -6,7 +6,6 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-from pydantic import ValidationError
 
 from openconstraint_mcp.minizinc.core import (
     DEFAULT_CHECK_TIMEOUT_MS,
@@ -24,49 +23,27 @@ from openconstraint_mcp.minizinc.core import (
     solve_model,
     solver_supports_num_solutions,
 )
-from openconstraint_mcp.minizinc.stream import _parse_solve_stream
-from openconstraint_mcp.minizinc.unsat_core import _parse_unsat_core, _slice_source
 from openconstraint_mcp.runtime import RuntimeMissingError
 from openconstraint_mcp.schemas import (
-    CheckerReport,
     CheckResult,
     ModelInspectionResult,
-    SolutionCheck,
-    SolverCapabilities,
     SolveResult,
-    SolverInfo,
     SolverList,
-    SolveStatus,
-    UnsatCoreConstraint,
-    UnsatCoreResult,
 )
 from tests.minizinc.helpers import (
+    STREAM_ERROR,
+    STREAM_OPTIMAL,
+    STREAM_SATISFY,
+    STREAM_SATISFY_ALL,
+    STREAM_UNSAT,
+    UNSAT_CORE_MODEL,
+    UNSAT_CORE_STDOUT,
     FakeCompletedProcess,
     checker_pass,
     checker_violation,
     solution_obj,
     solution_obj_json_only,
     stream,
-)
-
-_UNSAT_CORE_MODEL = (
-    "var 0..10: x;\n"
-    "var 0..10: y;\n"
-    "\n"
-    "constraint x + y > 5;\n"
-    "constraint x + y < 3;\n"
-    "constraint x != y;\n"
-    "\n"
-    "solve satisfy;\n"
-)
-
-_UNSAT_CORE_STDOUT = (
-    "FznSubProblem:  hard cons: 0    soft cons: 3   leaves: 3      "
-    "branches: 4    Built tree in 0.01 seconds.\n"
-    "MUS: 1 2\n"
-    "Brief: int_lin_le, int_lin_le\n"
-    "Traces: model.mzn|4|12|4|20|;model.mzn|5|12|5|20|;"
-    "redefinitions.mzn|10|1|10|5|\n"
 )
 
 
@@ -196,271 +173,6 @@ def test_list_solvers_decodes_output_as_utf8(
     assert calls[0]["kwargs"].get("encoding") == "utf-8"
 
 
-def test_solve_result_round_trips() -> None:
-    # A multi-solution optimization result: `solutions` holds the improving
-    # sequence in order, `solution` is its last (best) element, `objective` is
-    # the best `_objective`, and `statistics` are bare stringified stream values
-    # (no raw-token quotes, unlike the old %%%mzn-stat: scrape).
-    result = SolveResult(
-        status="optimal",
-        solver="cp-sat",
-        return_code=0,
-        timed_out=False,
-        stdout="x=0 y=1 total=2\nx=2 y=10 total=22\n",
-        stderr="",
-        elapsed_ms=42,
-        statistics={"failures": "0", "method": "maximize"},
-        solution={"x": 2, "y": 10},
-        solutions=[{"x": 0, "y": 1}, {"x": 2, "y": 10}],
-        objective=22,
-    )
-    dumped = result.model_dump()
-    assert dumped == {
-        "status": "optimal",
-        "solver": "cp-sat",
-        "return_code": 0,
-        "timed_out": False,
-        "stdout": "x=0 y=1 total=2\nx=2 y=10 total=22\n",
-        "stderr": "",
-        "elapsed_ms": 42,
-        "statistics": {"failures": "0", "method": "maximize"},
-        "solution": {"x": 2, "y": 10},
-        "solutions": [{"x": 0, "y": 1}, {"x": 2, "y": 10}],
-        "objective": 22,
-        # An ordinary solve carries no checker; the additive field renders as null,
-        # consistent with the other always-emitted nullable fields.
-        "checker": None,
-    }
-
-
-def test_solve_result_round_trips_satisfaction_has_null_objective() -> None:
-    # A satisfaction result carries a solution but no objective: `_objective` is
-    # absent from a satisfy model's json section, so `objective` stays None while
-    # `solution`/`solutions` still round-trip.
-    result = SolveResult(
-        status="satisfied",
-        solver="cp-sat",
-        return_code=0,
-        timed_out=False,
-        stdout="x=1 y=2\n",
-        stderr="",
-        elapsed_ms=10,
-        solution={"x": 1, "y": 2},
-        solutions=[{"x": 1, "y": 2}],
-        objective=None,
-    )
-    dumped = result.model_dump()
-    assert dumped["objective"] is None
-    assert dumped["solution"] == {"x": 1, "y": 2}
-    assert dumped["solutions"] == [{"x": 1, "y": 2}]
-    assert dumped["status"] == "satisfied"
-
-
-def test_solve_result_rejects_unknown_status() -> None:
-    with pytest.raises(ValidationError):
-        SolveResult(
-            status="bogus",  # type: ignore[arg-type]
-            solver="cp-sat",
-            return_code=0,
-            timed_out=False,
-            stdout="",
-            stderr="",
-            elapsed_ms=0,
-        )
-
-
-def test_check_result_round_trips() -> None:
-    result = CheckResult(
-        status="ok",
-        solver="cp-sat",
-        stdout="",
-        stderr="",
-        elapsed_ms=12,
-    )
-    dumped = result.model_dump()
-    assert dumped == {
-        "status": "ok",
-        "solver": "cp-sat",
-        "stdout": "",
-        "stderr": "",
-        "elapsed_ms": 12,
-    }
-
-
-def test_check_result_rejects_unknown_status() -> None:
-    with pytest.raises(ValidationError):
-        CheckResult(
-            status="bogus",  # type: ignore[arg-type]
-            solver="cp-sat",
-            stdout="",
-            stderr="",
-            elapsed_ms=0,
-        )
-
-
-def test_unsat_core_result_round_trips() -> None:
-    result = UnsatCoreResult(
-        status="mus_found",
-        core=[
-            UnsatCoreConstraint(
-                line=4,
-                column=12,
-                end_line=4,
-                end_column=20,
-                source="x + y > 5",
-            )
-        ],
-        message="findMUS reported a minimal unsatisfiable subset.",
-        stdout="MUS: 1 2\n",
-        stderr="",
-        elapsed_ms=7,
-    )
-
-    assert result.model_dump() == {
-        "status": "mus_found",
-        "core": [
-            {
-                "line": 4,
-                "column": 12,
-                "end_line": 4,
-                "end_column": 20,
-                "source": "x + y > 5",
-            }
-        ],
-        "message": "findMUS reported a minimal unsatisfiable subset.",
-        "stdout": "MUS: 1 2\n",
-        "stderr": "",
-        "elapsed_ms": 7,
-    }
-
-
-def test_unsat_core_result_rejects_unknown_status() -> None:
-    with pytest.raises(ValidationError):
-        UnsatCoreResult(
-            status="bogus",  # type: ignore[arg-type]
-            message="bad status",
-            stdout="",
-            stderr="",
-            elapsed_ms=0,
-        )
-
-
-def test_solve_result_with_checker_round_trips() -> None:
-    # A violation solve nests a CheckerReport on the SolveResult: `solutions` still
-    # INCLUDES the checker-rejected solution (fact 5), `checker.checks` is
-    # index-aligned with it, and `checker.transcript` preserves the raw
-    # `--solution-checker` transcript verbatim — the authoritative checker record,
-    # while `stdout` is the solution-only text.
-    result = SolveResult(
-        status="satisfied",
-        solver="org.gecode.gecode",
-        return_code=0,
-        timed_out=False,
-        stdout="x=1 y=2\n",
-        stderr="",
-        elapsed_ms=15,
-        solution={"x": 1, "y": 2},
-        solutions=[{"x": 1, "y": 2}],
-        objective=None,
-        checker=CheckerReport(
-            status="violation",
-            checks=[SolutionCheck(violation=True, output="model inconsistency detected")],
-            transcript='{"type":"checker"}\n{"type":"solution"}\n',
-        ),
-    )
-
-    dumped = result.model_dump()
-    assert dumped["checker"] == {
-        "status": "violation",
-        "checks": [{"violation": True, "output": "model inconsistency detected"}],
-        "transcript": '{"type":"checker"}\n{"type":"solution"}\n',
-    }
-    # The rejected solution stays in `solutions` (a violation does not suppress it).
-    assert dumped["solutions"] == [{"x": 1, "y": 2}]
-    assert dumped["status"] == "satisfied"
-
-
-def test_solution_check_round_trips() -> None:
-    # The per-solution check: `violation` is the one server-asserted verdict;
-    # `output` carries the author CORRECT/INCORRECT text verbatim, unadjudicated.
-    check = SolutionCheck(violation=False, output="CORRECT\n")
-    assert check.model_dump() == {"violation": False, "output": "CORRECT\n"}
-
-
-def test_checker_report_rejects_unknown_status() -> None:
-    with pytest.raises(ValidationError):
-        CheckerReport(
-            status="checked",  # type: ignore[arg-type]
-            checks=[],
-            transcript="",
-        )
-
-
-def test_solver_capabilities_round_trips() -> None:
-    caps = SolverCapabilities(
-        supports_all_solutions=True,
-        supports_free_search=True,
-        supports_parallel=True,
-        supports_random_seed=True,
-        supports_num_solutions=True,
-        std_flags=["-a", "-f", "-n", "-p", "-r"],
-    )
-    assert caps.model_dump() == {
-        "supports_all_solutions": True,
-        "supports_free_search": True,
-        "supports_parallel": True,
-        "supports_random_seed": True,
-        "supports_num_solutions": True,
-        "std_flags": ["-a", "-f", "-n", "-p", "-r"],
-    }
-
-
-def test_solver_info_round_trips_with_capabilities() -> None:
-    info = SolverInfo(
-        id="org.gecode.gecode",
-        name="Gecode",
-        version="6.3.0",
-        tags=["cp", "int"],
-        capabilities=SolverCapabilities(
-            supports_all_solutions=True,
-            supports_free_search=True,
-            supports_parallel=True,
-            supports_random_seed=True,
-            supports_num_solutions=True,
-            std_flags=["-a", "-f", "-n", "-p", "-r"],
-        ),
-    )
-    assert info.model_dump() == {
-        "id": "org.gecode.gecode",
-        "name": "Gecode",
-        "version": "6.3.0",
-        "tags": ["cp", "int"],
-        "capabilities": {
-            "supports_all_solutions": True,
-            "supports_free_search": True,
-            "supports_parallel": True,
-            "supports_random_seed": True,
-            "supports_num_solutions": True,
-            "std_flags": ["-a", "-f", "-n", "-p", "-r"],
-        },
-    }
-
-
-def test_solver_info_capabilities_default_is_conservative() -> None:
-    # A bare SolverInfo defaults capabilities to all-False booleans and an empty
-    # std_flags — the conservative default that keeps Pydantic construction
-    # compatible and the missing-config case default-deny.
-    info = SolverInfo(id="com.example.unknown", name="Unknown")
-    assert info.capabilities.model_dump() == {
-        "supports_all_solutions": False,
-        "supports_free_search": False,
-        "supports_parallel": False,
-        "supports_random_seed": False,
-        "supports_num_solutions": False,
-        "std_flags": [],
-    }
-
-
 def test_solver_capabilities_gecode_declares_all_controls() -> None:
     caps = _solver_capabilities(
         {"id": "org.gecode.gecode", "stdFlags": ["-a", "-f", "-n", "-p", "-r"]}
@@ -550,263 +262,6 @@ def test_solver_capabilities_malformed_std_flags_allowlisted_keeps_num_solutions
     assert caps.supports_num_solutions is True
 
 
-def test_parse_unsat_core_extracts_model_spans() -> None:
-    mus_present, core = _parse_unsat_core(_UNSAT_CORE_STDOUT, _UNSAT_CORE_MODEL)
-
-    assert mus_present is True
-    assert len(core) == 2
-    assert core[0].line == 4
-    assert core[0].column == 12
-    assert core[0].end_line == 4
-    assert core[0].end_column == 20
-    assert "x + y > 5" in core[0].source
-    assert "x + y < 3" in core[1].source
-    assert all("x != y" not in item.source for item in core)
-
-
-def test_parse_unsat_core_without_mus_returns_empty_core() -> None:
-    assert _parse_unsat_core("=====UNKNOWN=====\n", _UNSAT_CORE_MODEL) == (False, [])
-
-
-def test_parse_unsat_core_ignores_trace_spans_without_mus_line() -> None:
-    assert _parse_unsat_core("Traces: model.mzn|4|12|4|20|\n", _UNSAT_CORE_MODEL) == (False, [])
-
-
-# 1-indexed, end-inclusive spans over a 3-line model whose lines are each 5 chars.
-_SLICE_MODEL = "abcde\nfghij\nklmno"
-
-
-@pytest.mark.parametrize(
-    ("sl", "sc", "el", "ec", "expected"),
-    [
-        pytest.param(1, 2, 1, 4, "bcd", id="single-line"),
-        pytest.param(1, 3, 3, 2, "cde\nfghij\nkl", id="multi-line"),
-    ],
-)
-def test_slice_source_returns_precise_span(
-    sl: int, sc: int, el: int, ec: int, expected: str
-) -> None:
-    assert _slice_source(_SLICE_MODEL, sl, sc, el, ec) == expected
-
-
-@pytest.mark.parametrize(
-    ("sl", "sc", "el", "ec"),
-    [
-        pytest.param(3, 1, 1, 1, id="start-after-end"),
-        pytest.param(5, 1, 6, 2, id="start-past-eof"),
-    ],
-)
-def test_slice_source_invalid_line_span_returns_empty(sl: int, sc: int, el: int, ec: int) -> None:
-    assert _slice_source(_SLICE_MODEL, sl, sc, el, ec) == ""
-
-
-@pytest.mark.parametrize(
-    ("sl", "sc", "el", "ec", "expected"),
-    [
-        pytest.param(2, 9, 2, 10, "fghij", id="column-past-line-end"),
-        pytest.param(1, 4, 1, 2, "abcde", id="start-col-after-end-col"),
-        pytest.param(2, 1, 5, 3, "fghij\nklmno", id="end-line-past-eof-clamped"),
-    ],
-)
-def test_slice_source_falls_back_to_whole_lines(
-    sl: int, sc: int, el: int, ec: int, expected: str
-) -> None:
-    assert _slice_source(_SLICE_MODEL, sl, sc, el, ec) == expected
-
-
-# ---------------------------------------------------------------------------
-# Captured `--json-stream` solve transcripts (cp-sat, managed runtime). Built by
-# serializing dicts so the JSON escaping is exact: one object per line, each
-# solution carrying both the human `default` text and the `json` variable map,
-# with status and statistics as their own sibling objects.
-# ---------------------------------------------------------------------------
-# Optimization proven optimal: one solution, OPTIMAL_SOLUTION, then statistics.
-_STREAM_OPTIMAL = stream(
-    {"type": "statistics", "statistics": {"method": "maximize", "flatTime": 0.04}},
-    solution_obj("x=2 y=10 total=22\n", {"x": 2, "y": 10, "_objective": 22}),
-    {"type": "status", "status": "OPTIMAL_SOLUTION"},
-    {"type": "statistics", "statistics": {"nSolutions": 1}},
-    {"type": "statistics", "statistics": {"objective": 22, "failures": 0, "solveTime": 0.0005}},
-)
-
-# Optimization with `-a`: one solution per improving step (objectives 0, 4, 22),
-# then OPTIMAL_SOLUTION. `solution` is the last/best element.
-_STREAM_OPTIMAL_MULTI = stream(
-    solution_obj("x=0 y=0 total=0\n", {"x": 0, "y": 0, "_objective": 0}),
-    solution_obj("x=0 y=2 total=4\n", {"x": 0, "y": 2, "_objective": 4}),
-    solution_obj("x=2 y=10 total=22\n", {"x": 2, "y": 10, "_objective": 22}),
-    {"type": "status", "status": "OPTIMAL_SOLUTION"},
-    {"type": "statistics", "statistics": {"nSolutions": 3, "objective": 22}},
-)
-
-# A single `satisfy` solve: a solution and statistics, but NO status object —
-# search stops at the first solution, so there is no completeness verdict.
-_STREAM_SATISFY = stream(
-    {"type": "statistics", "statistics": {"method": "satisfy", "flatTime": 0.04}},
-    solution_obj("x=1 y=2\n", {"x": 1, "y": 2}),
-    {"type": "statistics", "statistics": {"nSolutions": 1}},
-)
-
-# A `satisfy` solve with `-a`: every solution in order, then ALL_SOLUTIONS.
-_STREAM_SATISFY_ALL = stream(
-    solution_obj("x=1 y=2\n", {"x": 1, "y": 2}),
-    solution_obj("x=1 y=3\n", {"x": 1, "y": 3}),
-    solution_obj("x=2 y=3\n", {"x": 2, "y": 3}),
-    {"type": "status", "status": "ALL_SOLUTIONS"},
-    {"type": "statistics", "statistics": {"nSolutions": 3}},
-)
-
-# UNSAT: an optional warning, statistics, then UNSATISFIABLE and no solution.
-_STREAM_UNSAT = stream(
-    {"type": "warning", "message": "model inconsistency detected"},
-    {"type": "statistics", "statistics": {"method": "satisfy", "flatTime": 0.04}},
-    {"type": "status", "status": "UNSATISFIABLE"},
-)
-
-# A syntax/compile error: a single error object on the stdout stream (the real
-# process stderr stays empty), and no status object.
-_STREAM_ERROR = stream(
-    {
-        "type": "error",
-        "what": "syntax error",
-        "location": {"filename": "model.mzn", "firstLine": 2},
-        "message": "unexpected item, expecting ';' or end of file",
-    }
-)
-
-
-@pytest.mark.parametrize(
-    ("verdict", "expected"),
-    [
-        ("OPTIMAL_SOLUTION", "optimal"),
-        ("ALL_SOLUTIONS", "satisfied"),
-        ("SATISFIED", "satisfied"),
-        ("UNSATISFIABLE", "unsatisfiable"),
-        ("UNKNOWN", "unknown"),
-        ("UNBOUNDED", "unbounded"),
-        ("UNSAT_OR_UNBOUNDED", "unsat_or_unbounded"),
-        # A driver/solver runtime-failure verdict (e.g. cp-sat rejecting an
-        # out-of-range `random_seed`) must surface as "error", not fall through
-        # to "unknown" and hide the failure.
-        ("ERROR", "error"),
-    ],
-)
-def test_parse_solve_stream_maps_known_status(verdict: str, expected: SolveStatus) -> None:
-    # Status is read from the driver's own `{"type":"status"}` object (never from
-    # text); each verified/enum spelling maps onto a SolveStatus literal.
-    assert _parse_solve_stream(stream({"type": "status", "status": verdict})).status == expected
-
-
-def test_parse_solve_stream_unknown_status_falls_back_safely() -> None:
-    # A renamed or newly added MiniZinc verdict never crashes a solve: with a
-    # solution in hand it reads as satisfied, otherwise unknown.
-    with_solution = stream(
-        solution_obj("x=1\n", {"x": 1}),
-        {"type": "status", "status": "FUTURE_VERDICT"},
-    )
-    without_solution = stream({"type": "status", "status": "FUTURE_VERDICT"})
-    assert _parse_solve_stream(with_solution).status == "satisfied"
-    assert _parse_solve_stream(without_solution).status == "unknown"
-
-
-def test_parse_solve_stream_strips_objective_and_orders_solutions() -> None:
-    # `solutions` preserves emission order with `_objective` removed from each;
-    # `objective` is the last (best) solution's `_objective`.
-    parsed = _parse_solve_stream(_STREAM_OPTIMAL_MULTI)
-    assert parsed.solutions == [{"x": 0, "y": 0}, {"x": 0, "y": 2}, {"x": 2, "y": 10}]
-    assert all("_objective" not in solution for solution in parsed.solutions)
-    assert parsed.objective == 22
-    assert parsed.status == "optimal"
-
-
-def test_parse_solve_stream_rejects_bool_objective() -> None:
-    # `_objective` is stripped from the public solution map whatever its type, but a
-    # bool is never accepted as the numeric objective even though bool subclasses
-    # int — so objective stays None while the variable map is still cleaned.
-    parsed = _parse_solve_stream(
-        stream(
-            solution_obj("x=1\n", {"x": 1, "_objective": True}),
-            {"type": "status", "status": "OPTIMAL_SOLUTION"},
-        )
-    )
-    assert parsed.objective is None
-    assert parsed.solutions == [{"x": 1}]
-
-
-def test_parse_solve_stream_satisfaction_has_no_objective() -> None:
-    # A satisfy model's json section carries no `_objective`, so objective is None
-    # even though solutions are present.
-    parsed = _parse_solve_stream(_STREAM_SATISFY_ALL)
-    assert parsed.objective is None
-    assert parsed.solutions[-1] == {"x": 2, "y": 3}
-    assert parsed.status == "satisfied"
-
-
-def test_parse_solve_stream_merges_statistics_last_wins() -> None:
-    # Typed JSON stat values become bare strings; duplicate keys across objects
-    # keep the last value (mirroring the old block-merge contract).
-    stdout = stream(
-        {"type": "statistics", "statistics": {"method": "maximize", "objective": 0}},
-        {"type": "statistics", "statistics": {"objective": 22, "flatTime": 0.04, "failures": 0}},
-    )
-    assert _parse_solve_stream(stdout).statistics == {
-        "method": "maximize",
-        "objective": "22",
-        "flatTime": "0.04",
-        "failures": "0",
-    }
-
-
-def test_parse_solve_stream_reconstructs_stdout_from_default_sections() -> None:
-    # The human stdout is rebuilt from each solution's `output.default`, one
-    # newline-terminated block per solution — not the raw json-stream bytes.
-    assert _parse_solve_stream(_STREAM_SATISFY_ALL).stdout == "x=1 y=2\nx=1 y=3\nx=2 y=3\n"
-
-
-def test_parse_solve_stream_synthesizes_stdout_when_only_json_section() -> None:
-    # A model with no explicit `output` item emits a solution object carrying only
-    # the `json` section. The human stdout is synthesized from the variable map
-    # (with `_objective` stripped) so a real no-output solve still shows a solution
-    # instead of an empty stdout.
-    parsed = _parse_solve_stream(
-        stream(
-            solution_obj_json_only({"x": 5, "_objective": 5}),
-            {"type": "status", "status": "OPTIMAL_SOLUTION"},
-        )
-    )
-    assert parsed.solutions == [{"x": 5}]
-    assert parsed.objective == 5
-    assert parsed.stdout == "x = 5;\n"
-    # The internal objective artifact never leaks into the human text.
-    assert "_objective" not in parsed.stdout
-
-
-def test_parse_solve_stream_skips_truncated_final_line() -> None:
-    # A hard timeout can cut the final object mid-line; the unparseable tail is
-    # skipped and the fully-received solution/objective are kept.
-    truncated = (
-        stream(
-            solution_obj("x=2 y=10 total=22\n", {"x": 2, "y": 10, "_objective": 22}),
-            {"type": "status", "status": "OPTIMAL_SOLUTION"},
-        )
-        + '{"type": "statistics", "statistics": {"objec'
-    )
-    parsed = _parse_solve_stream(truncated)
-    assert parsed.status == "optimal"
-    assert parsed.solutions == [{"x": 2, "y": 10}]
-    assert parsed.objective == 22
-
-
-def test_parse_solve_stream_surfaces_error_and_warning_messages() -> None:
-    # An error object forces status "error" and its message is collected; a
-    # warning contributes its message without changing the verdict.
-    assert _parse_solve_stream(_STREAM_ERROR).status == "error"
-    assert _parse_solve_stream(_STREAM_ERROR).messages == [
-        "syntax error: unexpected item, expecting ';' or end of file"
-    ]
-    assert _parse_solve_stream(_STREAM_UNSAT).messages == ["model inconsistency detected"]
-
-
 def _record_subprocess(
     monkeypatch: pytest.MonkeyPatch, completed: FakeCompletedProcess
 ) -> list[dict[str, Any]]:
@@ -859,7 +314,7 @@ def test_solve_model_happy_path_returns_satisfied(
     # classified `satisfied` from the clean exit + solution — not `optimal` (the
     # classic-`==========` misread this whole change exists to kill).
     calls = _record_subprocess(
-        monkeypatch, FakeCompletedProcess(stdout=_STREAM_SATISFY, stderr="", returncode=0)
+        monkeypatch, FakeCompletedProcess(stdout=STREAM_SATISFY, stderr="", returncode=0)
     )
 
     result = solve_model("var 1..5: x;\nconstraint x > 2;\nsolve satisfy;")
@@ -904,7 +359,7 @@ def test_solve_model_returns_structured_optimal_solution(
     # `optimal`, the best objective and solution come from the last solution
     # object, and statistics are the merged, stringified stream values.
     _record_subprocess(
-        monkeypatch, FakeCompletedProcess(stdout=_STREAM_OPTIMAL, stderr="", returncode=0)
+        monkeypatch, FakeCompletedProcess(stdout=STREAM_OPTIMAL, stderr="", returncode=0)
     )
 
     result = solve_model("var 0..10: x;\nvar 0..10: y;\nsolve maximize x + 2 * y;")
@@ -924,7 +379,7 @@ def test_solve_model_command_shape(
 ) -> None:
     model = "var 1..5: x;\nconstraint x > 2;\nsolve satisfy;"
     calls = _record_subprocess(
-        monkeypatch, FakeCompletedProcess(stdout=_STREAM_SATISFY, stderr="", returncode=0)
+        monkeypatch, FakeCompletedProcess(stdout=STREAM_SATISFY, stderr="", returncode=0)
     )
 
     result = solve_model(model)
@@ -1150,7 +605,7 @@ def test_solve_model_with_checker_transcript_is_raw_stdout(
 def _solve_cmd_with_flags(monkeypatch: pytest.MonkeyPatch, **flags: Any) -> list[str]:
     """Solve a trivial model with the given flags; return the argv it built."""
     calls = _record_subprocess(
-        monkeypatch, FakeCompletedProcess(stdout=_STREAM_SATISFY, stderr="", returncode=0)
+        monkeypatch, FakeCompletedProcess(stdout=STREAM_SATISFY, stderr="", returncode=0)
     )
     solve_model("var 1..5: x;\nsolve satisfy;", **flags)
     return calls[0]["args"][0]
@@ -1328,7 +783,7 @@ def test_solve_model_forwards_inline_data_positionally(
 ) -> None:
     model = "int: n;\nvar 1..n: x;\nconstraint x = n;\nsolve satisfy;"
     calls = _record_subprocess(
-        monkeypatch, FakeCompletedProcess(stdout=_STREAM_SATISFY, stderr="", returncode=0)
+        monkeypatch, FakeCompletedProcess(stdout=STREAM_SATISFY, stderr="", returncode=0)
     )
 
     result = solve_model(model, data="n = 3;")
@@ -1347,7 +802,7 @@ def test_solve_model_without_data_passes_only_model(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     calls = _record_subprocess(
-        monkeypatch, FakeCompletedProcess(stdout=_STREAM_SATISFY, stderr="", returncode=0)
+        monkeypatch, FakeCompletedProcess(stdout=STREAM_SATISFY, stderr="", returncode=0)
     )
 
     solve_model("var 1..5: x;\nsolve satisfy;")
@@ -1382,7 +837,7 @@ def test_solve_model_custom_solver_is_passed_through(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     calls = _record_subprocess(
-        monkeypatch, FakeCompletedProcess(stdout=_STREAM_SATISFY, stderr="", returncode=0)
+        monkeypatch, FakeCompletedProcess(stdout=STREAM_SATISFY, stderr="", returncode=0)
     )
 
     result = solve_model("solve satisfy;", solver="gecode")
@@ -1397,7 +852,7 @@ def test_solve_model_custom_timeout_drives_outer_grace(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     calls = _record_subprocess(
-        monkeypatch, FakeCompletedProcess(stdout=_STREAM_SATISFY, stderr="", returncode=0)
+        monkeypatch, FakeCompletedProcess(stdout=STREAM_SATISFY, stderr="", returncode=0)
     )
 
     solve_model("solve satisfy;", timeout_ms=5000)
@@ -1412,7 +867,7 @@ def test_solve_model_defaults_match_module_constants(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     calls = _record_subprocess(
-        monkeypatch, FakeCompletedProcess(stdout=_STREAM_SATISFY, stderr="", returncode=0)
+        monkeypatch, FakeCompletedProcess(stdout=STREAM_SATISFY, stderr="", returncode=0)
     )
 
     solve_model("solve satisfy;")
@@ -1494,7 +949,7 @@ def test_solve_model_returns_structured_result_for_unsatisfiable(
 ) -> None:
     _record_subprocess(
         monkeypatch,
-        FakeCompletedProcess(stdout=_STREAM_UNSAT, stderr="", returncode=0),
+        FakeCompletedProcess(stdout=STREAM_UNSAT, stderr="", returncode=0),
     )
 
     result = solve_model("constraint false;\nsolve satisfy;")
@@ -1516,7 +971,7 @@ def test_solve_model_satisfy_all_returns_ordered_solutions(
     # (not `optimal`); `solutions` keeps emission order and `solution` is the
     # last found.
     _record_subprocess(
-        monkeypatch, FakeCompletedProcess(stdout=_STREAM_SATISFY_ALL, stderr="", returncode=0)
+        monkeypatch, FakeCompletedProcess(stdout=STREAM_SATISFY_ALL, stderr="", returncode=0)
     )
 
     result = solve_model("solve satisfy;")
@@ -1536,7 +991,7 @@ def test_solve_model_surfaces_stream_error_into_stderr(
     # stdout with an empty real stderr; the runner classifies `error` and lifts
     # the message into the diagnostic stderr channel so the client can repair.
     _record_subprocess(
-        monkeypatch, FakeCompletedProcess(stdout=_STREAM_ERROR, stderr="", returncode=1)
+        monkeypatch, FakeCompletedProcess(stdout=STREAM_ERROR, stderr="", returncode=1)
     )
 
     result = solve_model("var 1..3: x\nsolve satisfy;")
@@ -1619,7 +1074,7 @@ def test_solve_model_decodes_output_as_utf8(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     calls = _record_subprocess(
-        monkeypatch, FakeCompletedProcess(stdout=_STREAM_SATISFY, stderr="", returncode=0)
+        monkeypatch, FakeCompletedProcess(stdout=STREAM_SATISFY, stderr="", returncode=0)
     )
 
     solve_model("solve satisfy;")
@@ -1640,7 +1095,7 @@ def test_solve_model_writes_model_file_as_utf8(
 
     monkeypatch.setattr(Path, "write_text", _spy_write_text)
     _record_subprocess(
-        monkeypatch, FakeCompletedProcess(stdout=_STREAM_SATISFY, stderr="", returncode=0)
+        monkeypatch, FakeCompletedProcess(stdout=STREAM_SATISFY, stderr="", returncode=0)
     )
 
     solve_model("% café λ\nsolve satisfy;")
@@ -1872,14 +1327,14 @@ def test_find_unsat_core_mus_found_preserves_raw_output(
 ) -> None:
     _record_subprocess(
         monkeypatch,
-        FakeCompletedProcess(stdout=_UNSAT_CORE_STDOUT, stderr="", returncode=0),
+        FakeCompletedProcess(stdout=UNSAT_CORE_STDOUT, stderr="", returncode=0),
     )
 
-    result = find_unsat_core(_UNSAT_CORE_MODEL)
+    result = find_unsat_core(UNSAT_CORE_MODEL)
 
     assert result.status == "mus_found"
     assert len(result.core) == 2
-    assert result.stdout == _UNSAT_CORE_STDOUT
+    assert result.stdout == UNSAT_CORE_STDOUT
     assert "minimal unsatisfiable subset" in result.message
 
 
@@ -1889,10 +1344,10 @@ def test_find_unsat_core_command_shape(
 ) -> None:
     calls = _record_subprocess(
         monkeypatch,
-        FakeCompletedProcess(stdout=_UNSAT_CORE_STDOUT, stderr="", returncode=0),
+        FakeCompletedProcess(stdout=UNSAT_CORE_STDOUT, stderr="", returncode=0),
     )
 
-    find_unsat_core(_UNSAT_CORE_MODEL)
+    find_unsat_core(UNSAT_CORE_MODEL)
 
     cmd = calls[0]["args"][0]
     kwargs = calls[0]["kwargs"]
@@ -1909,7 +1364,7 @@ def test_find_unsat_core_command_shape(
     assert "--json-stream" not in cmd
     assert not ({"-f", "-p", "-r", "-a"} & set(cmd))
     assert calls[0]["model_path_existed"]
-    assert calls[0]["model_contents"] == _UNSAT_CORE_MODEL
+    assert calls[0]["model_contents"] == UNSAT_CORE_MODEL
     assert kwargs["cwd"] == str(model_path.parent)
 
 
@@ -1919,10 +1374,10 @@ def test_find_unsat_core_forwards_inline_data_positionally(
 ) -> None:
     calls = _record_subprocess(
         monkeypatch,
-        FakeCompletedProcess(stdout=_UNSAT_CORE_STDOUT, stderr="", returncode=0),
+        FakeCompletedProcess(stdout=UNSAT_CORE_STDOUT, stderr="", returncode=0),
     )
 
-    result = find_unsat_core(_UNSAT_CORE_MODEL, data="lo = 5;")
+    result = find_unsat_core(UNSAT_CORE_MODEL, data="lo = 5;")
 
     cmd = calls[0]["args"][0]
     # findMUS only accepts a positional data file, never the --data flag.
@@ -1944,10 +1399,10 @@ def test_find_unsat_core_without_data_passes_only_model(
 ) -> None:
     calls = _record_subprocess(
         monkeypatch,
-        FakeCompletedProcess(stdout=_UNSAT_CORE_STDOUT, stderr="", returncode=0),
+        FakeCompletedProcess(stdout=UNSAT_CORE_STDOUT, stderr="", returncode=0),
     )
 
-    find_unsat_core(_UNSAT_CORE_MODEL)
+    find_unsat_core(UNSAT_CORE_MODEL)
 
     cmd = calls[0]["args"][0]
     assert not any(str(arg).endswith(".dzn") for arg in cmd)
@@ -1964,7 +1419,7 @@ def test_find_unsat_core_no_core_clears_structured_core(
         FakeCompletedProcess(stdout="=====UNKNOWN=====\n", stderr="", returncode=0),
     )
 
-    result = find_unsat_core(_UNSAT_CORE_MODEL)
+    result = find_unsat_core(UNSAT_CORE_MODEL)
 
     assert result.status == "no_core"
     assert result.core == []
@@ -1980,7 +1435,7 @@ def test_find_unsat_core_error_clears_structured_core_and_preserves_stderr(
         FakeCompletedProcess(stdout="", stderr=stderr, returncode=1),
     )
 
-    result = find_unsat_core(_UNSAT_CORE_MODEL)
+    result = find_unsat_core(UNSAT_CORE_MODEL)
 
     assert result.status == "error"
     assert result.core == []
@@ -2001,7 +1456,7 @@ def test_find_unsat_core_timeout_with_bytes_payload_decodes(
 
     monkeypatch.setattr("openconstraint_mcp.minizinc.core.subprocess.run", _fake_run)
 
-    result = find_unsat_core(_UNSAT_CORE_MODEL)
+    result = find_unsat_core(UNSAT_CORE_MODEL)
 
     assert result.status == "timeout"
     assert result.core == []
@@ -2033,12 +1488,12 @@ def test_find_unsat_core_rejects_non_positive_timeout(
     monkeypatch.setattr("openconstraint_mcp.minizinc.core.subprocess.run", _fail_if_called)
 
     with pytest.raises(ValueError, match="positive"):
-        find_unsat_core(_UNSAT_CORE_MODEL, timeout_ms=bad_timeout)
+        find_unsat_core(UNSAT_CORE_MODEL, timeout_ms=bad_timeout)
 
 
 def test_find_unsat_core_raises_when_runtime_missing(fake_runtime_dir: Path) -> None:
     with pytest.raises(RuntimeMissingError) as exc_info:
-        find_unsat_core(_UNSAT_CORE_MODEL)
+        find_unsat_core(UNSAT_CORE_MODEL)
     message = str(exc_info.value)
     assert "install-runtime" in message
     assert "MiniZinc" in message
@@ -2054,7 +1509,7 @@ def test_find_unsat_core_wraps_oserror_as_execution_error(
     monkeypatch.setattr("openconstraint_mcp.minizinc.core.subprocess.run", _fake_run)
 
     with pytest.raises(MiniZincExecutionError) as exc_info:
-        find_unsat_core(_UNSAT_CORE_MODEL)
+        find_unsat_core(UNSAT_CORE_MODEL)
     assert "install-runtime" in str(exc_info.value)
 
 
@@ -2064,10 +1519,10 @@ def test_find_unsat_core_uses_default_timeout(
 ) -> None:
     calls = _record_subprocess(
         monkeypatch,
-        FakeCompletedProcess(stdout=_UNSAT_CORE_STDOUT, stderr="", returncode=0),
+        FakeCompletedProcess(stdout=UNSAT_CORE_STDOUT, stderr="", returncode=0),
     )
 
-    find_unsat_core(_UNSAT_CORE_MODEL)
+    find_unsat_core(UNSAT_CORE_MODEL)
 
     cmd = calls[0]["args"][0]
     assert cmd[cmd.index("--time-limit") + 1] == str(DEFAULT_UNSAT_CORE_TIMEOUT_MS)
