@@ -1,35 +1,20 @@
 from __future__ import annotations
 
-import json
 from typing import Any
 
 from openconstraint_mcp.minizinc.checker import _parse_checker_stream
+from tests.minizinc.helpers import (
+    VIOLATION_DIAGNOSTIC,
+    checker_pass,
+    checker_violation,
+    solution_obj,
+    stream,
+)
 
 # Captured `--json-stream --solution-checker` transcripts from the managed
 # MiniZinc 2.9.7 runtime (org.gecode.gecode). One JSON object per line; the
 # checker object is emitted immediately BEFORE the solution it validated, so the
 # per-checker entries are positionally aligned with the solve parser's solutions.
-
-
-def _stream(*objects: dict[str, Any]) -> str:
-    return "".join(json.dumps(obj) + "\n" for obj in objects)
-
-
-def _pass_checker(default_text: str) -> dict[str, Any]:
-    # An output-style checker that ran cleanly: the verdict text lives in the
-    # checker object's top-level `output.default` (author CORRECT/INCORRECT text).
-    return {
-        "type": "checker",
-        "messages": [
-            {
-                "type": "solution",
-                "output": {"default": default_text, "raw": default_text},
-                "sections": ["default", "raw"],
-            }
-        ],
-        "output": {"default": default_text, "raw": default_text},
-        "sections": ["default", "raw"],
-    }
 
 
 def _pass_checker_nested_only(default_text: str) -> dict[str, Any]:
@@ -49,37 +34,9 @@ def _pass_checker_nested_only(default_text: str) -> dict[str, Any]:
     }
 
 
-_VIOLATION_DIAGNOSTIC = "model inconsistency detected: expression evaluated to false"
-
-
-def _violation_checker() -> dict[str, Any]:
-    # A constraint-style checker that rejected the solution: no top-level `output`,
-    # a nested warning diagnostic, and a nested `status: UNSATISFIABLE` — the one
-    # machine-readable "this solution is invalid" signal.
-    return {
-        "type": "checker",
-        "messages": [
-            {
-                "type": "warning",
-                "location": {"filename": "checker.mzc", "firstLine": 5},
-                "message": _VIOLATION_DIAGNOSTIC,
-            },
-            {"type": "status", "status": "UNSATISFIABLE"},
-        ],
-    }
-
-
-def _solution(default: str, values: dict[str, Any]) -> dict[str, Any]:
-    return {
-        "type": "solution",
-        "output": {"default": default, "raw": default, "json": values},
-        "sections": ["default", "raw", "json"],
-    }
-
-
 def test_parse_checker_stream_correct_verdict_has_no_violation() -> None:
     checks = _parse_checker_stream(
-        _stream(_pass_checker("CORRECT\n"), _solution("x=1 y=2\n", {"x": 1, "y": 2}))
+        stream(checker_pass("CORRECT\n"), solution_obj("x=1 y=2\n", {"x": 1, "y": 2}))
     )
     assert len(checks) == 1
     assert checks[0].violation is False
@@ -91,7 +48,7 @@ def test_parse_checker_stream_incorrect_text_is_not_adjudicated() -> None:
     # server must surface it verbatim WITHOUT marking a violation. Only a nested
     # UNSATISFIABLE flips `violation`.
     checks = _parse_checker_stream(
-        _stream(_pass_checker("INCORRECT\n"), _solution("x=3 y=1\n", {"x": 3, "y": 1}))
+        stream(checker_pass("INCORRECT\n"), solution_obj("x=3 y=1\n", {"x": 3, "y": 1}))
     )
     assert len(checks) == 1
     assert checks[0].violation is False
@@ -104,9 +61,9 @@ def test_parse_checker_stream_recovers_verdict_from_nested_solution_only() -> No
     # `output.default` rather than falling through to absent diagnostics (which
     # would lose the verdict and leave `output` empty).
     checks = _parse_checker_stream(
-        _stream(
+        stream(
             _pass_checker_nested_only("CORRECT\n"),
-            _solution("x=1 y=2\n", {"x": 1, "y": 2}),
+            solution_obj("x=1 y=2\n", {"x": 1, "y": 2}),
         )
     )
     assert len(checks) == 1
@@ -116,12 +73,12 @@ def test_parse_checker_stream_recovers_verdict_from_nested_solution_only() -> No
 
 def test_parse_checker_stream_constraint_violation_flags_true() -> None:
     checks = _parse_checker_stream(
-        _stream(_violation_checker(), _solution("x=1 y=2\n", {"x": 1, "y": 2}))
+        stream(checker_violation(), solution_obj("x=1 y=2\n", {"x": 1, "y": 2}))
     )
     assert len(checks) == 1
     assert checks[0].violation is True
     # The diagnostic text falls back from the nested warning message.
-    assert checks[0].output == _VIOLATION_DIAGNOSTIC
+    assert checks[0].output == VIOLATION_DIAGNOSTIC
 
 
 def test_parse_checker_stream_multi_solution_mix_preserves_order_and_flags() -> None:
@@ -130,20 +87,20 @@ def test_parse_checker_stream_multi_solution_mix_preserves_order_and_flags() -> 
     # rejected solutions are still part of the stream (they remain in
     # solve.solutions — proved at the core/integration layer).
     checks = _parse_checker_stream(
-        _stream(
+        stream(
             {"type": "statistics", "statistics": {"method": "satisfy"}},
-            _violation_checker(),
-            _solution("x=1 y=2\n", {"x": 1, "y": 2}),
-            _violation_checker(),
-            _solution("x=1 y=3\n", {"x": 1, "y": 3}),
-            _pass_checker("checked x=2\n"),
-            _solution("x=2 y=3\n", {"x": 2, "y": 3}),
+            checker_violation(),
+            solution_obj("x=1 y=2\n", {"x": 1, "y": 2}),
+            checker_violation(),
+            solution_obj("x=1 y=3\n", {"x": 1, "y": 3}),
+            checker_pass("checked x=2\n"),
+            solution_obj("x=2 y=3\n", {"x": 2, "y": 3}),
             {"type": "status", "status": "ALL_SOLUTIONS"},
             {"type": "statistics", "statistics": {"nSolutions": 3}},
         )
     )
     assert [c.violation for c in checks] == [True, True, False]
-    assert checks[0].output == _VIOLATION_DIAGNOSTIC
+    assert checks[0].output == VIOLATION_DIAGNOSTIC
     assert checks[2].output == "checked x=2\n"
 
 
@@ -153,8 +110,8 @@ def test_parse_checker_stream_no_checker_objects_returns_empty() -> None:
     # not the parser's — the leaf only reports what checker objects it saw.
     assert (
         _parse_checker_stream(
-            _stream(
-                _solution("x=1 y=2\n", {"x": 1, "y": 2}),
+            stream(
+                solution_obj("x=1 y=2\n", {"x": 1, "y": 2}),
                 {"type": "status", "status": "SATISFIED"},
             )
         )
@@ -165,7 +122,7 @@ def test_parse_checker_stream_no_checker_objects_returns_empty() -> None:
 def test_parse_checker_stream_skips_truncated_final_line() -> None:
     # A hard timeout can cut the final object mid-line; the unparseable tail is
     # skipped and the fully-received checker verdict is kept.
-    truncated = _stream(_pass_checker("CORRECT\n")) + '{"type": "checker", "messa'
+    truncated = stream(checker_pass("CORRECT\n")) + '{"type": "checker", "messa'
     checks = _parse_checker_stream(truncated)
     assert len(checks) == 1
     assert checks[0].output == "CORRECT\n"
