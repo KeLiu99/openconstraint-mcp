@@ -69,7 +69,7 @@ def install_runtime(
     from .runtime_install.core import (
         check_supported_platform,
         install_managed_runtime,
-        is_managed_runtime_dir,
+        validate_install_target,
     )
     from .runtime_install.errors import RuntimeInstallError
 
@@ -83,34 +83,27 @@ def install_runtime(
 
     if runtime_dir is not None:
         target = runtime_dir
+    elif yes or not _stdin_is_tty():
+        target = get_runtime_dir()
     else:
         default = get_runtime_dir()
-        if _stdin_is_tty() and not yes:
-            answer = typer.prompt(
-                f"Install MiniZinc runtime at [{default}]",
-                default=str(default),
-                show_default=False,
-            )
-            target = Path(answer.strip() or str(default))
-        else:
-            target = default
+        answer = typer.prompt(
+            f"Install MiniZinc runtime at [{default}]",
+            default=str(default),
+            show_default=False,
+        )
+        target = Path(answer.strip() or str(default))
 
-    # Resolve once here so the CLI's pre-checks and error messages observe the
-    # exact directory install_managed_runtime will operate on (it resolves too).
-    target_resolved = target.expanduser().resolve()
-    if target_resolved.exists() and not target_resolved.is_dir():
-        _console.print(f"[red]Target exists but is not a directory: {target_resolved}[/red]")
-        raise typer.Exit(code=1)
+    target_resolved = target.expanduser()
+    try:
+        target_resolved = validate_install_target(target_resolved)
+    except RuntimeInstallError as exc:
+        _console.print(f"[red]{exc}[/red]")
+        raise typer.Exit(code=1) from exc
 
     effective_yes = yes
     if target_resolved.is_dir() and any(target_resolved.iterdir()):
-        if not is_managed_runtime_dir(target_resolved):
-            _console.print(
-                f"[red]Refusing to install into {target_resolved}: this directory "
-                "is not empty and does not look like a prior managed install. "
-                "Pick an empty directory or remove the contents yourself.[/red]"
-            )
-            raise typer.Exit(code=1)
+        # At this point validate_install_target guarantees it is a managed installation.
         if yes:
             effective_yes = True
         elif _stdin_is_tty():
