@@ -119,15 +119,32 @@ def _check_stale_backup(parent: Path, runtime_dir: Path) -> None:
         )
 
 
-def _check_nonempty_runtime_dir_can_be_replaced(runtime_dir: Path, *, yes: bool) -> None:
-    """Raise unless ``runtime_dir`` is a managed install the user agreed to replace."""
-    if not is_managed_runtime_dir(runtime_dir):
+def validate_install_target(runtime_dir: Path) -> Path:
+    """Resolve *runtime_dir* and enforce target-directory invariants.
+
+    Returns the resolved path.  Raises :class:`RuntimeInstallError` when the
+    target is a non-directory file or is a non-empty directory that does not
+    contain a prior managed installation.
+    """
+    runtime_dir = runtime_dir.resolve()
+    if runtime_dir.exists() and not runtime_dir.is_dir():
+        raise RuntimeInstallError(f"target exists but is not a directory: {runtime_dir}")
+    if (
+        runtime_dir.is_dir()
+        and any(runtime_dir.iterdir())
+        and not is_managed_runtime_dir(runtime_dir)
+    ):
         raise RuntimeInstallError(
             f"refusing to overwrite {runtime_dir}: this directory is not "
             "empty and does not look like a prior managed install (no "
             f"{MANAGED_RUNTIME_MARKER} marker). Pick an empty directory or "
             "remove the contents yourself before re-running install-runtime."
         )
+    return runtime_dir
+
+
+def _check_nonempty_runtime_dir_can_be_replaced(runtime_dir: Path, *, yes: bool) -> None:
+    """Raise unless the user agreed to replace a prior managed installation."""
     if not yes:
         raise RuntimeInstallError(
             f"refusing to overwrite non-empty runtime directory {runtime_dir}; "
@@ -205,10 +222,7 @@ def install_managed_runtime(
 
     check_supported_platform()
 
-    runtime_dir = runtime_dir.resolve()
-    if runtime_dir.exists() and not runtime_dir.is_dir():
-        raise RuntimeInstallError(f"target exists but is not a directory: {runtime_dir}")
-
+    runtime_dir = validate_install_target(runtime_dir)
     if runtime_dir.exists() and any(runtime_dir.iterdir()):
         _check_nonempty_runtime_dir_can_be_replaced(runtime_dir, yes=yes)
 
