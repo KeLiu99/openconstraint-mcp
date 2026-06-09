@@ -119,46 +119,24 @@ def _check_stale_backup(parent: Path, runtime_dir: Path) -> None:
         )
 
 
-def install_managed_runtime(
-    runtime_dir: Path,
-    *,
-    yes: bool = False,
-    console: Console | None = None,
-) -> Path:
-    """Install the managed MiniZinc runtime into ``runtime_dir`` and return it."""
-    if console is None:
-        console = Console(quiet=True)
+def _check_nonempty_runtime_dir_can_be_replaced(runtime_dir: Path, *, yes: bool) -> None:
+    """Raise unless ``runtime_dir`` is a managed install the user agreed to replace."""
+    if not is_managed_runtime_dir(runtime_dir):
+        raise RuntimeInstallError(
+            f"refusing to overwrite {runtime_dir}: this directory is not "
+            "empty and does not look like a prior managed install (no "
+            f"{MANAGED_RUNTIME_MARKER} marker). Pick an empty directory or "
+            "remove the contents yourself before re-running install-runtime."
+        )
+    if not yes:
+        raise RuntimeInstallError(
+            f"refusing to overwrite non-empty runtime directory {runtime_dir}; "
+            "re-run with --yes to replace a prior managed install."
+        )
 
-    check_supported_platform()
 
-    runtime_dir = runtime_dir.resolve()
-    if runtime_dir.exists() and not runtime_dir.is_dir():
-        raise RuntimeInstallError(f"target exists but is not a directory: {runtime_dir}")
-
-    if runtime_dir.exists() and any(runtime_dir.iterdir()):
-        if not is_managed_runtime_dir(runtime_dir):
-            raise RuntimeInstallError(
-                f"refusing to overwrite {runtime_dir}: this directory is not "
-                "empty and does not look like a prior managed install (no "
-                f"{MANAGED_RUNTIME_MARKER} marker). Pick an empty directory or "
-                "remove the contents yourself before re-running install-runtime."
-            )
-        if not yes:
-            raise RuntimeInstallError(
-                f"refusing to overwrite non-empty runtime directory {runtime_dir}; "
-                "re-run with --yes to replace a prior managed install."
-            )
-
-    parent = runtime_dir.parent
-    parent.mkdir(parents=True, exist_ok=True)
-    _remove_stale_staging(parent, runtime_dir.name)
-    _check_stale_backup(parent, runtime_dir)
-
-    pid = os.getpid()
-    staging = parent / f".{runtime_dir.name}.staging.{pid}"
-    backup = parent / f".{runtime_dir.name}.backup.{pid}"
-
-    # Phase 1 — no target mutation. Download, extract, smoke-check into staging.
+def _prepare_staging_runtime(staging: Path, console: Console) -> None:
+    """Download, extract, smoke-check, and mark a runtime in ``staging``."""
     try:
         if staging.exists():
             shutil.rmtree(staging)
@@ -174,7 +152,14 @@ def install_managed_runtime(
             shutil.rmtree(staging, ignore_errors=True)
         raise
 
-    # Phase 2 — rollback-safe swap.
+
+def _swap_staging_into_place(
+    staging: Path,
+    runtime_dir: Path,
+    backup: Path,
+    console: Console,
+) -> None:
+    """Swap ``staging`` into ``runtime_dir``, restoring or cleaning up the backup."""
     moved_aside = False
     target_swapped = False
     try:
@@ -206,6 +191,38 @@ def install_managed_runtime(
                 f"{backup} could not be removed ({cleanup_exc}). Remove it "
                 f"manually with `rm -rf {backup}`."
             )
+
+
+def install_managed_runtime(
+    runtime_dir: Path,
+    *,
+    yes: bool = False,
+    console: Console | None = None,
+) -> Path:
+    """Install the managed MiniZinc runtime into ``runtime_dir`` and return it."""
+    if console is None:
+        console = Console(quiet=True)
+
+    check_supported_platform()
+
+    runtime_dir = runtime_dir.resolve()
+    if runtime_dir.exists() and not runtime_dir.is_dir():
+        raise RuntimeInstallError(f"target exists but is not a directory: {runtime_dir}")
+
+    if runtime_dir.exists() and any(runtime_dir.iterdir()):
+        _check_nonempty_runtime_dir_can_be_replaced(runtime_dir, yes=yes)
+
+    parent = runtime_dir.parent
+    parent.mkdir(parents=True, exist_ok=True)
+    _remove_stale_staging(parent, runtime_dir.name)
+    _check_stale_backup(parent, runtime_dir)
+
+    pid = os.getpid()
+    staging = parent / f".{runtime_dir.name}.staging.{pid}"
+    backup = parent / f".{runtime_dir.name}.backup.{pid}"
+
+    _prepare_staging_runtime(staging, console)
+    _swap_staging_into_place(staging, runtime_dir, backup, console)
 
     console.print(f"[green]Installed MiniZinc {MINIZINC_VERSION} at {runtime_dir}[/green]")
     return runtime_dir
