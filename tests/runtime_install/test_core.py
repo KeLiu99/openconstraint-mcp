@@ -10,6 +10,7 @@ from rich.console import Console
 
 from openconstraint_mcp.runtime_install.core import (
     MANAGED_RUNTIME_MARKER,
+    _swap_staging_into_place,
     _write_runtime_marker,
     install_managed_runtime,
 )
@@ -259,3 +260,39 @@ def test_install_rename_failure_restores_prior_runtime(
     # … and no staging/backup siblings remain.
     siblings = [p for p in tmp_path.iterdir() if p.name.startswith(f".{target.name}.")]
     assert siblings == []
+
+
+def test_swap_staging_into_place_raises_recovery_error_when_restore_fails(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    target = tmp_path / "runtime"
+    target.mkdir()
+    _write_runtime_marker(target)
+    (target / "prior-evidence").write_text("prior install")
+
+    staging = tmp_path / ".runtime.staging.test"
+    staging.mkdir()
+    (staging / "new-evidence").write_text("new install")
+    backup = tmp_path / ".runtime.backup.test"
+
+    real_rename = Path.rename
+
+    def _fail_stage_and_restore_rename(self: Path, target_path: Path | str) -> Path:
+        if self in {staging, backup}:
+            raise OSError(f"simulated rename failure for {self.name}")
+        return real_rename(self, target_path)
+
+    monkeypatch.setattr(Path, "rename", _fail_stage_and_restore_rename)
+
+    with pytest.raises(RuntimeInstallError) as exc_info:
+        _swap_staging_into_place(staging, target, backup, _quiet_console())
+
+    message = str(exc_info.value)
+    assert "prior runtime could not be restored" in message
+    assert str(backup) in message
+    assert f"mv {backup} {target}" in message
+    assert not staging.exists()
+    assert not target.exists()
+    assert (backup / MANAGED_RUNTIME_MARKER).is_file()
+    assert (backup / "prior-evidence").read_text() == "prior install"
