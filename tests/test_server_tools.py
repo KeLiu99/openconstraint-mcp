@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import subprocess
+import threading
 from pathlib import Path
 from typing import Any
 
@@ -11,6 +12,9 @@ from mcp.types import CallToolResult
 # Tests deliberately white-box server internals, which are private by design.
 # noinspection PyProtectedMember
 from openconstraint_mcp.server import (
+    _CONTEXT_UNAVAILABLE_MESSAGE,
+    _report_status,
+    _run_blocking,
     create_mcp_server,
 )
 from tests.minizinc.helpers import (
@@ -1506,3 +1510,282 @@ async def test_solve_minizinc_files_with_checker_runtime_missing_surfaces_action
     message = str(exc_info.value)
     assert "install-runtime" in message
     assert "MiniZinc" in message
+
+
+# --- _report_status: dual-channel (progress + log) milestone helper ---------
+
+
+class _FakeStatusContext:
+    """Records report_progress/info calls; optionally raises from both."""
+
+    def __init__(self, fail_with: Exception | None = None) -> None:
+        self.progress_calls: list[tuple[float, float | None, str | None]] = []
+        self.info_messages: list[str] = []
+        self._fail_with = fail_with
+
+    async def report_progress(
+        self, progress: float, total: float | None = None, message: str | None = None
+    ) -> None:
+        if self._fail_with is not None:
+            raise self._fail_with
+        self.progress_calls.append((progress, total, message))
+
+    async def info(self, message: str, **extra: object) -> None:
+        if self._fail_with is not None:
+            raise self._fail_with
+        self.info_messages.append(message)
+
+
+@pytest.mark.asyncio
+async def test_report_status_noops_without_context() -> None:
+    await _report_status(None, 1, "validating request")
+
+
+@pytest.mark.asyncio
+async def test_report_status_sends_progress_without_total_by_default() -> None:
+    ctx = _FakeStatusContext()
+
+    await _report_status(ctx, 2, "solve is running")  # type: ignore[arg-type]
+
+    assert ctx.progress_calls == [(2, None, "solve is running")]
+
+
+@pytest.mark.asyncio
+async def test_report_status_sends_info_log_with_same_message() -> None:
+    ctx = _FakeStatusContext()
+
+    await _report_status(ctx, 2, "solve is running")  # type: ignore[arg-type]
+
+    assert ctx.info_messages == ["solve is running"]
+
+
+@pytest.mark.asyncio
+async def test_report_status_noops_when_request_context_unavailable() -> None:
+    # FastMCP raises this exact ValueError for direct calls outside a real
+    # JSON-RPC request (the mode every mcp.call_tool test in this file uses).
+    ctx = _FakeStatusContext(fail_with=ValueError(_CONTEXT_UNAVAILABLE_MESSAGE))
+
+    await _report_status(ctx, 1, "validating request")  # type: ignore[arg-type]
+
+
+@pytest.mark.asyncio
+async def test_report_status_does_not_swallow_unrelated_value_error() -> None:
+    boom = ValueError("unexpected internal error")
+    ctx = _FakeStatusContext(fail_with=boom)
+
+    with pytest.raises(ValueError) as exc_info:
+        await _report_status(ctx, 1, "validating request")  # type: ignore[arg-type]
+
+    assert exc_info.value is boom
+
+
+# --- milestone progress: schema stability and per-family stage schedules ----
+
+
+def _tool_fn(mcp: Any, name: str) -> Any:
+    """Return a registered tool's underlying (decorated) function for direct calls."""
+    return mcp._tool_manager.get_tool(name).fn
+
+
+def _assert_dual_channel_schedule(ctx: _FakeStatusContext, final_message: str) -> None:
+    """Assert the standard four-stage schedule went out on both channels."""
+    assert [call[0] for call in ctx.progress_calls] == [1, 2, 3, 4]
+    assert all(call[1] is None for call in ctx.progress_calls)
+    assert ctx.progress_calls[-1][2] == final_message
+    assert ctx.info_messages == [call[2] for call in ctx.progress_calls]
+
+
+@pytest.mark.asyncio
+async def test_tool_schemas_do_not_expose_context_or_progress_arguments() -> None:
+    # The ctx parameter is protocol plumbing: FastMCP must keep it (and any
+    # progress-token argument) out of every advertised tool input schema.
+    mcp = create_mcp_server()
+    tools = await mcp.list_tools()
+
+    for tool in tools:
+        properties = set(tool.inputSchema.get("properties", {}).keys())
+        assert not ({"ctx", "context", "progress_token", "progressToken"} & properties), tool.name
+
+
+@pytest.mark.asyncio
+async def test_solve_minizinc_model_reports_stage_schedule(
+    fake_minizinc_binary: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def _fake_run(*args: object, **kwargs: object) -> FakeCompletedProcess:
+        return FakeCompletedProcess(
+            stdout=stream(solution_obj("x = 3;\n", {"x": 3})), stderr="", returncode=0
+        )
+
+    monkeypatch.setattr("openconstraint_mcp.minizinc.core.subprocess.run", _fake_run)
+    mcp = create_mcp_server()
+    ctx = _FakeStatusContext()
+
+    await _tool_fn(mcp, "solve_minizinc_model")(
+        model="var 1..5: x;\nconstraint x > 2;\nsolve satisfy;", ctx=ctx
+    )
+
+    _assert_dual_channel_schedule(ctx, "Solve complete")
+    assert ctx.progress_calls[1][2] == "MiniZinc solve is running"
+
+
+@pytest.mark.asyncio
+async def test_solve_minizinc_model_with_checker_reports_checker_stage_messages(
+    fake_minizinc_binary: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def _fake_run(*args: object, **kwargs: object) -> FakeCompletedProcess:
+        return FakeCompletedProcess(
+            stdout=stream(checker_pass("CORRECT\n"), solution_obj("x = 3;\n", {"x": 3})),
+            stderr="",
+            returncode=0,
+        )
+
+    monkeypatch.setattr("openconstraint_mcp.minizinc.core.subprocess.run", _fake_run)
+    mcp = create_mcp_server()
+    ctx = _FakeStatusContext()
+
+    await _tool_fn(mcp, "solve_minizinc_model")(
+        model="var 1..5: x;\nconstraint x > 2;\nsolve satisfy;",
+        checker="output [\"ok\"];",
+        ctx=ctx,
+    )
+
+    assert ctx.progress_calls[1][2] == "MiniZinc solve with solution checker is running"
+    assert ctx.progress_calls[2][2] == "MiniZinc finished; parsing solve and checker streams"
+
+
+@pytest.mark.asyncio
+async def test_check_minizinc_model_reports_stage_schedule(
+    fake_minizinc_binary: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        "openconstraint_mcp.minizinc.core.subprocess.run",
+        lambda *a, **k: FakeCompletedProcess(stdout="", stderr="", returncode=0),
+    )
+    mcp = create_mcp_server()
+    ctx = _FakeStatusContext()
+
+    await _tool_fn(mcp, "check_minizinc_model")(model="solve satisfy;", ctx=ctx)
+
+    _assert_dual_channel_schedule(ctx, "Check complete")
+
+
+@pytest.mark.asyncio
+async def test_inspect_minizinc_model_reports_stage_schedule(
+    fake_minizinc_binary: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        "openconstraint_mcp.minizinc.core.subprocess.run",
+        lambda *a, **k: FakeCompletedProcess(stdout=_INSPECT_STDOUT, stderr="", returncode=0),
+    )
+    mcp = create_mcp_server()
+    ctx = _FakeStatusContext()
+
+    await _tool_fn(mcp, "inspect_minizinc_model")(model="solve satisfy;", ctx=ctx)
+
+    _assert_dual_channel_schedule(ctx, "Inspection complete")
+
+
+@pytest.mark.asyncio
+async def test_find_unsat_core_reports_stage_schedule(
+    fake_minizinc_binary: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        "openconstraint_mcp.minizinc.core.subprocess.run",
+        lambda *a, **k: FakeCompletedProcess(stdout=UNSAT_CORE_STDOUT, stderr="", returncode=0),
+    )
+    mcp = create_mcp_server()
+    ctx = _FakeStatusContext()
+
+    await _tool_fn(mcp, "find_unsat_core")(model=UNSAT_CORE_MODEL, ctx=ctx)
+
+    _assert_dual_channel_schedule(ctx, "Unsat-core analysis complete")
+
+
+@pytest.mark.asyncio
+async def test_check_minizinc_files_reports_stage_schedule(
+    tmp_path: Path,
+    fake_minizinc_binary: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    model_path = tmp_path / "model.mzn"
+    model_path.write_text("solve satisfy;")
+    monkeypatch.setattr(
+        "openconstraint_mcp.minizinc.core.subprocess.run",
+        lambda *a, **k: FakeCompletedProcess(stdout="", stderr="", returncode=0),
+    )
+    mcp = create_mcp_server()
+    ctx = _FakeStatusContext()
+
+    await _tool_fn(mcp, "check_minizinc_files")(model_path=str(model_path), ctx=ctx)
+
+    _assert_dual_channel_schedule(ctx, "Check complete")
+
+
+@pytest.mark.asyncio
+async def test_check_minizinc_files_missing_path_still_raises_after_early_stages(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Path validation behavior is unchanged: the domain ValueError still
+    # surfaces through the decorated tool as its translated RuntimeError; only
+    # the pre-call stages were emitted before it fired.
+    def _fail_if_called(*args: object, **kwargs: object) -> None:
+        raise AssertionError("subprocess.run must not be invoked for a missing path")
+
+    monkeypatch.setattr("openconstraint_mcp.minizinc.core.subprocess.run", _fail_if_called)
+    mcp = create_mcp_server()
+    ctx = _FakeStatusContext()
+
+    with pytest.raises(RuntimeError) as exc_info:
+        await _tool_fn(mcp, "check_minizinc_files")(
+            model_path=str(tmp_path / "nope.mzn"), ctx=ctx
+        )
+
+    assert "does not exist" in str(exc_info.value)
+    assert [call[0] for call in ctx.progress_calls] == [1, 2]
+
+
+@pytest.mark.asyncio
+async def test_check_minizinc_model_compile_error_still_reports_final_stage(
+    fake_minizinc_binary: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # A compile error is a normal structured result, so the client still gets
+    # the closing milestone before the response.
+    monkeypatch.setattr(
+        "openconstraint_mcp.minizinc.core.subprocess.run",
+        lambda *a, **k: FakeCompletedProcess(
+            stdout="", stderr="Error: type error: undefined identifier 'xz'\n", returncode=1
+        ),
+    )
+    mcp = create_mcp_server()
+    ctx = _FakeStatusContext()
+
+    result = await _tool_fn(mcp, "check_minizinc_model")(
+        model="var 1..5: x;\nconstraint xz > 2;\nsolve satisfy;", ctx=ctx
+    )
+
+    assert result.status == "error"
+    assert ctx.progress_calls[-1] == (4, None, "Check complete")
+
+
+@pytest.mark.asyncio
+async def test_run_blocking_executes_off_the_event_loop_thread() -> None:
+    # The blocking MiniZinc call must leave the event loop free, or queued
+    # status notifications sit unwritten until the solve ends (PR #34 review).
+    loop_thread = threading.get_ident()
+    seen: list[int] = []
+
+    def _blocking() -> str:
+        seen.append(threading.get_ident())
+        return "done"
+
+    result = await _run_blocking(_blocking)
+
+    assert result == "done"
+    assert seen and seen[0] != loop_thread

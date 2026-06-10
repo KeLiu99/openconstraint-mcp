@@ -106,6 +106,46 @@ def test_as_mcp_error_returns_value_on_success() -> None:
     assert tool() == "ok"
 
 
+@pytest.mark.asyncio
+async def test_as_mcp_error_translates_domain_exception_from_async_tool() -> None:
+    # The async branch must translate inside the coroutine: a sync wrapper would
+    # return the un-awaited coroutine from `try` and never reach `except`.
+    boom = ValueError("model must not be empty")
+
+    @_as_mcp_error()
+    async def tool() -> None:
+        raise boom
+
+    with pytest.raises(RuntimeError) as exc_info:
+        await tool()
+
+    assert type(exc_info.value) is RuntimeError
+    assert str(exc_info.value) == str(boom)
+    assert exc_info.value.__cause__ is boom
+
+
+@pytest.mark.asyncio
+async def test_as_mcp_error_returns_value_from_async_tool_on_success() -> None:
+    @_as_mcp_error()
+    async def tool() -> str:
+        return "ok"
+
+    assert await tool() == "ok"
+
+
+@pytest.mark.asyncio
+async def test_as_mcp_error_does_not_translate_unlisted_exception_from_async_tool() -> None:
+    boom = KeyError("not in the caught set")
+
+    @_as_mcp_error()
+    async def tool() -> None:
+        raise boom
+
+    with pytest.raises(KeyError) as exc_info:
+        await tool()
+    assert exc_info.value is boom
+
+
 def test_as_mcp_error_preserves_signature_for_fastmcp() -> None:
     # FastMCP derives each tool's schema from the wrapped function's signature;
     # functools.wraps must keep it visible through the decorator.
@@ -126,16 +166,18 @@ def test_as_mcp_error_preserves_signature_for_fastmcp() -> None:
     "tool_name",
     ["solve_minizinc_model", "check_minizinc_model", "inspect_minizinc_model", "find_unsat_core"],
 )
-def test_string_tools_translate_value_error_with_cause(
+@pytest.mark.asyncio
+async def test_string_tools_translate_value_error_with_cause(
     tool_name: str, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     # An empty model raises ValueError before the runtime gate; the default caught
-    # set must convert it to a plain RuntimeError with the cause preserved.
+    # set must convert it to a plain RuntimeError with the cause preserved. The
+    # direct call passes no ctx, so the async wrappers must default it to None.
     monkeypatch.setattr("openconstraint_mcp.minizinc.core.subprocess.run", _no_subprocess)
     fn = _tool_fn(tool_name)
 
     with pytest.raises(RuntimeError) as exc_info:
-        fn(model="")
+        await fn(model="")
 
     assert type(exc_info.value) is RuntimeError
     assert "empty" in str(exc_info.value)
@@ -151,7 +193,8 @@ def test_string_tools_translate_value_error_with_cause(
         "find_unsat_core_files",
     ],
 )
-def test_file_tools_translate_value_error_with_cause(
+@pytest.mark.asyncio
+async def test_file_tools_translate_value_error_with_cause(
     tool_name: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     # A missing model path raises ValueError before the runtime gate; same
@@ -161,7 +204,7 @@ def test_file_tools_translate_value_error_with_cause(
     fn = _tool_fn(tool_name)
 
     with pytest.raises(RuntimeError) as exc_info:
-        fn(model_path=str(missing))
+        await fn(model_path=str(missing))
 
     assert type(exc_info.value) is RuntimeError
     assert "does not exist" in str(exc_info.value)
