@@ -552,6 +552,32 @@ entry model's basename in a different directory could have its spans
 mis-attributed to the entry model — a documented limitation of the best-effort
 core (raw `stdout` stays authoritative).
 
+### Progress and status notifications
+
+The eight long-running tools (`check_minizinc_model` / `check_minizinc_files`,
+`inspect_minizinc_model` / `inspect_minizinc_files`, `solve_minizinc_model` /
+`solve_minizinc_files`, `find_unsat_core` / `find_unsat_core_files`) emit
+status feedback while MiniZinc is running, on two MCP channels:
+
+- **Progress notifications** (`notifications/progress`) are sent only when the
+  client requests them by including `_meta.progressToken` in the tool-call
+  request. Values are small increasing stage counters (`1` validating, `2`
+  solver running, `3` parsing, `4` complete) with a short message; `total` is
+  deliberately omitted. They are **status updates, not a solver completion
+  percentage** — MiniZinc/CP-SAT expose no reliable cross-solver progress
+  signal, so render them as a spinner, stepper, or status text, never as a
+  determinate percent bar.
+- **Log notifications** (`notifications/message`, level `info`) carry the same
+  milestone messages and are sent for every request, no token required — so
+  clients that surface MCP server logs always show activity state.
+
+The MiniZinc subprocess runs in a worker thread, so both channels are
+delivered while the solve is still in flight and the server stays responsive
+to other requests during long runs. Both channels are local protocol messages
+to the connected client; nothing changes in any tool's input schema, output
+schema, or result semantics, and a client that supports neither channel simply
+sees the final result as before.
+
 ## MCP prompts
 
 The stdio server also exposes one MCP prompt for client-side LLMs to use:

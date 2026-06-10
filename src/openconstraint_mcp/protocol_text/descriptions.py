@@ -28,8 +28,12 @@ MCP_SERVER_INSTRUCTIONS = (
     "selected fields. Use `num_solutions` only with `org.gecode.gecode` or "
     "`org.chuffed.chuffed`, not the default `cp-sat`; for multiple optimal "
     "solutions, solve the optimization first, then re-solve as satisfaction "
-    "with the objective fixed to the proven optimum. All execution must use "
-    "the managed local MiniZinc "
+    "with the objective fixed to the proven optimum. The check/inspect/solve/"
+    "unsat-core tools emit optional status feedback while MiniZinc runs: MCP "
+    "progress notifications when the request carries `_meta.progressToken`, "
+    "plus info-level MCP log notifications always — stage markers, not a "
+    "solver completion percentage, so never render them as a percent bar. All "
+    "execution must use the managed local MiniZinc "
     "runtime; do not use remote solvers or a bare PATH minizinc."
 )
 
