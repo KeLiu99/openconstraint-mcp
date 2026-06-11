@@ -443,6 +443,44 @@ async def test_solve_constraint_problem_prompt_requires_item_table_when_applicab
     assert "selected/count" in lower
 
 
+@pytest.mark.asyncio
+async def test_solve_constraint_problem_prompt_offers_save_only_on_user_request() -> None:
+    text = await _get_prompt_text("solve_constraint_problem", {"problem": SAMPLE_PROBLEM})
+
+    # The save tool appears, but only as the optional post-success step gated
+    # on the user's explicit ask — never as a required part of the solve loop.
+    assert "save_verified_minizinc_model" in text
+    normalized = " ".join(text.split())
+    assert "asks" in normalized and "save" in normalized
+    assert "only if" in normalized.lower()
+
+
+@pytest.mark.asyncio
+async def test_solve_constraint_problem_prompt_save_step_follows_result_presentation() -> None:
+    text = await _get_prompt_text("solve_constraint_problem", {"problem": SAMPLE_PROBLEM})
+
+    # The save mention lives after the result-presentation step, so it cannot
+    # read as a pre-solve requirement.
+    assert text.index("save_verified_minizinc_model") > text.index("Present the result")
+
+
+@pytest.mark.asyncio
+async def test_solve_constraint_problem_prompt_save_step_keeps_path_choice_client_side() -> None:
+    text = await _get_prompt_text("solve_constraint_problem", {"problem": SAMPLE_PROBLEM})
+
+    # The client obtains the explicit absolute directory from the user (or its
+    # own picker); the server never opens a dialog — no OS UI is implied
+    # server-side.
+    save_block_lines = [
+        line for line in text.splitlines() if "dialog" in line.lower() or "picker" in line.lower()
+    ]
+    assert save_block_lines, "save guidance should address who owns the path choice"
+    assert "target_dir" in text
+    assert "absolute" in text
+    normalized = " ".join(text.split()).lower()
+    assert "opens no file dialog" in normalized
+
+
 def test_solve_descriptions_state_checker_suffix_and_nested_report() -> None:
     # The protocol descriptions must state plainly that checking is a solve option,
     # requires a `.mzc`/`.mzc.mzn` checker on the path side, and returns the nested

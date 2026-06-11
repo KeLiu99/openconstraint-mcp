@@ -1789,3 +1789,119 @@ async def test_run_blocking_executes_off_the_event_loop_thread() -> None:
 
     assert result == "done"
     assert seen and seen[0] != loop_thread
+
+
+# --- save_verified_minizinc_model -------------------------------------------
+
+
+_SAVE_TOOL_MODEL = "var 1..5: x;\nconstraint x > 2;\nsolve satisfy;\n"
+
+
+def _fake_save_subprocess(
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    check: FakeCompletedProcess,
+    solve: FakeCompletedProcess,
+) -> None:
+    """Route the save tool's two managed runs: `-c` → ``check``, else ``solve``."""
+
+    def _fake_run(*args: Any, **kwargs: Any) -> FakeCompletedProcess:
+        cmd = [str(part) for part in args[0]]
+        return check if "-c" in cmd else solve
+
+    monkeypatch.setattr("openconstraint_mcp.minizinc.core.subprocess.run", _fake_run)
+
+
+@pytest.mark.asyncio
+async def test_save_verified_minizinc_model_is_listed_with_expected_schema() -> None:
+    mcp = create_mcp_server()
+    tools = await mcp.list_tools()
+
+    tool = next(t for t in tools if t.name == "save_verified_minizinc_model")
+    properties = set(tool.inputSchema["properties"])
+    assert {
+        "model",
+        "target_dir",
+        "data",
+        "checker",
+        "problem",
+        "solver",
+        "timeout_ms",
+        "free_search",
+        "parallel",
+        "random_seed",
+        "all_solutions",
+        "num_solutions",
+        "overwrite",
+    } <= properties
+    # The trailing Context parameter is server plumbing, never client schema.
+    assert "ctx" not in properties
+    assert set(tool.inputSchema.get("required", [])) == {"model", "target_dir"}
+
+
+@pytest.mark.asyncio
+async def test_save_verified_minizinc_model_happy_path_saves(
+    fake_minizinc_binary: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    _fake_save_subprocess(
+        monkeypatch,
+        check=FakeCompletedProcess(stdout="", stderr="", returncode=0),
+        solve=FakeCompletedProcess(
+            stdout=stream(solution_obj("x=3\n", {"x": 3})), stderr="", returncode=0
+        ),
+    )
+    target = tmp_path / "saved-project"
+
+    mcp = create_mcp_server()
+    result = await mcp.call_tool(
+        "save_verified_minizinc_model",
+        {"model": _SAVE_TOOL_MODEL, "target_dir": str(target)},
+    )
+
+    structured = _structured(result)
+    assert structured["status"] == "saved"
+    assert structured["check"]["status"] == "ok"
+    assert structured["solve"]["status"] == "satisfied"
+    assert [entry["role"] for entry in structured["files"]] == [
+        "model",
+        "solve_result",
+        "manifest",
+    ]
+    text = _content_text(result)
+    assert str(target) in text
+    assert "saved" in text
+    assert (target / "model.mzn").read_text() == _SAVE_TOOL_MODEL
+
+
+@pytest.mark.asyncio
+async def test_save_verified_minizinc_model_not_verified_is_normal_result(
+    fake_minizinc_binary: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    # A failed verification gate is a structured outcome the client reasons
+    # about — a normal tool result, not an MCP exception.
+    _fake_save_subprocess(
+        monkeypatch,
+        check=FakeCompletedProcess(
+            stdout="", stderr="Error: type error: undefined identifier 'xz'\n", returncode=1
+        ),
+        solve=FakeCompletedProcess(stdout="", stderr="", returncode=0),
+    )
+    target = tmp_path / "saved-project"
+
+    mcp = create_mcp_server()
+    result = await mcp.call_tool(
+        "save_verified_minizinc_model",
+        {"model": _SAVE_TOOL_MODEL, "target_dir": str(target)},
+    )
+
+    structured = _structured(result)
+    assert structured["status"] == "not_verified"
+    assert structured["check"]["status"] == "error"
+    assert structured["solve"] is None
+    assert structured["files"] == []
+    assert "nothing was written" in _content_text(result)
+    assert not target.exists()

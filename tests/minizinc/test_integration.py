@@ -22,6 +22,7 @@ from openconstraint_mcp.minizinc.core import (
     find_unsat_core_path,
     inspect_model,
     list_solvers,
+    save_verified_model,
     solve_model,
     solve_model_path,
 )
@@ -615,3 +616,33 @@ def test_solve_model_path_with_checker_composes_with_all_solutions(tmp_path: Pat
     assert result.checker.status == "completed"
     assert len(result.checker.checks) == len(result.solutions)
     assert all(check.violation is False for check in result.checker.checks)
+
+
+# --- save_verified_model (verified save end to end) -------------------------
+
+
+def test_save_verified_model_writes_project_end_to_end(tmp_path: Path) -> None:
+    # The save gate composes two real managed runs (compile check, then solve)
+    # with the staged commit; per the project rule, gate behavior built from
+    # real solver runs gets at least one real-binary check beyond mocked argv.
+    target = tmp_path / "saved-project"
+
+    result = save_verified_model(
+        _PARAM_MODEL,
+        target_dir=target,
+        data="n = 4;",
+        problem="Force x to equal n.",
+    )
+
+    assert result.status == "saved"
+    assert result.check.status == "ok"
+    assert result.solve is not None
+    assert result.solve.status in {"satisfied", "optimal"}
+    assert (target / "model.mzn").read_text() == _PARAM_MODEL
+    assert (target / "data.dzn").read_text() == "n = 4;"
+    assert (target / "problem.md").read_text() == "Force x to equal n."
+    solve_payload = json.loads((target / "solve-result.json").read_text())
+    assert "x=4" in solve_payload["stdout"]
+    manifest = json.loads((target / ".openconstraint-model.json").read_text())
+    assert manifest["managed_by"] == "openconstraint-mcp"
+    assert manifest["verification"]["check_status"] == "ok"

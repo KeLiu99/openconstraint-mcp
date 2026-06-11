@@ -7,6 +7,14 @@ from typing import Any
 
 import pytest
 
+from openconstraint_mcp.minizinc.artifacts import (
+    CHECKER_FILENAME,
+    DATA_FILENAME,
+    MANIFEST_FILENAME,
+    MODEL_FILENAME,
+    PROBLEM_FILENAME,
+    SOLVE_RESULT_FILENAME,
+)
 from openconstraint_mcp.minizinc.core import (
     DEFAULT_CHECK_TIMEOUT_MS,
     DEFAULT_INSPECT_TIMEOUT_MS,
@@ -20,6 +28,7 @@ from openconstraint_mcp.minizinc.core import (
     find_unsat_core,
     inspect_model,
     list_solvers,
+    save_verified_model,
     solve_model,
     solver_supports_num_solutions,
 )
@@ -1714,3 +1723,345 @@ def test_inspect_default_timeout_aliases_check_budget() -> None:
     # Decision 7: inspection is a preflight like check, so it shares the check
     # budget rather than an independent literal that could drift.
     assert DEFAULT_INSPECT_TIMEOUT_MS == DEFAULT_CHECK_TIMEOUT_MS
+
+
+# --- save_verified_model -----------------------------------------------------
+
+
+_SAVE_MODEL = "var 1..5: x;\nconstraint x > 2;\nsolve satisfy;\n"
+
+
+def _fake_check_then_solve(
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    check: FakeCompletedProcess,
+    solve: FakeCompletedProcess,
+) -> list[list[str]]:
+    """Route the save's two managed runs by argv: the ``-c`` compile gate gets
+    ``check``, the json-stream solve gets ``solve``. Returns the captured argvs."""
+    cmds: list[list[str]] = []
+
+    def _fake_run(*args: Any, **kwargs: Any) -> FakeCompletedProcess:
+        cmd = [str(part) for part in args[0]]
+        cmds.append(cmd)
+        return check if "-c" in cmd else solve
+
+    monkeypatch.setattr("openconstraint_mcp.minizinc.core.subprocess.run", _fake_run)
+    return cmds
+
+
+def test_save_verified_model_satisfied_solve_writes_project(
+    fake_minizinc_binary: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    cmds = _fake_check_then_solve(
+        monkeypatch,
+        check=FakeCompletedProcess(stdout="", stderr="", returncode=0),
+        solve=FakeCompletedProcess(stdout=STREAM_SATISFY, stderr="", returncode=0),
+    )
+    target = tmp_path / "project"
+
+    result = save_verified_model(_SAVE_MODEL, target_dir=target)
+
+    assert result.status == "saved"
+    assert result.target_dir == str(target)
+    assert str(target) in result.message
+    assert result.check.status == "ok"
+    assert result.solve is not None
+    assert result.solve.status == "satisfied"
+    assert (target / MODEL_FILENAME).read_text() == _SAVE_MODEL
+    assert (target / SOLVE_RESULT_FILENAME).is_file()
+    assert (target / MANIFEST_FILENAME).is_file()
+    # Optional artifacts were not supplied, so their files do not appear.
+    assert not (target / DATA_FILENAME).exists()
+    assert not (target / CHECKER_FILENAME).exists()
+    assert not (target / PROBLEM_FILENAME).exists()
+    # The compile gate ran first, then the one solve.
+    assert len(cmds) == 2
+    assert "-c" in cmds[0]
+    assert "--json-stream" in cmds[1]
+
+
+def test_save_verified_model_compile_error_writes_nothing(
+    fake_minizinc_binary: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    cmds = _fake_check_then_solve(
+        monkeypatch,
+        check=FakeCompletedProcess(stdout="", stderr="type error: undefined 'xz'", returncode=1),
+        solve=FakeCompletedProcess(stdout=STREAM_SATISFY, stderr="", returncode=0),
+    )
+    target = tmp_path / "project"
+
+    result = save_verified_model(_SAVE_MODEL, target_dir=target)
+
+    assert result.status == "not_verified"
+    assert result.check.status == "error"
+    assert result.solve is None
+    assert "nothing was written" in result.message
+    assert not target.exists()
+    # The check gate failed, so the solve never ran.
+    assert len(cmds) == 1
+
+
+def test_save_verified_model_unsatisfiable_solve_writes_nothing(
+    fake_minizinc_binary: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    _fake_check_then_solve(
+        monkeypatch,
+        check=FakeCompletedProcess(stdout="", stderr="", returncode=0),
+        solve=FakeCompletedProcess(stdout=STREAM_UNSAT, stderr="", returncode=0),
+    )
+    target = tmp_path / "project"
+
+    result = save_verified_model(_SAVE_MODEL, target_dir=target)
+
+    assert result.status == "not_verified"
+    assert result.solve is not None
+    assert result.solve.status == "unsatisfiable"
+    assert "unsatisfiable" in result.message
+    assert not target.exists()
+
+
+def test_save_verified_model_solve_timeout_blocks_saving(
+    fake_minizinc_binary: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    def _fake_run(*args: Any, **kwargs: Any) -> FakeCompletedProcess:
+        cmd = [str(part) for part in args[0]]
+        if "-c" in cmd:
+            return FakeCompletedProcess(stdout="", stderr="", returncode=0)
+        raise subprocess.TimeoutExpired(cmd=args[0], timeout=kwargs.get("timeout", 0), output="")
+
+    monkeypatch.setattr("openconstraint_mcp.minizinc.core.subprocess.run", _fake_run)
+    target = tmp_path / "project"
+
+    result = save_verified_model(_SAVE_MODEL, target_dir=target, checker=_CHECKER_SRC)
+
+    assert result.status == "not_verified"
+    assert result.solve is not None
+    assert result.solve.timed_out is True
+    # With a checker supplied, the nested report degrades to timeout too.
+    assert result.solve.checker is not None
+    assert result.solve.checker.status == "timeout"
+    assert "timed out" in result.message
+    assert not target.exists()
+
+
+def test_save_verified_model_nonzero_exit_blocks_saving(
+    fake_minizinc_binary: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    # STREAM_SATISFY carries no status object, so a solution with rc 1 still
+    # classifies `satisfied` — the gate must catch the dirty exit on its own.
+    _fake_check_then_solve(
+        monkeypatch,
+        check=FakeCompletedProcess(stdout="", stderr="", returncode=0),
+        solve=FakeCompletedProcess(stdout=STREAM_SATISFY, stderr="boom", returncode=1),
+    )
+    target = tmp_path / "project"
+
+    result = save_verified_model(_SAVE_MODEL, target_dir=target)
+
+    assert result.status == "not_verified"
+    assert "exited with code 1" in result.message
+    assert not target.exists()
+
+
+def test_save_verified_model_checker_completed_allows_saving(
+    fake_minizinc_binary: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    solve_stdout = stream(
+        checker_pass("CORRECT\n"),
+        solution_obj("x=3\n", {"x": 3}),
+        {"type": "status", "status": "SATISFIED"},
+    )
+    _fake_check_then_solve(
+        monkeypatch,
+        check=FakeCompletedProcess(stdout="", stderr="", returncode=0),
+        solve=FakeCompletedProcess(stdout=solve_stdout, stderr="", returncode=0),
+    )
+    target = tmp_path / "project"
+
+    result = save_verified_model(_SAVE_MODEL, target_dir=target, checker=_CHECKER_SRC)
+
+    assert result.status == "saved"
+    assert result.solve is not None
+    assert result.solve.checker is not None
+    assert result.solve.checker.status == "completed"
+    assert (target / CHECKER_FILENAME).read_text() == _CHECKER_SRC
+
+
+@pytest.mark.parametrize(
+    "solve_stdout",
+    [
+        # Constraint-style rejection: checker status "violation".
+        stream(
+            checker_violation(),
+            solution_obj("x=1\n", {"x": 1}),
+            {"type": "status", "status": "SATISFIED"},
+        ),
+        # Missing per-solution verdict: checker status "error".
+        stream(
+            solution_obj("x=1\n", {"x": 1}),
+            {"type": "status", "status": "SATISFIED"},
+        ),
+        # No solution produced: checker status "no_solution" (and the solve
+        # status gate fails first on "unsatisfiable").
+        stream({"type": "status", "status": "UNSATISFIABLE"}),
+    ],
+)
+def test_save_verified_model_unverified_checker_blocks_saving(
+    solve_stdout: str,
+    fake_minizinc_binary: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    _fake_check_then_solve(
+        monkeypatch,
+        check=FakeCompletedProcess(stdout="", stderr="", returncode=0),
+        solve=FakeCompletedProcess(stdout=solve_stdout, stderr="", returncode=0),
+    )
+    target = tmp_path / "project"
+
+    result = save_verified_model(_SAVE_MODEL, target_dir=target, checker=_CHECKER_SRC)
+
+    assert result.status == "not_verified"
+    assert not target.exists()
+
+
+def test_save_verified_model_saves_data_and_problem_when_supplied(
+    fake_minizinc_binary: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    _fake_check_then_solve(
+        monkeypatch,
+        check=FakeCompletedProcess(stdout="", stderr="", returncode=0),
+        solve=FakeCompletedProcess(stdout=STREAM_SATISFY, stderr="", returncode=0),
+    )
+    target = tmp_path / "project"
+
+    result = save_verified_model(
+        _SAVE_MODEL, target_dir=target, data="n = 3;\n", problem="Pick x above 2.\n"
+    )
+
+    assert result.status == "saved"
+    assert (target / DATA_FILENAME).read_text() == "n = 3;\n"
+    assert (target / PROBLEM_FILENAME).read_text() == "Pick x above 2.\n"
+    assert [artifact.role for artifact in result.files] == [
+        "model",
+        "data",
+        "problem",
+        "solve_result",
+        "manifest",
+    ]
+
+
+def test_save_verified_model_passes_same_data_to_check_and_solve(
+    fake_minizinc_binary: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    cmds = _fake_check_then_solve(
+        monkeypatch,
+        check=FakeCompletedProcess(stdout="", stderr="", returncode=0),
+        solve=FakeCompletedProcess(stdout=STREAM_SATISFY, stderr="", returncode=0),
+    )
+
+    save_verified_model(_SAVE_MODEL, target_dir=tmp_path / "project", data="n = 3;\n")
+
+    # Both runs carry the positional data file, so the verified instance is the
+    # instance that was checked.
+    assert cmds[0][-1].endswith(".dzn")
+    assert cmds[1][-1].endswith(".dzn")
+
+
+def test_save_verified_model_overwrite_replaces_prior_save(
+    fake_minizinc_binary: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    _fake_check_then_solve(
+        monkeypatch,
+        check=FakeCompletedProcess(stdout="", stderr="", returncode=0),
+        solve=FakeCompletedProcess(stdout=STREAM_SATISFY, stderr="", returncode=0),
+    )
+    target = tmp_path / "project"
+    save_verified_model(_SAVE_MODEL, target_dir=target)
+
+    new_model = "var 1..9: y;\nsolve satisfy;\n"
+    result = save_verified_model(new_model, target_dir=target, overwrite=True)
+
+    assert result.status == "saved"
+    assert (target / MODEL_FILENAME).read_text() == new_model
+
+
+def _fail_if_subprocess_called(monkeypatch: pytest.MonkeyPatch) -> None:
+    def _fail(*args: Any, **kwargs: Any) -> Any:
+        raise AssertionError("subprocess.run must not be invoked for invalid save args")
+
+    monkeypatch.setattr("openconstraint_mcp.minizinc.core.subprocess.run", _fail)
+
+
+def test_save_verified_model_rejects_empty_model_before_any_subprocess(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    _fail_if_subprocess_called(monkeypatch)
+    with pytest.raises(ValueError, match="empty"):
+        save_verified_model("  \n", target_dir=tmp_path / "project")
+
+
+def test_save_verified_model_rejects_relative_target_before_any_subprocess(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _fail_if_subprocess_called(monkeypatch)
+    with pytest.raises(ValueError, match="absolute"):
+        save_verified_model(_SAVE_MODEL, target_dir=Path("relative/project"))
+
+
+def test_save_verified_model_rejects_missing_parent_before_any_subprocess(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    _fail_if_subprocess_called(monkeypatch)
+    with pytest.raises(ValueError, match="parent"):
+        save_verified_model(_SAVE_MODEL, target_dir=tmp_path / "missing" / "project")
+
+
+def test_save_verified_model_rejects_file_target_before_any_subprocess(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    _fail_if_subprocess_called(monkeypatch)
+    occupied = tmp_path / "occupied"
+    occupied.write_text("not a directory")
+    with pytest.raises(ValueError, match="not a directory"):
+        save_verified_model(_SAVE_MODEL, target_dir=occupied)
+
+
+def test_save_verified_model_rejects_unmanaged_target_before_any_subprocess(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    _fail_if_subprocess_called(monkeypatch)
+    target = tmp_path / "project"
+    target.mkdir()
+    (target / "thesis.tex").write_text("important")
+    with pytest.raises(ValueError, match="not empty"):
+        save_verified_model(_SAVE_MODEL, target_dir=target, overwrite=True)
+
+
+def test_save_verified_model_rejects_gated_num_solutions_before_any_subprocess(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    # The solve controls are validated with the exact solve_model rules before
+    # the compile check spends a subprocess on a doomed request.
+    _fail_if_subprocess_called(monkeypatch)
+    with pytest.raises(ValueError, match="num_solutions"):
+        save_verified_model(_SAVE_MODEL, target_dir=tmp_path / "project", num_solutions=2)

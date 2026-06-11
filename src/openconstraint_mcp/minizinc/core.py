@@ -15,6 +15,7 @@ from ..schemas import (
     CheckResult,
     CheckStatus,
     ModelInspectionResult,
+    SaveVerifiedModelResult,
     SolutionCheck,
     SolverCapabilities,
     SolveResult,
@@ -24,6 +25,7 @@ from ..schemas import (
     UnsatCoreConstraint,
     UnsatCoreResult,
 )
+from .artifacts import validate_save_target, write_verified_model_dir
 from .checker import _parse_checker_stream
 from .interface import parse_model_interface
 from .stream import _parse_solve_stream
@@ -263,6 +265,19 @@ def _build_minizinc_cmd(
     ]
 
 
+def _validate_model_and_timeout(model: str, timeout_ms: int) -> None:
+    """Reject an empty/whitespace model or non-positive timeout with a clear error.
+
+    The inline-argument gate shared by ``_run_managed_minizinc`` and
+    ``save_verified_model`` (which validates every argument before its first
+    subprocess), so the two cannot drift.
+    """
+    if not model.strip():
+        raise ValueError("model must not be empty")
+    if timeout_ms <= 0:
+        raise ValueError("timeout_ms must be positive")
+
+
 def _run_managed_minizinc(
     model: str,
     *,
@@ -294,10 +309,7 @@ def _run_managed_minizinc(
     ``_build_minizinc_cmd`` remains the single place that orders flags before
     positional model/data arguments.
     """
-    if not model.strip():
-        raise ValueError("model must not be empty")
-    if timeout_ms <= 0:
-        raise ValueError("timeout_ms must be positive")
+    _validate_model_and_timeout(model, timeout_ms)
     binary = _require_minizinc_binary()
     with tempfile.TemporaryDirectory(prefix="openconstraint-mcp-") as tmp:
         tmp_dir = Path(tmp)
@@ -700,6 +712,137 @@ def inspect_model(
         model, solver=solver, timeout_ms=timeout_ms, extra_args=(INSPECT_FLAG,), data=data
     )
     return _build_inspection_result(outcome, solver=solver)
+
+
+def _verification_failure(solve: SolveResult, *, checker_supplied: bool) -> str | None:
+    """Explain why a solve fails the save gate, or ``None`` when it verifies.
+
+    The gate accepts only ``satisfied``/``optimal`` with no subprocess timeout
+    and a clean exit; when a checker was supplied, the nested report must be
+    ``completed`` (the checker ran for every solution with no machine-readable
+    violation — it does NOT prove optimality). Ordered most-specific-first:
+    a timed-out run is named as such (its ``return_code`` is ``None``), then
+    the status verdict, then the exit code, then the checker verdict.
+    """
+    if solve.timed_out:
+        return "Solve timed out"
+    if solve.status not in ("satisfied", "optimal"):
+        return f"Solve did not verify (status: {solve.status})"
+    if solve.return_code != 0:
+        return f"MiniZinc exited with code {solve.return_code}"
+    if checker_supplied and (solve.checker is None or solve.checker.status != "completed"):
+        checker_status = "missing" if solve.checker is None else solve.checker.status
+        return f"Solution checker did not complete (status: {checker_status})"
+    return None
+
+
+def save_verified_model(
+    model: str,
+    *,
+    target_dir: Path,
+    data: str | None = None,
+    checker: str | None = None,
+    problem: str | None = None,
+    solver: str = DEFAULT_SOLVER,
+    timeout_ms: int = DEFAULT_SOLVE_TIMEOUT_MS,
+    free_search: bool = False,
+    parallel: int | None = None,
+    random_seed: int | None = None,
+    all_solutions: bool = False,
+    num_solutions: int | None = None,
+    overwrite: bool = False,
+) -> SaveVerifiedModelResult:
+    """Re-verify an inline model through the managed runtime, then save it.
+
+    Trusts no prior client-side claim of success: it re-runs ``check_model``
+    (compile gate) and ``solve_model`` (success gate) on the artifacts as
+    supplied, and writes the project directory only when the check is ``ok``,
+    the solve verifies (see ``_verification_failure``), and — when a checker
+    is supplied — the checker report is ``completed``. Every argument,
+    including the marker-gated ``target_dir`` overwrite policy, is validated
+    before the first subprocess runs; argument/path problems raise
+    ``ValueError``, while a failed verification gate returns a normal
+    ``status="not_verified"`` result. Nothing is ever written on a failed
+    gate, and the commit itself is staged-then-swapped so a failure cannot
+    leave a partial directory behind.
+    """
+    _validate_model_and_timeout(model, timeout_ms)
+    # Validates the solve controls (parallel/num_solutions ranges and the
+    # solver-gated -n) with the exact solve_model rules; the result is rebuilt
+    # by the solve itself, so it is discarded here.
+    _solve_extra_args(
+        solver=solver,
+        free_search=free_search,
+        parallel=parallel,
+        random_seed=random_seed,
+        all_solutions=all_solutions,
+        num_solutions=num_solutions,
+    )
+    target = validate_save_target(target_dir, overwrite=overwrite)
+
+    check = check_model(model, solver=solver, data=data, timeout_ms=timeout_ms)
+    if check.status != "ok":
+        return SaveVerifiedModelResult(
+            status="not_verified",
+            message=(
+                f"Model failed the compile check (status: {check.status}); "
+                "nothing was written."
+            ),
+            target_dir=str(target),
+            check=check,
+        )
+
+    solve = solve_model(
+        model,
+        solver=solver,
+        data=data,
+        checker=checker,
+        timeout_ms=timeout_ms,
+        free_search=free_search,
+        parallel=parallel,
+        random_seed=random_seed,
+        all_solutions=all_solutions,
+        num_solutions=num_solutions,
+    )
+    failure = _verification_failure(solve, checker_supplied=checker is not None)
+    if failure is not None:
+        return SaveVerifiedModelResult(
+            status="not_verified",
+            message=f"{failure}; nothing was written.",
+            target_dir=str(target),
+            check=check,
+            solve=solve,
+        )
+
+    files, warning = write_verified_model_dir(
+        target,
+        model=model,
+        data=data,
+        checker=checker,
+        problem=problem,
+        check=check,
+        solve=solve,
+        solve_controls={
+            "timeout_ms": timeout_ms,
+            "free_search": free_search,
+            "parallel": parallel,
+            "random_seed": random_seed,
+            "all_solutions": all_solutions,
+            "num_solutions": num_solutions,
+        },
+        overwrite=overwrite,
+    )
+    message = f"Verified model saved to {target}."
+    if warning is not None:
+        message = f"{message} Warning: {warning}"
+    return SaveVerifiedModelResult(
+        status="saved",
+        message=message,
+        target_dir=str(target),
+        files=files,
+        check=check,
+        solve=solve,
+    )
 
 
 def _read_text_utf8(path: Path) -> str:

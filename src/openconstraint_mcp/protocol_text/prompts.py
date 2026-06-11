@@ -136,6 +136,16 @@ Otherwise:
    commentary (value-density ratios, greedy reasoning, alternative
    heuristics) unless the user asks for deeper analysis.
 
+8. Optionally, persist the verified result. If — and only if — the user asks
+   to save the model, call `save_verified_minizinc_model` with the final
+   model/data/checker text exactly as last checked and solved, the original
+   problem text as `problem`, and the user's chosen save directory as an
+   explicit absolute `target_dir`. You ask the user for that path (or use
+   your client's own file picker); the server opens no file dialog, and it
+   re-verifies the artifacts through the managed runtime before writing
+   anything. Replacing a previously saved directory needs `overwrite=true`,
+   and only a directory written by a prior save can be replaced.
+
 Boundaries:
 - You draft the MiniZinc model; openconstraint-mcp does not.
 - openconstraint-mcp owns no LLM credentials and invokes no generative

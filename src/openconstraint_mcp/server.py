@@ -26,6 +26,7 @@ from .minizinc.core import (
     inspect_model,
     inspect_model_path,
     list_solvers,
+    save_verified_model,
     solve_model,
     solve_model_path,
 )
@@ -40,6 +41,7 @@ from .protocol_text.descriptions import (
     INSPECT_MINIZINC_MODEL_DESCRIPTION,
     LIST_AVAILABLE_SOLVERS_DESCRIPTION,
     MCP_SERVER_INSTRUCTIONS,
+    SAVE_VERIFIED_MINIZINC_MODEL_DESCRIPTION,
     SOLVE_CONSTRAINT_PROBLEM_PROMPT_DESCRIPTION,
     SOLVE_MINIZINC_FILES_DESCRIPTION,
     SOLVE_MINIZINC_MODEL_DESCRIPTION,
@@ -58,6 +60,7 @@ from .schemas import (
     CheckResult,
     ModelInspectionResult,
     RuntimeStatus,
+    SaveVerifiedModelResult,
     SolveResult,
     SolverList,
     UnsatCoreResult,
@@ -170,6 +173,40 @@ def _wrap_solve_result(result: SolveResult) -> CallToolResult:
     )
 
 
+def _format_save_result_content(result: SaveVerifiedModelResult) -> str:
+    """Return model-visible save output: the outcome and target first, files after.
+
+    Deliberately concise — the verifying ``SolveResult`` (solutions, statistics,
+    checker transcript) rides in ``structuredContent``; the text content states
+    what happened, where, and which files exist.
+    """
+    lines = [
+        f"Status: {result.status}",
+        f"Target directory: {result.target_dir}",
+        result.message,
+    ]
+    if result.files:
+        lines.extend(["", "Saved files:"])
+        lines.extend(
+            f"- {artifact.path} ({artifact.role}, sha256 {artifact.sha256})"
+            for artifact in result.files
+        )
+    lines.extend(["", f"Check status: {result.check.status}"])
+    if result.solve is not None:
+        lines.append(f"Solve status: {result.solve.status}")
+        if result.solve.checker is not None:
+            lines.append(f"Checker status: {result.solve.checker.status}")
+    return "\n".join(lines)
+
+
+def _wrap_save_result(result: SaveVerifiedModelResult) -> CallToolResult:
+    """Wrap a SaveVerifiedModelResult as concise text plus full structured output."""
+    return CallToolResult(
+        content=[TextContent(type="text", text=_format_save_result_content(result))],
+        structuredContent=result.model_dump(mode="json"),
+    )
+
+
 def _format_solver_list_content(result: SolverList) -> str:
     """Return model-visible solver inventory: a complete id/name/version table.
 
@@ -263,6 +300,15 @@ _UNSAT_CORE_STAGES = (
     "findMUS is running",
     "findMUS finished; parsing core",
     "Unsat-core analysis complete",
+)
+# The save family re-verifies (check, then solve) and commits inside one
+# blocking call, so stage 2 spans the whole pipeline and stages 3-4 are honest
+# for both outcomes — a committed save and a not_verified refusal.
+_SAVE_STAGES = (
+    "Validating save request",
+    "MiniZinc verification (check, then solve) and save are running",
+    "MiniZinc finished; save decision made",
+    "Save request complete",
 )
 
 
@@ -489,6 +535,46 @@ def create_mcp_server() -> FastMCP:
         )
         await _status_finished(ctx, _UNSAT_CORE_STAGES)
         return result
+
+    @mcp.tool(description=SAVE_VERIFIED_MINIZINC_MODEL_DESCRIPTION)
+    @_as_mcp_error()
+    async def save_verified_minizinc_model(
+        model: str,
+        target_dir: str,
+        data: str | None = None,
+        checker: str | None = None,
+        problem: str | None = None,
+        solver: str = DEFAULT_SOLVER,
+        timeout_ms: int = DEFAULT_SOLVE_TIMEOUT_MS,
+        free_search: bool = False,
+        parallel: int | None = None,
+        random_seed: int | None = None,
+        all_solutions: bool = False,
+        num_solutions: int | None = None,
+        overwrite: bool = False,
+        ctx: Context | None = None,
+    ) -> Annotated[CallToolResult, SaveVerifiedModelResult]:
+        await _status_starting(ctx, _SAVE_STAGES)
+        result = await _run_blocking(
+            functools.partial(
+                save_verified_model,
+                model,
+                target_dir=Path(target_dir),
+                data=data,
+                checker=checker,
+                problem=problem,
+                solver=solver,
+                timeout_ms=timeout_ms,
+                free_search=free_search,
+                parallel=parallel,
+                random_seed=random_seed,
+                all_solutions=all_solutions,
+                num_solutions=num_solutions,
+                overwrite=overwrite,
+            )
+        )
+        await _status_finished(ctx, _SAVE_STAGES)
+        return _wrap_save_result(result)
 
     @mcp.tool(description=CHECK_MINIZINC_FILES_DESCRIPTION)
     @_as_mcp_error()
