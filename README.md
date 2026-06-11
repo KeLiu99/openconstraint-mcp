@@ -137,7 +137,9 @@ The package exposes five commands:
 The stdio server exposes two runtime-introspection tools, a model-check tool, a
 model-inspection tool, an execution tool, and an unsat-core diagnostic tool —
 each of the latter four in an **inline-source** form (below) and a **path-based
-file** sibling ([Path-based file tools](#path-based-file-tools)). The two solve
+file** sibling ([Path-based file tools](#path-based-file-tools)) — plus a
+verified-save tool that persists a successful inline workflow to a local
+project directory. The two solve
 tools also accept optional solution checkers, so a normal solve can validate each
 produced solution against a checker model without changing result shape:
 
@@ -478,6 +480,74 @@ produced solution against a checker model without changing result shape:
   MUS found, no MUS reported, findMUS/runtime diagnostics, and timeout — come
   back as a normal `UnsatCoreResult` whose `status` encodes the outcome.
 
+- **`save_verified_minizinc_model`** — persist a *successful* inline MiniZinc
+  workflow to a local project directory, **after the server re-verifies it**
+  through the managed runtime. The inline tools above are ephemeral by design:
+  a model that checked and solved exists only in the conversation. This tool
+  turns that result into a durable local project — without trusting the
+  client's claim that the model worked. Arguments:
+
+  - `model: str` — the complete MiniZinc source to verify and save.
+  - `target_dir: str` — **explicit absolute path** of the directory to create
+    or update; its parent must already exist. The server opens **no OS file
+    dialog or picker** — choosing the path is the client's job (ask the user,
+    or use the client's own UI), and the chosen path is passed here. MCP
+    elicitation is deliberately **not** used or required in v1; the explicit
+    `target_dir` argument is the durable contract that works in every client.
+  - `data: str | None = None`, `checker: str | None = None` — optional inline
+    `.dzn` data and solution-checker source, with the same semantics as
+    `solve_minizinc_model`; the re-check and re-solve both use them.
+  - `problem: str | None = None` — the user's original natural-language
+    problem text. Saved only when passed explicitly; the server never infers
+    or retains conversation history.
+  - `solver`, `timeout_ms`, `free_search`, `parallel`, `random_seed`,
+    `all_solutions`, `num_solutions` — the same solve controls as
+    `solve_minizinc_model`, applied to the verifying solve and recorded in
+    the manifest so the recorded verification is reproducible.
+  - `overwrite: bool = False` — required to replace a previous save (see the
+    overwrite gate below).
+
+  **Verification gate.** Before anything is written, the server re-runs the
+  compile check and then the solve on the artifacts exactly as supplied. The
+  save proceeds only when the check is `"ok"` **and** the solve finished
+  `"satisfied"` or `"optimal"` with a clean exit and no timeout **and** —
+  when a `checker` is supplied — the nested checker report is `"completed"`
+  (the checker ran without machine-readable violation; **not** a proof of
+  optimality). Any other outcome returns `status="not_verified"` carrying the
+  gating `check`/`solve` results and writes **nothing**.
+
+  **Artifact layout.** The saved directory uses fixed filenames — the only
+  user-chosen path is the directory itself:
+
+  | File | Written | Contents |
+  | --- | --- | --- |
+  | `model.mzn` | always | the verified model source, verbatim |
+  | `data.dzn` | only when `data` was passed | the `.dzn` text (may be empty) |
+  | `checker.mzc.mzn` | only when `checker` was passed | the checker source |
+  | `problem.md` | only when `problem` was passed | the original problem text |
+  | `solve-result.json` | always | the verifying `SolveResult` as JSON |
+  | `.openconstraint-model.json` | always | manifest: tool version, timestamp, solver, the solve controls used, a verification summary, and per-file sha256 hashes |
+
+  **Overwrite safety (marker-gated).** A brand-new path or an existing empty
+  directory is written directly. A non-empty directory is replaced only when
+  *all three* hold: it contains a prior save's `.openconstraint-model.json`
+  manifest, `overwrite=true` was passed, and it holds no files the prior save
+  did not write. Anything else — user files present, an unrecognizable
+  manifest, a missing `overwrite` — is refused with an actionable MCP error
+  before any solver runs. Replacement is wholesale, via a staged hidden
+  sibling directory and atomic rename swap (restoring the prior directory
+  from its backup if the swap itself fails), so a save can never leave a
+  half-written directory or a stale file from an earlier save behind.
+
+  Returns a `SaveVerifiedModelResult`: `status` (`"saved"` /
+  `"not_verified"`), `message`, the resolved `target_dir` (echoed on both
+  outcomes; on `not_verified` it names the directory that was *not* written),
+  `files` (role, bare filename, and sha256 per saved file — empty unless
+  `saved`), `check` (always present), and `solve` (`null` when the check gate
+  already failed). The save runs entirely locally: no network, no LLM, no
+  telemetry — and it writes only inside (and, transiently while staging,
+  beside) the explicit `target_dir`.
+
 ### Path-based file tools
 
 The four tools above take the model (and optional data) as **inline source
@@ -554,9 +624,10 @@ core (raw `stdout` stays authoritative).
 
 ### Progress and status notifications
 
-The eight long-running tools (`check_minizinc_model` / `check_minizinc_files`,
+The nine long-running tools (`check_minizinc_model` / `check_minizinc_files`,
 `inspect_minizinc_model` / `inspect_minizinc_files`, `solve_minizinc_model` /
-`solve_minizinc_files`, `find_unsat_core` / `find_unsat_core_files`) emit
+`solve_minizinc_files`, `find_unsat_core` / `find_unsat_core_files`, and
+`save_verified_minizinc_model`) emit
 status feedback while MiniZinc is running, on two MCP channels:
 
 - **Progress notifications** (`notifications/progress`) are sent only when the
@@ -615,6 +686,11 @@ The stdio server also exposes one MCP prompt for client-side LLMs to use:
      fields such as `solveTime` and `objectiveBound`. Each section heading
      appears at most once, and the explanation stays focused on verifying the
      result rather than adding speculative algorithm commentary by default.
+  7. Optionally — only when the user asks to save the result — persist it
+     with `save_verified_minizinc_model`, passing the final model/data/checker
+     text and the user's explicit absolute target directory. The client asks
+     the user for that path (or uses its own file picker); the server opens no
+     file dialog and re-verifies the artifacts before writing anything.
 
   When the user already has the model on disk as `.mzn`/`.dzn` files, the
   prompt skips drafting and routes the same validate → solve → present loop

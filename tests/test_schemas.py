@@ -6,6 +6,8 @@ from pydantic import ValidationError
 from openconstraint_mcp.schemas import (
     CheckerReport,
     CheckResult,
+    SavedModelArtifact,
+    SaveVerifiedModelResult,
     SolutionCheck,
     SolverCapabilities,
     SolveResult,
@@ -263,6 +265,97 @@ def test_solver_info_round_trips_with_capabilities() -> None:
             "std_flags": ["-a", "-f", "-n", "-p", "-r"],
         },
     }
+
+
+def _passing_check() -> CheckResult:
+    return CheckResult(status="ok", solver="cp-sat", stdout="", stderr="", elapsed_ms=5)
+
+
+def _satisfied_solve() -> SolveResult:
+    return SolveResult(
+        status="satisfied",
+        solver="cp-sat",
+        return_code=0,
+        timed_out=False,
+        stdout="x=1\n",
+        stderr="",
+        elapsed_ms=9,
+        solution={"x": 1},
+        solutions=[{"x": 1}],
+        objective=None,
+    )
+
+
+def test_save_verified_model_result_round_trips_as_json() -> None:
+    # A saved result serializes with model_dump(mode="json") — the same mode the
+    # server uses for structuredContent — with bare-filename artifact paths.
+    result = SaveVerifiedModelResult(
+        status="saved",
+        message="Verified model saved.",
+        target_dir="/home/user/projects/knapsack",
+        files=[
+            SavedModelArtifact(role="model", path="model.mzn", sha256="ab" * 32),
+            SavedModelArtifact(role="solve_result", path="solve-result.json", sha256="cd" * 32),
+        ],
+        check=_passing_check(),
+        solve=_satisfied_solve(),
+    )
+
+    dumped = result.model_dump(mode="json")
+    assert dumped["status"] == "saved"
+    assert dumped["target_dir"] == "/home/user/projects/knapsack"
+    assert dumped["files"] == [
+        {"role": "model", "path": "model.mzn", "sha256": "ab" * 32},
+        {"role": "solve_result", "path": "solve-result.json", "sha256": "cd" * 32},
+    ]
+    assert dumped["check"]["status"] == "ok"
+    assert dumped["solve"]["status"] == "satisfied"
+
+
+def test_save_verified_model_result_files_default_to_empty_list() -> None:
+    result = SaveVerifiedModelResult(
+        status="not_verified",
+        message="Solve did not verify.",
+        target_dir="/home/user/projects/knapsack",
+        check=_passing_check(),
+        solve=_satisfied_solve(),
+    )
+    assert result.files == []
+
+
+def test_save_verified_model_result_check_gate_serializes_with_null_solve() -> None:
+    # The check-gate outcome: the compile failed, so no solve ran — `solve` is
+    # None and the result still serializes cleanly.
+    result = SaveVerifiedModelResult(
+        status="not_verified",
+        message="Model failed the compile check.",
+        target_dir="/home/user/projects/knapsack",
+        check=CheckResult(status="error", solver="cp-sat", stdout="", stderr="boom", elapsed_ms=3),
+    )
+
+    dumped = result.model_dump(mode="json")
+    assert dumped["solve"] is None
+    assert dumped["files"] == []
+    assert dumped["check"]["status"] == "error"
+
+
+def test_save_verified_model_result_rejects_unknown_status() -> None:
+    with pytest.raises(ValidationError):
+        SaveVerifiedModelResult(
+            status="written",  # type: ignore[arg-type]
+            message="",
+            target_dir="/tmp/x",
+            check=_passing_check(),
+        )
+
+
+def test_saved_model_artifact_rejects_unknown_role() -> None:
+    with pytest.raises(ValidationError):
+        SavedModelArtifact(
+            role="readme",  # type: ignore[arg-type]
+            path="README.md",
+            sha256="ef" * 32,
+        )
 
 
 def test_solver_info_capabilities_default_is_conservative() -> None:

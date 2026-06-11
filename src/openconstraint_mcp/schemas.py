@@ -141,6 +141,53 @@ class CheckResult(BaseModel):
     elapsed_ms: int
 
 
+SaveStatus = Literal[
+    "saved",  # verification gate passed and the artifact directory was written
+    "not_verified",  # a check/solve/checker gate failed — NOTHING was written
+]
+
+# The fixed artifact vocabulary of a saved verified-model directory. Filenames
+# are fixed per role (model.mzn, data.dzn, checker.mzc.mzn, problem.md,
+# solve-result.json, .openconstraint-model.json), so the role — not the
+# filename — is the stable key clients branch on.
+SavedArtifactRole = Literal["model", "data", "checker", "problem", "solve_result", "manifest"]
+
+
+class SavedModelArtifact(BaseModel):
+    """One file written by a verified-model save.
+
+    ``path`` is a bare filename relative to the saved directory — never an
+    absolute path — matching the manifest's artifact convention. ``sha256`` is
+    the hex digest of the file's bytes as written to disk.
+    """
+
+    role: SavedArtifactRole
+    path: str
+    sha256: str
+
+
+class SaveVerifiedModelResult(BaseModel):
+    """Outcome of a save-verified-model request.
+
+    ``status="saved"`` means the server re-verified the supplied artifacts
+    through the managed runtime (clean check, satisfied/optimal solve, checker
+    ``completed`` when one was supplied) and wrote the artifact directory.
+    ``status="not_verified"`` means a verification gate failed and nothing was
+    written — ``target_dir`` is echoed for both outcomes, so on
+    ``not_verified`` it names the directory that was *not* written. ``check``
+    is always present (the compile gate runs first); ``solve`` is ``None``
+    exactly when that check gate failed and no solve ran. ``files`` defaults
+    to empty and is populated only on ``status="saved"``.
+    """
+
+    status: SaveStatus
+    message: str
+    target_dir: str
+    files: list[SavedModelArtifact] = Field(default_factory=list)
+    check: CheckResult
+    solve: SolveResult | None = None
+
+
 # MiniZinc 2.9.7 `--model-interface-only` base-type vocabulary, verified against
 # the managed binary. `set of`/array/`opt` are reported as MODIFIERS on a base
 # type (`set`/`dim`/`optional`), not as their own tags, so they are absent here;

@@ -211,6 +211,24 @@ async def test_file_tools_translate_value_error_with_cause(
     assert isinstance(exc_info.value.__cause__, ValueError)
 
 
+@pytest.mark.asyncio
+async def test_save_tool_translates_target_value_error_with_cause(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # A relative target_dir raises ValueError ahead of the runtime gate and any
+    # subprocess; the default caught set converts it to a plain RuntimeError
+    # whose message tells the client how to fix the call.
+    monkeypatch.setattr("openconstraint_mcp.minizinc.core.subprocess.run", _no_subprocess)
+    fn = _tool_fn("save_verified_minizinc_model")
+
+    with pytest.raises(RuntimeError) as exc_info:
+        await fn(model="solve satisfy;", target_dir="relative/project")
+
+    assert type(exc_info.value) is RuntimeError
+    assert "absolute" in str(exc_info.value)
+    assert isinstance(exc_info.value.__cause__, ValueError)
+
+
 def test_list_available_solvers_translates_execution_error_with_cause(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
