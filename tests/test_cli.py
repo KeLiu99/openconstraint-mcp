@@ -103,6 +103,15 @@ def test_check_runtime_warns_on_corrupt_config(
 # install-runtime CLI
 
 
+def test_install_runtime_help_names_supported_platforms() -> None:
+    result = runner.invoke(app, ["install-runtime", "--help"])
+    assert result.exit_code == 0
+    # Rich wraps help text at terminal width; normalize before matching.
+    flat = " ".join(result.stdout.split())
+    assert "Linux x86_64" in flat
+    assert "macOS arm64" in flat
+
+
 def test_install_runtime_succeeds_when_config_write_fails(
     tmp_path: Path,
     isolated_config_dir: Path,
@@ -364,7 +373,8 @@ def test_install_runtime_unsupported_platform_rejected_before_prompt(
 ) -> None:
     def _raise() -> None:
         raise RuntimeInstallError(
-            "openconstraint-mcp install-runtime currently supports Linux x86_64 only."
+            "openconstraint-mcp install-runtime currently supports Linux x86_64 "
+            "and macOS arm64 (Apple Silicon) only."
         )
 
     monkeypatch.setattr("openconstraint_mcp.runtime_install.core.check_supported_platform", _raise)
@@ -385,7 +395,9 @@ def test_install_runtime_unsupported_platform_rejected_before_prompt(
 
     result = runner.invoke(app, ["install-runtime"])
     assert result.exit_code == 1
-    assert "Linux x86_64" in result.stdout
+    flat = " ".join(result.stdout.split())
+    assert "Linux x86_64" in flat
+    assert "macOS arm64" in flat
     assert install_calls["n"] == 0
     assert prompt_calls["n"] == 0
 
