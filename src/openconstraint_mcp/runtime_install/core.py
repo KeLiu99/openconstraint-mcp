@@ -2,22 +2,20 @@ from __future__ import annotations
 
 import json
 import os
-import platform
 import shutil
 import subprocess
-import sys
 import tempfile
 from pathlib import Path
+from typing import assert_never
 
 from rich.console import Console
 
-from .archive import _extract_bundle
+from .archive import _extract_dmg_bundle, _extract_tgz_bundle
 from .download import (
-    _ARCHIVE_SHA256,
-    _BUNDLE_FILENAME,
-    _BUNDLE_URL,
     MINIZINC_VERSION,
+    BundleSpec,
     _download_archive,
+    select_bundle,
 )
 from .errors import RuntimeInstallError
 
@@ -25,13 +23,8 @@ MANAGED_RUNTIME_MARKER: str = ".openconstraint-runtime.json"
 
 
 def check_supported_platform() -> None:
-    """Raise :class:`RuntimeInstallError` on anything other than Linux x86_64."""
-    if sys.platform != "linux" or platform.machine() != "x86_64":
-        raise RuntimeInstallError(
-            "openconstraint-mcp install-runtime currently supports Linux x86_64 only. "
-            "On other platforms, install MiniZinc manually and point "
-            "OPENCONSTRAINT_MCP_RUNTIME_DIR at the directory containing bin/minizinc."
-        )
+    """Raise :class:`RuntimeInstallError` when no managed bundle exists for this platform."""
+    select_bundle()
 
 
 def is_managed_runtime_dir(path: Path) -> bool:
@@ -152,16 +145,22 @@ def _check_nonempty_runtime_dir_can_be_replaced(runtime_dir: Path, *, yes: bool)
         )
 
 
-def _prepare_staging_runtime(staging: Path, console: Console) -> None:
+def _prepare_staging_runtime(staging: Path, bundle: BundleSpec, console: Console) -> None:
     """Download, extract, smoke-check, and mark a runtime in ``staging``."""
     try:
         if staging.exists():
             shutil.rmtree(staging)
         staging.mkdir(parents=True)
         with tempfile.TemporaryDirectory(prefix="oc-mcp-dl-") as tmp_dir:
-            archive_path = Path(tmp_dir) / _BUNDLE_FILENAME
-            _download_archive(_BUNDLE_URL, archive_path, _ARCHIVE_SHA256, console)
-            _extract_bundle(archive_path, staging)
+            archive_path = Path(tmp_dir) / bundle.filename
+            _download_archive(bundle.url, archive_path, bundle.sha256, console)
+            kind = bundle.kind
+            if kind == "dmg":
+                _extract_dmg_bundle(archive_path, staging)
+            elif kind == "tgz":
+                _extract_tgz_bundle(archive_path, staging)
+            else:
+                assert_never(kind)
         _smoke_check_binary(staging / "bin" / "minizinc")
         _write_runtime_marker(staging)
     except BaseException:
@@ -220,7 +219,7 @@ def install_managed_runtime(
     if console is None:
         console = Console(quiet=True)
 
-    check_supported_platform()
+    bundle = select_bundle()
 
     runtime_dir = validate_install_target(runtime_dir)
     if runtime_dir.exists() and any(runtime_dir.iterdir()):
@@ -235,7 +234,7 @@ def install_managed_runtime(
     staging = parent / f".{runtime_dir.name}.staging.{pid}"
     backup = parent / f".{runtime_dir.name}.backup.{pid}"
 
-    _prepare_staging_runtime(staging, console)
+    _prepare_staging_runtime(staging, bundle, console)
     _swap_staging_into_place(staging, runtime_dir, backup, console)
 
     console.print(f"[green]Installed MiniZinc {MINIZINC_VERSION} at {runtime_dir}[/green]")

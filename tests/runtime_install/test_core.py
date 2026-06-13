@@ -20,10 +20,43 @@ from openconstraint_mcp.runtime_install.errors import RuntimeInstallError
 
 @pytest.fixture
 def stub_linux_x86_64(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr("openconstraint_mcp.runtime_install.core.sys.platform", "linux")
+    monkeypatch.setattr("openconstraint_mcp.runtime_install.download.sys.platform", "linux")
     monkeypatch.setattr(
-        "openconstraint_mcp.runtime_install.core.platform.machine", lambda: "x86_64"
+        "openconstraint_mcp.runtime_install.download.platform.machine", lambda: "x86_64"
     )
+
+
+@pytest.fixture
+def stub_macos_arm64(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr("openconstraint_mcp.runtime_install.download.sys.platform", "darwin")
+    monkeypatch.setattr(
+        "openconstraint_mcp.runtime_install.download.platform.machine", lambda: "arm64"
+    )
+
+
+@pytest.fixture
+def stub_dmg_pipeline(monkeypatch: pytest.MonkeyPatch) -> list[Path]:
+    """Replace download and dmg extraction with fakes. The fake extractor
+    creates an executable ``bin/minizinc`` stub and records each destination
+    so tests can assert the installer dispatched to the dmg path."""
+    extract_calls: list[Path] = []
+
+    def _fake_download(url: str, dest: Path, expected_sha256: str, console: Console) -> None:
+        dest.write_bytes(b"fake dmg bytes")
+
+    def _fake_extract(archive: Path, dest: Path) -> None:
+        extract_calls.append(dest)
+        bin_dir = dest / "bin"
+        bin_dir.mkdir(parents=True)
+        binary = bin_dir / "minizinc"
+        binary.write_bytes(b"#!/bin/sh\necho 'minizinc 2.9.7 (fake)'\n")
+        binary.chmod(0o755)
+
+    monkeypatch.setattr("openconstraint_mcp.runtime_install.core._download_archive", _fake_download)
+    monkeypatch.setattr(
+        "openconstraint_mcp.runtime_install.core._extract_dmg_bundle", _fake_extract
+    )
+    return extract_calls
 
 
 @pytest.fixture
@@ -75,30 +108,67 @@ def test_install_writes_marker(
     assert data["minizinc_version"] == MINIZINC_VERSION
 
 
+def test_install_macos_arm64_dispatches_to_dmg_extractor(
+    tmp_path: Path,
+    stub_macos_arm64: None,
+    stub_dmg_pipeline: list[Path],
+) -> None:
+    target = tmp_path / "runtime"
+    result = install_managed_runtime(target, console=_quiet_console())
+    assert result == target.resolve()
+    binary = result / "bin" / "minizinc"
+    assert binary.is_file()
+    assert os.access(binary, os.X_OK)
+    assert len(stub_dmg_pipeline) == 1
+
+
+def test_install_macos_arm64_smoke_check_failure_leaves_target_untouched(
+    tmp_path: Path,
+    stub_macos_arm64: None,
+    stub_dmg_pipeline: list[Path],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def _boom(binary: Path) -> None:
+        raise RuntimeInstallError("smoke-check failed")
+
+    monkeypatch.setattr("openconstraint_mcp.runtime_install.core._smoke_check_binary", _boom)
+
+    target = tmp_path / "runtime"
+    with pytest.raises(RuntimeInstallError):
+        install_managed_runtime(target, console=_quiet_console())
+    assert not (target / "bin" / "minizinc").exists()
+    siblings = [p for p in tmp_path.iterdir() if p.name.startswith(f".{target.name}.")]
+    assert siblings == []
+
+
 def test_install_rejects_unsupported_platform(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setattr("openconstraint_mcp.runtime_install.core.sys.platform", "darwin")
+    monkeypatch.setattr("openconstraint_mcp.runtime_install.download.sys.platform", "darwin")
     monkeypatch.setattr(
-        "openconstraint_mcp.runtime_install.core.platform.machine", lambda: "x86_64"
+        "openconstraint_mcp.runtime_install.download.platform.machine", lambda: "x86_64"
     )
     with pytest.raises(RuntimeInstallError) as exc_info:
         install_managed_runtime(tmp_path / "runtime", console=_quiet_console())
-    assert "Linux x86_64" in str(exc_info.value)
+    message = str(exc_info.value)
+    assert "Linux x86_64" in message
+    assert "macOS arm64" in message
 
 
 def test_install_rejects_unsupported_arch(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setattr("openconstraint_mcp.runtime_install.core.sys.platform", "linux")
+    monkeypatch.setattr("openconstraint_mcp.runtime_install.download.sys.platform", "linux")
     monkeypatch.setattr(
-        "openconstraint_mcp.runtime_install.core.platform.machine", lambda: "aarch64"
+        "openconstraint_mcp.runtime_install.download.platform.machine", lambda: "aarch64"
     )
     with pytest.raises(RuntimeInstallError) as exc_info:
         install_managed_runtime(tmp_path / "runtime", console=_quiet_console())
-    assert "Linux x86_64" in str(exc_info.value)
+    message = str(exc_info.value)
+    assert "Linux x86_64" in message
+    assert "macOS arm64" in message
 
 
 def test_install_refuses_unmanaged_nonempty_target_even_with_yes(

@@ -1,0 +1,41 @@
+{
+  "managed_by": "openconstraint-mcp",
+  "tool_version": "0.1.0",
+  "created_at": "2026-06-11T22:25:54.579794+00:00",
+  "solver": "cp-sat",
+  "solve_controls": {
+    "timeout_ms": 10000,
+    "free_search": false,
+    "parallel": null,
+    "random_seed": null,
+    "all_solutions": false,
+    "num_solutions": null
+  },
+  "verification": {
+    "check_status": "ok",
+    "solve_status": "satisfied",
+    "checker_status": null
+  },
+  "artifacts": [
+    {
+      "role": "model",
+      "path": "model.mzn",
+      "sha256": "d791bb37f16f8d5d4d7ff4ddd3deba23c8bc9e6d445438b9136090ac65d56b15"
+    },
+    {
+      "role": "data",
+      "path": "data.dzn",
+      "sha256": "8711571ad48a5a560edd0b7d66b6a17668b307c7c85f341d41212381ec2b7480"
+    },
+    {
+      "role": "problem",
+      "path": "problem.md",
+      "sha256": "0cbf66d30798b9da851ef193b9a53774b21d2ef015c58a242d6d091a115413f2"
+    },
+    {
+      "role": "solve_result",
+      "path": "solve-result.json",
+      "sha256": "c925cf6e6efc7b6412adaf94b694ad27e80948960d9130a420e97b98bd6accd2"
+    }
+  ]
+}

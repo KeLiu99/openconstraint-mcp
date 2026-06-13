@@ -1,0 +1,11 @@
+include "alldifferent.mzn";
+int: m;
+int: max_len;
+array[1..m] of var 0..max_len: mark;
+constraint mark[1] = 0;
+constraint forall(i in 1..m-1)(mark[i] < mark[i+1]);
+array[int] of var int: diffs = [mark[j] - mark[i] | i in 1..m-1, j in i+1..m];
+constraint alldifferent(diffs);
+constraint mark[2] - mark[1] < mark[m] - mark[m-1];
+solve minimize mark[m];
+output ["marks = ", show(mark), "\n"];

@@ -1,7 +1,11 @@
 from __future__ import annotations
 
 import hashlib
+import platform
+import sys
+from dataclasses import dataclass
 from pathlib import Path
+from typing import Literal
 
 import httpx
 from rich.console import Console
@@ -18,15 +22,65 @@ from .errors import RuntimeInstallError
 
 MINIZINC_VERSION: str = "2.9.7"
 
-# SHA256 of MiniZincIDE-2.9.7-bundle-linux-x86_64.tgz from the upstream
-# MiniZincIDE GitHub release. Recompute alongside MINIZINC_VERSION when bumping.
-_ARCHIVE_SHA256: str = "7e78d3a1d6feec2f5b6a43628632decb6995755ade92ff4e51a2188c54ca6399"
+BundleKind = Literal["tgz", "dmg"]
 
-_BUNDLE_FILENAME: str = f"MiniZincIDE-{MINIZINC_VERSION}-bundle-linux-x86_64.tgz"
-_BUNDLE_URL: str = (
-    f"https://github.com/MiniZinc/MiniZincIDE/releases/download/{MINIZINC_VERSION}/"
-    f"{_BUNDLE_FILENAME}"
+
+@dataclass(frozen=True)
+class BundleSpec:
+    """One pinned upstream MiniZinc release asset the installer can fetch."""
+
+    filename: str
+    url: str
+    sha256: str
+    kind: BundleKind
+
+
+def _release_url(filename: str) -> str:
+    return (
+        f"https://github.com/MiniZinc/MiniZincIDE/releases/download/{MINIZINC_VERSION}/"
+        f"{filename}"
+    )
+
+
+# SHA256s of the upstream MiniZincIDE GitHub release assets. Recompute
+# alongside MINIZINC_VERSION when bumping.
+_LINUX_X86_64_FILENAME = f"MiniZincIDE-{MINIZINC_VERSION}-bundle-linux-x86_64.tgz"
+_LINUX_X86_64_BUNDLE = BundleSpec(
+    filename=_LINUX_X86_64_FILENAME,
+    url=_release_url(_LINUX_X86_64_FILENAME),
+    sha256="7e78d3a1d6feec2f5b6a43628632decb6995755ade92ff4e51a2188c54ca6399",
+    kind="tgz",
 )
+
+# The macOS asset is a universal (x86_64 + arm64) build; gating it to Apple
+# Silicon is a deliberate v0 scope choice, not an upstream constraint.
+_MACOS_FILENAME = f"MiniZincIDE-{MINIZINC_VERSION}-bundled.dmg"
+_MACOS_ARM64_BUNDLE = BundleSpec(
+    filename=_MACOS_FILENAME,
+    url=_release_url(_MACOS_FILENAME),
+    sha256="504d04d3315f2a76455b71feff2cc2b3105ecd5533e8194fa2365bc41289d9d9",
+    kind="dmg",
+)
+
+
+def select_bundle() -> BundleSpec:
+    """Resolve the managed bundle for the current platform.
+
+    Raises :class:`RuntimeInstallError` when no managed bundle exists for this
+    platform/architecture, so callers gate before prompting or downloading.
+    """
+    machine = platform.machine()
+    if sys.platform == "linux" and machine == "x86_64":
+        return _LINUX_X86_64_BUNDLE
+    if sys.platform == "darwin" and machine == "arm64":
+        return _MACOS_ARM64_BUNDLE
+    raise RuntimeInstallError(
+        "openconstraint-mcp install-runtime currently supports Linux x86_64 "
+        "and macOS arm64 (Apple Silicon) only. On other platforms, install "
+        "MiniZinc manually and point openconstraint-mcp at it with "
+        "`openconstraint-mcp configure-runtime --runtime-dir <dir>` or by "
+        "setting OPENCONSTRAINT_MCP_RUNTIME_DIR."
+    )
 
 
 def _download_archive(

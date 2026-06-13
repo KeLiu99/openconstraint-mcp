@@ -7,8 +7,19 @@ import httpx
 import pytest
 from rich.console import Console
 
-from openconstraint_mcp.runtime_install.download import MINIZINC_VERSION, _download_archive
+from openconstraint_mcp.runtime_install.download import (
+    MINIZINC_VERSION,
+    _download_archive,
+    select_bundle,
+)
 from openconstraint_mcp.runtime_install.errors import RuntimeInstallError
+
+
+def _stub_platform(monkeypatch: pytest.MonkeyPatch, platform_name: str, machine: str) -> None:
+    monkeypatch.setattr("openconstraint_mcp.runtime_install.download.sys.platform", platform_name)
+    monkeypatch.setattr(
+        "openconstraint_mcp.runtime_install.download.platform.machine", lambda: machine
+    )
 
 
 def test_module_exposes_version_constant() -> None:
@@ -17,6 +28,52 @@ def test_module_exposes_version_constant() -> None:
 
 def test_runtime_install_error_is_runtime_error() -> None:
     assert issubclass(RuntimeInstallError, RuntimeError)
+
+
+def test_select_bundle_linux_x86_64_resolves_tgz(monkeypatch: pytest.MonkeyPatch) -> None:
+    _stub_platform(monkeypatch, "linux", "x86_64")
+    bundle = select_bundle()
+    assert bundle.kind == "tgz"
+    assert bundle.filename == "MiniZincIDE-2.9.7-bundle-linux-x86_64.tgz"
+    assert bundle.url == (
+        "https://github.com/MiniZinc/MiniZincIDE/releases/download/2.9.7/"
+        "MiniZincIDE-2.9.7-bundle-linux-x86_64.tgz"
+    )
+    assert bundle.sha256 == "7e78d3a1d6feec2f5b6a43628632decb6995755ade92ff4e51a2188c54ca6399"
+
+
+def test_select_bundle_macos_arm64_resolves_dmg(monkeypatch: pytest.MonkeyPatch) -> None:
+    _stub_platform(monkeypatch, "darwin", "arm64")
+    bundle = select_bundle()
+    assert bundle.kind == "dmg"
+    assert bundle.filename == "MiniZincIDE-2.9.7-bundled.dmg"
+    assert bundle.url == (
+        "https://github.com/MiniZinc/MiniZincIDE/releases/download/2.9.7/"
+        "MiniZincIDE-2.9.7-bundled.dmg"
+    )
+    assert bundle.sha256 == "504d04d3315f2a76455b71feff2cc2b3105ecd5533e8194fa2365bc41289d9d9"
+
+
+@pytest.mark.parametrize(
+    ("platform_name", "machine"),
+    [
+        ("darwin", "x86_64"),
+        ("linux", "aarch64"),
+        ("win32", "AMD64"),
+    ],
+)
+def test_select_bundle_rejects_unsupported_platforms(
+    monkeypatch: pytest.MonkeyPatch,
+    platform_name: str,
+    machine: str,
+) -> None:
+    _stub_platform(monkeypatch, platform_name, machine)
+    with pytest.raises(RuntimeInstallError) as exc_info:
+        select_bundle()
+    message = str(exc_info.value)
+    assert "Linux x86_64" in message
+    assert "macOS arm64" in message
+    assert "configure-runtime" in message
 
 
 def _install_mock_transport(

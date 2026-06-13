@@ -56,7 +56,7 @@ The `openconstraint-mcp` script will be available via `uv run openconstraint-mcp
 After installing the package above:
 
 1. **Set up MiniZinc** — one of:
-   - `openconstraint-mcp install-runtime` to fetch and install the managed bundle (Linux x86_64).
+   - `openconstraint-mcp install-runtime` to fetch and install the managed bundle (Linux x86_64, macOS arm64).
    - `openconstraint-mcp configure-runtime --runtime-dir <path>` to point the package at an existing MiniZinc install (a directory containing `bin/minizinc`).
 2. **Verify:** `openconstraint-mcp check-runtime` and `openconstraint-mcp list-solvers`.
 3. **Wire into your MCP client.** This repository includes `.mcp.json` for clients
@@ -91,12 +91,12 @@ The package exposes five commands:
 - **`openconstraint-mcp stdio`** — run the MCP server over stdio. This is the entry
   point an MCP client (e.g. Claude Desktop, Claude Code) launches.
 - **`openconstraint-mcp install-runtime`** — fetch and install the managed
-  MiniZinc bundle (Linux x86_64 only in v0). Streams the pinned upstream archive
-  from the MiniZinc GitHub release, verifies its SHA256, extracts it into the
-  chosen target, smoke-checks the resulting `bin/minizinc`, and remembers the
-  install location so `check-runtime` and `list-solvers` find it without further
-  configuration. This is the **only** command in the package that touches the
-  network.
+  MiniZinc bundle (Linux x86_64 and macOS arm64 in v0). Streams the pinned
+  upstream archive from the MiniZinc GitHub release (a `.tgz` on Linux, a `.dmg`
+  on macOS), verifies its SHA256, extracts it into the chosen target,
+  smoke-checks the resulting `bin/minizinc`, and remembers the install location
+  so `check-runtime` and `list-solvers` find it without further configuration.
+  This is the **only** command in the package that touches the network.
 
   Flags:
 
@@ -808,9 +808,16 @@ MiniZinc bundle on disk. The first invocation:
 1. Resolves the install location. Precedence is `--runtime-dir` > the env var >
    the persisted install config > the platformdirs default
    (`<platformdirs user_data_dir>/minizinc`).
-2. Streams the pinned MiniZinc bundle from the official MiniZinc GitHub release,
-   verifies its SHA256, extracts it safely, and smoke-checks the resulting
-   `bin/minizinc`.
+2. Streams the pinned MiniZinc bundle for your platform from the official
+   MiniZinc GitHub release — the Linux x86_64 `.tgz`, or the macOS `.dmg` on
+   Apple Silicon (mounted read-only via `hdiutil` and reshaped into the same
+   `bin`/`lib`/`share` layout) — verifies its SHA256, extracts it safely, and
+   smoke-checks the resulting `bin/minizinc`. On macOS the bundled Gecode is the
+   Qt-linked build, so the installer vendors its Qt frameworks into
+   `<runtime>/Frameworks` and relinks the solver to load them headlessly (no
+   GUI is ever launched). That relink step uses the Xcode Command Line Tools, so
+   run `xcode-select --install` first if `install-runtime` reports
+   `install_name_tool` is missing.
 3. Writes a small JSON config (`<platformdirs user_config_dir>/install.json`,
    typically `~/.config/openconstraint-mcp/install.json` on Linux) recording the
    chosen path.
@@ -851,11 +858,12 @@ The server also advertises its project `Homepage` to MCP clients via the
 This is an early release; the focus is "easy install, reliable solving, clear
 errors" rather than feature breadth. In particular:
 
-- **The automated installer is Linux x86_64 only.** macOS, Windows, and Linux
-  ARM bundles are tracked separately. On those platforms, `install-runtime`
-  exits 1 with a clear message — point `OPENCONSTRAINT_MCP_RUNTIME_DIR` at an
-  existing MiniZinc install (a directory containing `bin/minizinc`) in the
-  meantime.
+- **The automated installer covers Linux x86_64 and macOS arm64 (Apple
+  Silicon).** Windows, Linux ARM, and macOS x86_64 (Intel) bundles are tracked
+  separately. On those platforms, `install-runtime` exits 1 with a clear
+  message — use `configure-runtime --runtime-dir <path>` or point
+  `OPENCONSTRAINT_MCP_RUNTIME_DIR` at an existing MiniZinc install (a directory
+  containing `bin/minizinc`) in the meantime.
 - **No telemetry, ever**, unless and until you explicitly opt in to a clearly
   labelled future feature.
 - **The only code path that touches the network is the `install-runtime` CLI
@@ -866,7 +874,8 @@ errors" rather than feature breadth. In particular:
 
 `openconstraint-mcp` is licensed under the Apache License 2.0; see `LICENSE`.
 The MiniZinc runtime it wraps is
-**fetched** from the official MiniZincIDE GitHub release at install time — this
+**fetched** from the official MiniZincIDE GitHub release at install time — the
+Linux x86_64 `.tgz` or the macOS `.dmg`, depending on your platform — this
 repository does **not** redistribute MiniZinc or its bundled solvers.
 
 The upstream bundle includes:
