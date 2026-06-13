@@ -1,19 +1,22 @@
-% Social Golfer Problem (SGP).
+% Social Golfer Problem (SGP) — alldifferent encoding + strong week-2 symmetry break.
 %
-% Schedule n_groups * group_size golfers into n_groups groups of group_size
-% golfers, once per week for n_weeks weeks, so that no two golfers ever share a
-% group more than once ("maximum socialisation": no repeated pairs).
+% Key insight from Liu, Löffler, Hofstedt (2019): fixing week 2 with a
+% transversal cross-cutting of week-1 groups dramatically reduces the
+% search space for instances of the form g-s-w where g is a multiple of s.
+% For 6-3-8, this means: groups in week 2 take one golfer from each of
+% the first s week-1 groups (and similarly for subsequent blocks of s groups).
 %
-% "As many weeks as possible" is this same satisfaction problem re-solved with
-% n_weeks raised until it becomes unsatisfiable. The classic 15-golfer instance
-% (5 groups of 3) tops out at 7 weeks -- Kirkman's schoolgirls, where all 105
-% pairs meet exactly once ("full socialisation"); 8 weeks is infeasible.
+% Week 1: natural partition (1,2,3)(4,5,6)(7,8,9)(10,11,12)(13,14,15)(16,17,18)
+% Week 2: transversal: (1,4,7)(2,5,8)(3,6,9)(10,13,16)(11,14,17)(12,15,18)
+%
+% This is valid symmetry breaking because any schedule can be relabelled
+% (permuting group labels in week 2) to satisfy this pattern.
 
 include "globals.mzn";
 
-int: n_groups;                  % groups playing each week (m)
-int: group_size;                % golfers per group (n)
-int: n_weeks;                   % weeks to schedule (p)
+int: n_groups;
+int: group_size;
+int: n_weeks;
 
 int: n_golfers = n_groups * group_size;
 
@@ -21,43 +24,66 @@ set of int: GROUP  = 1..n_groups;
 set of int: GOLFER = 1..n_golfers;
 set of int: WEEK   = 1..n_weeks;
 
-% group[w, p] = the group golfer p plays in during week w.
-array[WEEK, GOLFER] of var GROUP: group;
+% schedule[w, g, s] = the s-th golfer in group g during week w.
+array[WEEK, GROUP, 1..group_size] of var GOLFER: schedule;
 
-% Every group, every week, holds exactly group_size golfers.
+% Each week is a permutation of all golfers (each golfer exactly once)
+constraint forall(w in WEEK)(
+    alldifferent([schedule[w, g, s] | g in GROUP, s in 1..group_size])
+);
+
+% Within each group, golfers are sorted (break intra-group permutation)
 constraint forall(w in WEEK, g in GROUP)(
-    sum(p in GOLFER)(bool2int(group[w, p] = g)) = group_size
+    increasing([schedule[w, g, s] | s in 1..group_size])
+);
+
+% Week 1: natural partition
+constraint forall(g in GROUP, s in 1..group_size)(
+    schedule[1, g, s] = (g - 1) * group_size + s
+);
+
+% Week 2: transversal cross-cutting of week-1 groups.
+% Partition the n_groups into blocks of group_size groups each.
+% Within each block of group_size groups, week-2 group g takes the g-th
+% golfer from EACH of the group_size week-1 groups in that block.
+% For block b (0-indexed), week-1 groups are indices (b*group_size + s)
+% and their g-th golfer is (b*group_size + s - 1)*group_size + g.
+constraint forall(b in 0..(n_groups div group_size - 1))(
+    let {
+        int: block_start = b * group_size
+    } in
+    forall(g in 1..group_size, s in 1..group_size)(
+        schedule[2, block_start + g, s] =
+            (block_start + s - 1) * group_size + g
+    )
+);
+
+% Symmetry: groups ordered by smallest member within each week (weeks 3+)
+constraint forall(w in WEEK where w > 2)(
+    forall(g in 2..n_groups)(
+        schedule[w, g-1, 1] < schedule[w, g, 1]
+    )
+);
+
+% Derive: which group does golfer p play in during week w?
+array[WEEK, GOLFER] of var GROUP: golfer_group;
+
+constraint forall(w in WEEK, g in GROUP, s in 1..group_size)(
+    golfer_group[w, schedule[w, g, s]] = g
 );
 
 % No pair of golfers shares a group in more than one week.
 constraint forall(p1, p2 in GOLFER where p1 < p2)(
-    sum(w in WEEK)(bool2int(group[w, p1] = group[w, p2])) <= 1
-);
-
-% --- Symmetry breaking (the schedule is highly symmetric; this is what keeps
-% the search tractable and makes enumerated solutions meaningfully distinct) ---
-
-% Week 1 is fixed to the "natural" partition: golfers 1..group_size in group 1,
-% the next group_size in group 2, and so on.
-constraint forall(p in GOLFER)(
-    group[1, p] = (p - 1) div group_size + 1
-);
-
-% Break the per-week group-relabelling symmetry: within each week, group label k
-% must first appear (in golfer order) before label k+1. This also pins golfer 1
-% to group 1 every week, since golfer 1 is the first index.
-constraint forall(w in WEEK)(
-    value_precede_chain([g | g in GROUP], [group[w, p] | p in GOLFER])
+    sum(w in WEEK)(golfer_group[w, p1] = golfer_group[w, p2]) <= 1
 );
 
 solve satisfy;
 
-% One line per week, listing each group's golfers.
 output [
     "Week \(w): " ++
-    concat(
-        [ "[" ++ join(" ", [ "\(p)" | p in GOLFER where fix(group[w, p]) = g ]) ++ "] "
-        | g in GROUP ]
-    ) ++ "\n"
+    concat([
+        "[" ++ join(" ", [ "\(schedule[w, g, s])" | s in 1..group_size ]) ++ "] "
+        | g in GROUP
+    ]) ++ "\n"
     | w in WEEK
 ];

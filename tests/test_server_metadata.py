@@ -7,9 +7,10 @@ import pytest
 
 # Tests deliberately white-box server internals, which are private by design.
 # noinspection PyProtectedMember
+from openconstraint_mcp.jobs import JobRegistry
 from openconstraint_mcp.server import (
     _homepage_url,
-    _lifespan,
+    _make_lifespan,
     _server_version,
     create_mcp_server,
 )
@@ -71,7 +72,7 @@ async def test_boot_diagnostic_warns_when_runtime_missing(
     fake_runtime_dir: Path,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    async with _lifespan(create_mcp_server()):
+    async with _make_lifespan(JobRegistry())(create_mcp_server()):
         pass
 
     err = capsys.readouterr().err
@@ -86,7 +87,7 @@ async def test_boot_diagnostic_reports_installed_runtime(
     fake_minizinc_binary: Path,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    async with _lifespan(create_mcp_server()):
+    async with _make_lifespan(JobRegistry())(create_mcp_server()):
         pass
 
     err = capsys.readouterr().err
@@ -101,11 +102,29 @@ async def test_boot_diagnostic_writes_nothing_to_stdout(
 ) -> None:
     # Over stdio, stdout is the JSON-RPC channel; the banner must never land
     # there or it corrupts the protocol.
-    async with _lifespan(create_mcp_server()):
+    async with _make_lifespan(JobRegistry())(create_mcp_server()):
         pass
 
     assert capsys.readouterr().out == ""
 
 
-def test_lifespan_is_wired_into_server() -> None:
-    assert create_mcp_server().settings.lifespan is _lifespan
+@pytest.mark.asyncio
+async def test_lifespan_teardown_shuts_down_the_server_registry(
+    fake_runtime_dir: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # The server's own lifespan must terminate its job registry on exit (orphan
+    # handling). Driving the wired lifespan and spying the class-level shutdown
+    # proves create_mcp_server() bound the teardown to its registry.
+    calls: list[bool] = []
+    monkeypatch.setattr(
+        "openconstraint_mcp.jobs.JobRegistry.shutdown",
+        lambda self: calls.append(True),
+    )
+    server = create_mcp_server()
+    lifespan = server.settings.lifespan
+    assert lifespan is not None
+
+    async with lifespan(server):
+        assert calls == []
+    assert calls == [True]

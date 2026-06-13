@@ -1,13 +1,18 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import subprocess
 import threading
+import time
 from pathlib import Path
 from typing import Any
 
 import pytest
 from mcp.types import CallToolResult
+
+from openconstraint_mcp.jobs import JobRejectedError
+from openconstraint_mcp.schemas import SolveResult
 
 # Tests deliberately white-box server internals, which are private by design.
 # noinspection PyProtectedMember
@@ -1905,3 +1910,191 @@ async def test_save_verified_minizinc_model_not_verified_is_normal_result(
     assert structured["files"] == []
     assert "nothing was written" in _content_text(result)
     assert not target.exists()
+
+
+# --- background solve jobs (submit / get / cancel / list) -------------------
+
+_JOB_TERMINAL_STATES = {"succeeded", "failed", "timeout", "cancelled"}
+
+
+def _job_solve_result(status: str = "satisfied") -> SolveResult:
+    return SolveResult(
+        status=status,  # type: ignore[arg-type]
+        solver="cp-sat",
+        return_code=0,
+        timed_out=False,
+        stdout="x = 1;\n",
+        stderr="",
+        elapsed_ms=3,
+        solution={"x": 1},
+        solutions=[{"x": 1}],
+        objective=None,
+    )
+
+
+class _JobFakeProc:
+    """A process-handle stand-in; ``poll`` reports it as already exited."""
+
+    def poll(self) -> int:
+        return 0
+
+
+def _patch_job_solve(monkeypatch: pytest.MonkeyPatch, fake: Any) -> None:
+    monkeypatch.setattr("openconstraint_mcp.jobs.solve_model_cancellable", fake)
+
+
+async def _poll_job_status(mcp: Any, job_id: str, timeout: float = 3.0) -> dict[str, Any]:
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        status = _structured(await mcp.call_tool("get_solve_job", {"job_id": job_id}))
+        if status["state"] in _JOB_TERMINAL_STATES:
+            return status
+        await asyncio.sleep(0.01)
+    raise AssertionError(f"job {job_id} did not reach a terminal state within {timeout}s")
+
+
+@pytest.mark.asyncio
+async def test_job_tools_are_listed_with_expected_properties() -> None:
+    mcp = create_mcp_server()
+    tools = await mcp.list_tools()
+    by_name = {tool.name: tool for tool in tools}
+
+    for name in ("submit_solve_job", "get_solve_job", "cancel_solve_job", "list_solve_jobs"):
+        assert name in by_name
+
+    # submit mirrors solve_minizinc_model's inline surface and search controls.
+    submit_props = by_name["submit_solve_job"].inputSchema.get("properties", {})
+    assert {
+        "model",
+        "data",
+        "checker",
+        "solver",
+        "timeout_ms",
+        "free_search",
+        "parallel",
+        "random_seed",
+        "all_solutions",
+        "num_solutions",
+    } <= set(submit_props)
+
+    for name in ("get_solve_job", "cancel_solve_job"):
+        assert "job_id" in by_name[name].inputSchema.get("properties", {})
+    assert by_name["list_solve_jobs"].inputSchema.get("properties", {}) == {}
+
+
+@pytest.mark.asyncio
+async def test_submit_returns_running_or_queued_then_get_reaches_succeeded(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _patch_job_solve(monkeypatch, lambda model, *, on_start, **kw: _job_solve_result("optimal"))
+
+    mcp = create_mcp_server()
+    submitted = _structured(
+        await mcp.call_tool("submit_solve_job", {"model": "var 1..5: x;\nsolve maximize x;"})
+    )
+    assert submitted["state"] in {"queued", "running", "succeeded"}
+    assert submitted["solver"] == "cp-sat"
+    job_id = submitted["job_id"]
+
+    final = await _poll_job_status(mcp, job_id)
+    assert final["state"] == "succeeded"
+    assert final["result"]["status"] == "optimal"
+
+
+@pytest.mark.asyncio
+async def test_cancel_solve_job_terminates_running_job(monkeypatch: pytest.MonkeyPatch) -> None:
+    started = threading.Event()
+    release = threading.Event()
+    terminated: list[Any] = []
+
+    def _blocking_solve(model: str, *, on_start: Any, **kw: Any) -> SolveResult:
+        on_start(_JobFakeProc())
+        started.set()
+        release.wait(timeout=5)
+        return _job_solve_result()
+
+    def _fake_terminate(proc: Any, **kwargs: Any) -> None:
+        terminated.append(proc)
+        release.set()  # the "process" dying unblocks the worker
+
+    _patch_job_solve(monkeypatch, _blocking_solve)
+    monkeypatch.setattr("openconstraint_mcp.jobs._terminate_process_tree", _fake_terminate)
+
+    mcp = create_mcp_server()
+    try:
+        job_id = _structured(
+            await mcp.call_tool("submit_solve_job", {"model": "solve satisfy;"})
+        )["job_id"]
+        assert started.wait(timeout=3)
+        await mcp.call_tool("cancel_solve_job", {"job_id": job_id})
+
+        final = await _poll_job_status(mcp, job_id)
+        assert final["state"] == "cancelled"
+        assert final["result"] is None
+        assert terminated  # the running child's process tree was signalled
+    finally:
+        release.set()
+
+
+@pytest.mark.asyncio
+async def test_get_solve_job_unknown_id_surfaces_actionable_error() -> None:
+    mcp = create_mcp_server()
+    with pytest.raises(Exception) as exc_info:
+        await mcp.call_tool("get_solve_job", {"job_id": "does-not-exist"})
+    assert "unknown" in str(exc_info.value)
+
+
+@pytest.mark.asyncio
+async def test_submit_solve_job_queue_full_surfaces_actionable_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def _raise(self: Any, **kwargs: Any) -> str:
+        raise JobRejectedError("Job queue is full (4 running + 16 queued).")
+
+    monkeypatch.setattr("openconstraint_mcp.jobs.JobRegistry.submit", _raise)
+
+    mcp = create_mcp_server()
+    with pytest.raises(Exception) as exc_info:
+        await mcp.call_tool("submit_solve_job", {"model": "solve satisfy;"})
+    assert "queue is full" in str(exc_info.value)
+
+
+@pytest.mark.asyncio
+async def test_submit_solve_job_invalid_num_solutions_surfaces_error_before_any_job(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # The cp-sat + num_solutions gate runs synchronously in submit, before a job
+    # exists; no worker/solve is created.
+    def _fail_if_called(model: str, *, on_start: Any, **kw: Any) -> SolveResult:
+        raise AssertionError("solve must not run when submit validation rejects the controls")
+
+    _patch_job_solve(monkeypatch, _fail_if_called)
+
+    mcp = create_mcp_server()
+    with pytest.raises(Exception) as exc_info:
+        await mcp.call_tool(
+            "submit_solve_job",
+            {"model": "solve satisfy;", "num_solutions": 2},
+        )
+    message = str(exc_info.value)
+    assert "num_solutions" in message
+    assert _structured(await mcp.call_tool("list_solve_jobs", {}))["result"] == []
+
+
+@pytest.mark.asyncio
+async def test_list_solve_jobs_returns_one_entry_per_submitted_job(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _patch_job_solve(monkeypatch, lambda model, *, on_start, **kw: _job_solve_result())
+
+    mcp = create_mcp_server()
+    ids: set[str] = set()
+    for _ in range(2):
+        job_id = _structured(
+            await mcp.call_tool("submit_solve_job", {"model": "solve satisfy;"})
+        )["job_id"]
+        ids.add(job_id)
+        await _poll_job_status(mcp, job_id)
+
+    listed = _structured(await mcp.call_tool("list_solve_jobs", {}))["result"]
+    assert {entry["job_id"] for entry in listed} == ids

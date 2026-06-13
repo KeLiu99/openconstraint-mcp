@@ -6,6 +6,7 @@ from typing import Any
 
 import pytest
 
+from openconstraint_mcp.jobs import JobRejectedError
 from openconstraint_mcp.minizinc.core import MiniZincExecutionError
 from openconstraint_mcp.runtime import RuntimeMissingError
 
@@ -265,3 +266,59 @@ def test_list_available_solvers_does_not_translate_value_error(
     with pytest.raises(ValueError) as exc_info:
         fn()
     assert exc_info.value is boom
+
+
+# --- background-job tools: unknown-id and queue-full translation ------------
+
+
+@pytest.mark.parametrize("tool_name", ["get_solve_job", "cancel_solve_job"])
+def test_job_lookup_tools_translate_unknown_id_with_cause(tool_name: str) -> None:
+    # The registry raises ValueError for an unknown job_id; the default-caught
+    # ValueError becomes a plain RuntimeError carrying the cause. These tools are
+    # synchronous (fast registry reads), so they are called directly.
+    fn = _tool_fn(tool_name)
+
+    with pytest.raises(RuntimeError) as exc_info:
+        fn(job_id="does-not-exist")
+
+    assert type(exc_info.value) is RuntimeError
+    assert "unknown" in str(exc_info.value)
+    assert isinstance(exc_info.value.__cause__, ValueError)
+
+
+def test_submit_solve_job_translates_queue_full_with_cause(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # JobRejectedError subclasses RuntimeError but is NOT in the default caught
+    # set, so submit_solve_job must name it explicitly; the assertion pins the
+    # exact RuntimeError type to prove translation (not subclass passthrough).
+    boom = JobRejectedError("Job queue is full (4 running + 16 queued).")
+
+    def _raise(self: object, **kwargs: object) -> str:
+        raise boom
+
+    monkeypatch.setattr("openconstraint_mcp.jobs.JobRegistry.submit", _raise)
+    fn = _tool_fn("submit_solve_job")
+
+    with pytest.raises(RuntimeError) as exc_info:
+        fn(model="solve satisfy;")
+
+    assert type(exc_info.value) is RuntimeError
+    assert "queue is full" in str(exc_info.value)
+    assert exc_info.value.__cause__ is boom
+
+
+def test_submit_solve_job_translates_value_error_with_cause(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # An empty model raises ValueError in submit's up-front validation, before any
+    # job or subprocess; the default caught set converts it to a plain RuntimeError.
+    monkeypatch.setattr("openconstraint_mcp.minizinc.core.subprocess.run", _no_subprocess)
+    fn = _tool_fn("submit_solve_job")
+
+    with pytest.raises(RuntimeError) as exc_info:
+        fn(model="")
+
+    assert type(exc_info.value) is RuntimeError
+    assert "empty" in str(exc_info.value)
+    assert isinstance(exc_info.value.__cause__, ValueError)

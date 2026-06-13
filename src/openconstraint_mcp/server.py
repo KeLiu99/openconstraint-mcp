@@ -4,7 +4,7 @@ import functools
 import inspect
 import sys
 from collections.abc import AsyncIterator, Awaitable, Callable
-from contextlib import asynccontextmanager
+from contextlib import AbstractAsyncContextManager, asynccontextmanager
 from importlib import metadata
 from pathlib import Path
 from typing import Annotated, Any, ParamSpec, TypeVar, cast
@@ -13,6 +13,7 @@ from anyio import to_thread
 from mcp.server.fastmcp import Context, FastMCP
 from mcp.types import CallToolResult, TextContent
 
+from .jobs import JobRegistry, JobRejectedError
 from .minizinc.core import (
     DEFAULT_CHECK_TIMEOUT_MS,
     DEFAULT_INSPECT_TIMEOUT_MS,
@@ -32,19 +33,23 @@ from .minizinc.core import (
 )
 from .minizinc.core import find_unsat_core as _find_unsat_core
 from .protocol_text.descriptions import (
+    CANCEL_SOLVE_JOB_DESCRIPTION,
     CHECK_MINIZINC_FILES_DESCRIPTION,
     CHECK_MINIZINC_MODEL_DESCRIPTION,
     CHECK_RUNTIME_DESCRIPTION,
     FIND_UNSAT_CORE_DESCRIPTION,
     FIND_UNSAT_CORE_FILES_DESCRIPTION,
+    GET_SOLVE_JOB_DESCRIPTION,
     INSPECT_MINIZINC_FILES_DESCRIPTION,
     INSPECT_MINIZINC_MODEL_DESCRIPTION,
     LIST_AVAILABLE_SOLVERS_DESCRIPTION,
+    LIST_SOLVE_JOBS_DESCRIPTION,
     MCP_SERVER_INSTRUCTIONS,
     SAVE_VERIFIED_MINIZINC_MODEL_DESCRIPTION,
     SOLVE_CONSTRAINT_PROBLEM_PROMPT_DESCRIPTION,
     SOLVE_MINIZINC_FILES_DESCRIPTION,
     SOLVE_MINIZINC_MODEL_DESCRIPTION,
+    SUBMIT_SOLVE_JOB_DESCRIPTION,
 )
 from .protocol_text.prompts import SOLVE_CONSTRAINT_PROBLEM_PROMPT
 from .protocol_text.results import (
@@ -61,6 +66,7 @@ from .schemas import (
     ModelInspectionResult,
     RuntimeStatus,
     SaveVerifiedModelResult,
+    SolveJobStatus,
     SolveResult,
     SolverList,
     UnsatCoreResult,
@@ -425,20 +431,41 @@ def _as_mcp_error(
     return _decorator
 
 
-@asynccontextmanager
-async def _lifespan(server: FastMCP[Any]) -> AsyncIterator[None]:
-    """Server lifespan: emit the boot diagnostic on startup; no teardown."""
-    _log_boot_diagnostic()
-    yield
+def _make_lifespan(
+    registry: JobRegistry,
+) -> Callable[[FastMCP[Any]], AbstractAsyncContextManager[None]]:
+    """Build the server lifespan bound to ``registry``.
+
+    Startup emits the boot diagnostic; teardown (after ``yield``) calls
+    ``registry.shutdown()`` so any still-running solve children are terminated
+    and the worker pool joined before the process exits. The registry is created
+    in ``create_mcp_server`` and captured by the job-tool closures, so the
+    lifespan must close over that same instance — hence a factory rather than a
+    module-level function.
+    """
+
+    @asynccontextmanager
+    async def _lifespan(server: FastMCP[Any]) -> AsyncIterator[None]:
+        _log_boot_diagnostic()
+        try:
+            yield
+        finally:
+            registry.shutdown()
+
+    return _lifespan
 
 
 def create_mcp_server() -> FastMCP:
     """Build a fresh FastMCP server and register all tools and prompts."""
+    # The single server-owned job registry (D1.1): one instance per server,
+    # captured by the job-tool closures and torn down by the lifespan. This is
+    # the deliberate, bounded exception to "no global mutable state".
+    registry = JobRegistry()
     mcp: FastMCP[Any] = FastMCP(
         "openconstraint-mcp",
         instructions=MCP_SERVER_INSTRUCTIONS,
         website_url=_homepage_url(),
-        lifespan=_lifespan,
+        lifespan=_make_lifespan(registry),
     )
 
     @mcp.tool(description=CHECK_RUNTIME_DESCRIPTION)
@@ -674,6 +701,56 @@ def create_mcp_server() -> FastMCP:
         )
         await _status_finished(ctx, _UNSAT_CORE_STAGES)
         return result
+
+    @mcp.tool(description=SUBMIT_SOLVE_JOB_DESCRIPTION)
+    # Validation raises ValueError; a full bounded queue raises JobRejectedError
+    # (a direct RuntimeError subclass, NOT in the default caught set) — both must
+    # surface as actionable MCP errors. The runtime is touched only in the worker,
+    # so RuntimeMissingError/MiniZincExecutionError cannot reach this submit path.
+    @_as_mcp_error(ValueError, JobRejectedError)
+    def submit_solve_job(
+        model: str,
+        data: str | None = None,
+        checker: str | None = None,
+        solver: str = DEFAULT_SOLVER,
+        timeout_ms: int = DEFAULT_SOLVE_TIMEOUT_MS,
+        free_search: bool = False,
+        parallel: int | None = None,
+        random_seed: int | None = None,
+        all_solutions: bool = False,
+        num_solutions: int | None = None,
+    ) -> SolveJobStatus:
+        job_id = registry.submit(
+            model=model,
+            solver=solver,
+            data=data,
+            checker=checker,
+            timeout_ms=timeout_ms,
+            free_search=free_search,
+            parallel=parallel,
+            random_seed=random_seed,
+            all_solutions=all_solutions,
+            num_solutions=num_solutions,
+        )
+        return registry.get(job_id)
+
+    @mcp.tool(description=GET_SOLVE_JOB_DESCRIPTION)
+    # An unknown job_id is the only domain error (ValueError); the registry reads
+    # touch no runtime, so the narrower caught set is honest.
+    @_as_mcp_error(ValueError)
+    def get_solve_job(job_id: str) -> SolveJobStatus:
+        return registry.get(job_id)
+
+    @mcp.tool(description=CANCEL_SOLVE_JOB_DESCRIPTION)
+    @_as_mcp_error(ValueError)
+    def cancel_solve_job(job_id: str) -> SolveJobStatus:
+        return registry.cancel(job_id)
+
+    @mcp.tool(description=LIST_SOLVE_JOBS_DESCRIPTION)
+    # Takes no arguments and only reads the registry, so no domain exception is
+    # reachable — nothing to translate.
+    def list_solve_jobs() -> list[SolveJobStatus]:
+        return registry.list()
 
     @mcp.prompt(
         name="solve_constraint_problem",

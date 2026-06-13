@@ -1,9 +1,9 @@
-% Kirkman's 15 schoolgirls, framed as a Social Golfer instance: 5 groups of 3
-% golfers, scheduled for 7 weeks. 15 is not divisible by 4, so this small case
-% uses groups of 3 rather than the original problem's groups of 4. At 7 weeks
-% every one of the 105 golfer pairs shares a group exactly once (full
-% socialisation); 8 weeks is infeasible, so 7 is the maximum.
+% Social Golfer instance 6-3-8: 18 golfers in 6 groups of 3, scheduled for 8
+% weeks so no pair of golfers ever shares a group more than once. Each golfer
+% shares a group with group_size - 1 = 2 others per week, so 9 weeks would need
+% 18 distinct partners out of only 17 others — 8 weeks is the most any 6-3
+% schedule can reach. model.mzn pins weeks 1-2 with a transversal symmetry break.
 
-n_groups   = 5;
+n_groups   = 6;
 group_size = 3;
-n_weeks    = 7;
+n_weeks    = 8;
