@@ -12,6 +12,7 @@ from openconstraint_mcp.runtime_install.core import (
     MANAGED_RUNTIME_MARKER,
     _swap_staging_into_place,
     _write_runtime_marker,
+    check_supported_platform,
     install_managed_runtime,
 )
 from openconstraint_mcp.runtime_install.download import MINIZINC_VERSION
@@ -32,6 +33,44 @@ def stub_macos_arm64(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(
         "openconstraint_mcp.runtime_install.download.platform.machine", lambda: "arm64"
     )
+
+
+@pytest.fixture
+def stub_windows_amd64(monkeypatch: pytest.MonkeyPatch) -> None:
+    # Faithful Windows host: select_bundle() (download.sys) resolves the nsis
+    # bundle, and core.sys drives the minizinc.exe smoke-check binary name.
+    monkeypatch.setattr("openconstraint_mcp.runtime_install.download.sys.platform", "win32")
+    monkeypatch.setattr(
+        "openconstraint_mcp.runtime_install.download.platform.machine", lambda: "AMD64"
+    )
+    monkeypatch.setattr("openconstraint_mcp.runtime_install.core.sys.platform", "win32")
+
+
+@pytest.fixture
+def stub_nsis_pipeline(monkeypatch: pytest.MonkeyPatch) -> list[Path]:
+    """Replace download and NSIS install with fakes. The fake installer creates
+    an executable ``bin/minizinc.exe`` stub and records each destination so tests
+    can assert the installer dispatched to the nsis path. The stub is a /bin/sh
+    script so the real smoke-check runs it on the non-Windows CI host (Linux
+    ignores the .exe suffix and honors the shebang)."""
+    install_calls: list[Path] = []
+
+    def _fake_download(url: str, dest: Path, expected_sha256: str, console: Console) -> None:
+        dest.write_bytes(b"fake nsis installer bytes")
+
+    def _fake_install(installer: Path, dest: Path) -> None:
+        install_calls.append(dest)
+        bin_dir = dest / "bin"
+        bin_dir.mkdir(parents=True)
+        binary = bin_dir / "minizinc.exe"
+        binary.write_bytes(b"#!/bin/sh\necho 'minizinc 2.9.7 (fake)'\n")
+        binary.chmod(0o755)
+
+    monkeypatch.setattr("openconstraint_mcp.runtime_install.core._download_archive", _fake_download)
+    monkeypatch.setattr(
+        "openconstraint_mcp.runtime_install.core._install_nsis_bundle", _fake_install
+    )
+    return install_calls
 
 
 @pytest.fixture
@@ -120,6 +159,25 @@ def test_install_macos_arm64_dispatches_to_dmg_extractor(
     assert binary.is_file()
     assert os.access(binary, os.X_OK)
     assert len(stub_dmg_pipeline) == 1
+
+
+def test_install_managed_runtime_dispatches_to_nsis_on_windows(
+    tmp_path: Path,
+    stub_windows_amd64: None,
+    stub_nsis_pipeline: list[Path],
+) -> None:
+    target = tmp_path / "runtime"
+    result = install_managed_runtime(target, console=_quiet_console())
+    assert result == target.resolve()
+    binary = result / "bin" / "minizinc.exe"
+    assert binary.is_file()
+    assert (result / MANAGED_RUNTIME_MARKER).is_file()
+    assert len(stub_nsis_pipeline) == 1
+
+
+def test_check_supported_platform_allows_windows_amd64(stub_windows_amd64: None) -> None:
+    # win32/AMD64 now resolves a bundle, so the gate must not raise.
+    check_supported_platform()
 
 
 def test_install_macos_arm64_smoke_check_failure_leaves_target_untouched(

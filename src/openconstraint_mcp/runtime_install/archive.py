@@ -1,9 +1,13 @@
 from __future__ import annotations
 
+import os
 import re
 import shutil
+import signal
 import subprocess
+import sys
 import tarfile
+import tempfile
 from pathlib import Path
 
 from .errors import RuntimeInstallError
@@ -58,6 +62,102 @@ def _extract_tgz_bundle(archive: Path, dest: Path) -> None:
     finally:
         if scratch.exists():
             shutil.rmtree(scratch, ignore_errors=True)
+
+
+_NSIS_RUNTIME_BINARY = Path("bin") / "minizinc.exe"
+_NSIS_RUNTIME_SHARE = Path("share")
+# Long enough for a human to answer a UAC prompt, but finite: on a headless
+# runner the elevation never resolves, so without a bound the installer hangs
+# forever. Ten minutes bounds that worst case.
+_NSIS_INSTALL_TIMEOUT_SECONDS = 600
+
+
+def _kill_process_tree(pid: int) -> None:
+    """Best-effort kill of the installer process *tree*.
+
+    The NSIS installer copies itself into ``%TEMP%`` and re-launches an elevated
+    worker, so terminating only the parent would leave that orphan
+    ``…setup-win64.tmp`` process alive. On Windows ``taskkill /F /T`` kills the
+    whole tree; elsewhere (defensive only — this path runs on Windows) a plain
+    ``os.kill`` is the best available. All errors are swallowed.
+    """
+    if sys.platform == "win32":
+        try:
+            subprocess.run(
+                ["taskkill", "/F", "/T", "/PID", str(pid)], capture_output=True, check=False
+            )
+        except OSError:
+            pass
+    else:
+        try:
+            os.kill(pid, signal.SIGKILL)
+        except OSError:
+            pass
+
+
+def _install_nsis_bundle(installer: Path, dest: Path) -> None:
+    """Run the Windows NSIS installer silently into ``dest``, time-bounded.
+
+    The installer is invoked as ``"<installer>" /S /D=<dest>`` — ``/S`` silent,
+    ``/D=`` the install directory. ``/D=`` must be the **last** argument and
+    **unquoted**: NSIS reads everything after ``/D=`` to end-of-line as the path
+    (spaces included). The command is therefore built as a single command-line
+    *string* with only the executable quoted, never an argv list — Python's
+    Windows list→command-line conversion would quote a ``/D=`` token containing
+    spaces (e.g. ``C:\\Program Files\\...``) and embed the quotes into the
+    install path. No GUI/IDE is launched; only the silent runtime install runs.
+
+    Output is redirected to a temp file rather than captured through a pipe: the
+    NSIS installer re-launches an elevated grandchild that can hold an anonymous
+    pipe open and deadlock ``subprocess.run``/``communicate`` even during timeout
+    cleanup. With output going to a file, ``Popen.wait(timeout=...)`` is safe and
+    bounds the run; on timeout the process *tree* is killed (the orphan elevated
+    worker too) and an actionable error is raised. The file is read back for
+    diagnostics on a non-zero exit.
+
+    On a non-zero exit, a missing installer, a timeout, or a successful exit that
+    left no ``bin\\minizinc.exe`` tree behind, raises :class:`RuntimeInstallError`
+    with actionable text.
+    """
+    command = f'"{installer}" /S /D={dest}'
+    with tempfile.TemporaryDirectory(prefix="oc-mcp-nsis-") as logdir:
+        log = Path(logdir) / "installer.log"
+        try:
+            with log.open("w") as sink:
+                proc = subprocess.Popen(
+                    command, stdout=sink, stderr=subprocess.STDOUT, text=True
+                )
+        except FileNotFoundError as exc:
+            raise RuntimeInstallError(
+                f"could not run the MiniZinc Windows installer {installer}; installing "
+                "the managed runtime from the NSIS bundle requires a Windows host."
+            ) from exc
+        try:
+            proc.wait(timeout=_NSIS_INSTALL_TIMEOUT_SECONDS)
+        except subprocess.TimeoutExpired:
+            _kill_process_tree(proc.pid)
+            minutes = _NSIS_INSTALL_TIMEOUT_SECONDS // 60
+            raise RuntimeInstallError(
+                f"the MiniZinc Windows installer did not complete within {minutes} "
+                "minutes. If you ran install-runtime from a non-interactive or "
+                "non-elevated context, the Windows UAC elevation prompt is blocking "
+                "it — run install-runtime from an elevated terminal."
+            ) from None
+        output = log.read_text(errors="replace").strip()
+
+    if proc.returncode != 0:
+        raise RuntimeInstallError(
+            f"MiniZinc Windows installer exited {proc.returncode}: {output}"
+        )
+
+    missing = [
+        str(rel) for rel in (_NSIS_RUNTIME_BINARY, _NSIS_RUNTIME_SHARE) if not (dest / rel).exists()
+    ]
+    if missing:
+        raise RuntimeInstallError(
+            "MiniZinc Windows installer reported success but the expected runtime "
+            f"tree is missing under {dest}: {', '.join(missing)}"
+        )
 
 
 def _attach_dmg(archive: Path, mountpoint: Path) -> None:

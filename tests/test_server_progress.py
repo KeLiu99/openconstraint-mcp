@@ -202,6 +202,11 @@ async def test_request_without_token_still_receives_info_log_feedback(
 
 @pytest.mark.integration
 @pytest.mark.asyncio
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="the fake solver is a POSIX shell-script stub; Windows' loader rejects a "
+    "non-PE file named minizinc.exe (WinError 216)",
+)
 async def test_stdio_delivers_running_milestone_while_solve_is_in_flight(
     tmp_path: Path,
 ) -> None:

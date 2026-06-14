@@ -12,6 +12,7 @@ import pytest
 from openconstraint_mcp.runtime_install.archive import (
     _extract_dmg_bundle,
     _extract_tgz_bundle,
+    _install_nsis_bundle,
     _vendor_gecode_qt_frameworks,
 )
 from openconstraint_mcp.runtime_install.errors import RuntimeInstallError
@@ -614,3 +615,189 @@ def test_vendor_follows_transitive_framework_closure(
     _vendor_gecode_qt_frameworks(app_dir, dest)
 
     assert (dest / "Frameworks" / "QtDBus.framework" / "Versions" / "A" / "QtDBus").is_file()
+
+
+# ---------------------------------------------------------------------------
+# Windows NSIS silent install
+
+
+class _FakeNsisProc:
+    """Stand-in for the ``subprocess.Popen`` handle the installer call returns.
+
+    ``wait`` reports the configured exit code, or raises
+    :class:`subprocess.TimeoutExpired` when primed to mimic the headless-UAC
+    hang the real bound guards against.
+    """
+
+    def __init__(self, *, returncode: int, timeout: bool) -> None:
+        self.pid = 4321
+        self.returncode = returncode
+        self._timeout = timeout
+
+    def wait(self, timeout: float | None = None) -> int:
+        if self._timeout:
+            raise subprocess.TimeoutExpired(cmd="installer", timeout=timeout)
+        return self.returncode
+
+
+class _FakeNsisInstaller:
+    """``subprocess.Popen`` stand-in for the Windows NSIS installer.
+
+    Records the command-line *string* it received and writes the configured
+    output to the redirect file the implementation passes as ``stdout`` — so the
+    diagnostics path reads back real bytes from its temp log. On a zero return
+    code it materializes the runtime tree at the ``/D=`` destination read back
+    out of that command, so a bug in command construction (a dropped or quoted
+    ``/D=``) fails loudly instead of passing silently. ``populate`` can omit the
+    binary to drive the missing-tree validation path; ``timeout`` primes the
+    returned handle's ``wait`` to raise :class:`subprocess.TimeoutExpired`.
+    """
+
+    def __init__(
+        self,
+        *,
+        returncode: int = 0,
+        populate: bool = True,
+        stdout: str = "",
+        stderr: str = "",
+        timeout: bool = False,
+    ) -> None:
+        self._returncode = returncode
+        self._populate = populate
+        self._stdout = stdout
+        self._stderr = stderr
+        self._timeout = timeout
+        self.commands: list[str] = []
+        self.proc: _FakeNsisProc | None = None
+
+    def __call__(self, command: str, **kwargs: object) -> _FakeNsisProc:
+        assert isinstance(command, str), f"NSIS install must use a command string, got {command!r}"
+        self.commands.append(command)
+        # The implementation redirects stdout+stderr to one file; mirror that by
+        # writing the combined output to the sink it passes as ``stdout``.
+        sink = kwargs.get("stdout")
+        if sink is not None and (self._stdout or self._stderr):
+            sink.write(self._stdout + self._stderr)  # type: ignore[attr-defined]
+        if self._returncode == 0 and self._populate and not self._timeout:
+            dest = Path(command.split("/D=", 1)[1])
+            bin_dir = dest / "bin"
+            bin_dir.mkdir(parents=True, exist_ok=True)
+            (bin_dir / "minizinc.exe").write_bytes(b"MZ\x00fake")
+            (dest / "share" / "minizinc").mkdir(parents=True, exist_ok=True)
+        self.proc = _FakeNsisProc(returncode=self._returncode, timeout=self._timeout)
+        return self.proc
+
+
+def _install_fake_nsis(monkeypatch: pytest.MonkeyPatch, fake: _FakeNsisInstaller) -> None:
+    monkeypatch.setattr("openconstraint_mcp.runtime_install.archive.subprocess.Popen", fake)
+
+
+def test_install_nsis_bundle_runs_silent_install(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fake = _FakeNsisInstaller()
+    _install_fake_nsis(monkeypatch, fake)
+    installer = tmp_path / "MiniZincIDE-2.9.7-bundled-setup-win64.exe"
+    installer.write_bytes(b"installer")
+    dest = tmp_path / "staging"
+    dest.mkdir()
+
+    _install_nsis_bundle(installer, dest)
+
+    assert len(fake.commands) == 1
+    command = fake.commands[0]
+    # exe quoted, /S present, /D= trailing and unquoted.
+    assert command.startswith(f'"{installer}"')
+    assert "/S" in command
+    assert command.endswith(f"/D={dest}")
+    assert '/D="' not in command
+    # Validation accepted the materialized tree.
+    assert (dest / "bin" / "minizinc.exe").is_file()
+
+
+def test_install_nsis_bundle_path_with_spaces_stays_unquoted(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fake = _FakeNsisInstaller()
+    _install_fake_nsis(monkeypatch, fake)
+    installer = tmp_path / "setup-win64.exe"
+    installer.write_bytes(b"installer")
+    # A parent with a space mimics C:\Program Files\... — the load-bearing case.
+    dest = tmp_path / "Program Files" / "runtime"
+    dest.parent.mkdir(parents=True)
+    dest.mkdir()
+
+    _install_nsis_bundle(installer, dest)
+
+    command = fake.commands[0]
+    # The /D= value must be the literal spaced path with no surrounding quotes;
+    # NSIS reads to end-of-line, and quoting would corrupt the install path.
+    assert command.endswith(f"/D={dest}")
+    assert '/D="' not in command
+    assert f'"{dest}"' not in command
+
+
+def test_install_nsis_bundle_nonzero_exit_raises(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fake = _FakeNsisInstaller(returncode=1, stderr="SmartScreen blocked the installer")
+    _install_fake_nsis(monkeypatch, fake)
+    installer = tmp_path / "setup-win64.exe"
+    installer.write_bytes(b"installer")
+    dest = tmp_path / "staging"
+    dest.mkdir()
+
+    with pytest.raises(RuntimeInstallError) as exc_info:
+        _install_nsis_bundle(installer, dest)
+    message = str(exc_info.value)
+    assert "1" in message
+    assert "SmartScreen blocked the installer" in message
+
+
+def test_install_nsis_bundle_missing_binary_raises(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Installer reports success but leaves no bin\minizinc.exe behind.
+    fake = _FakeNsisInstaller(populate=False)
+    _install_fake_nsis(monkeypatch, fake)
+    installer = tmp_path / "setup-win64.exe"
+    installer.write_bytes(b"installer")
+    dest = tmp_path / "staging"
+    dest.mkdir()
+
+    with pytest.raises(RuntimeInstallError) as exc_info:
+        _install_nsis_bundle(installer, dest)
+    assert "minizinc.exe" in str(exc_info.value)
+
+
+def test_install_nsis_bundle_timeout_kills_tree_and_raises(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # A headless runner can't answer the installer's UAC prompt, so the elevated
+    # grandchild hangs; the bound must time out, kill the process tree, and
+    # surface the elevation cause.
+    fake = _FakeNsisInstaller(timeout=True)
+    _install_fake_nsis(monkeypatch, fake)
+    killed: list[int] = []
+    monkeypatch.setattr(
+        "openconstraint_mcp.runtime_install.archive._kill_process_tree",
+        lambda pid: killed.append(pid),
+    )
+    installer = tmp_path / "setup-win64.exe"
+    installer.write_bytes(b"installer")
+    dest = tmp_path / "staging"
+    dest.mkdir()
+
+    with pytest.raises(RuntimeInstallError) as exc_info:
+        _install_nsis_bundle(installer, dest)
+
+    message = str(exc_info.value).lower()
+    assert "minutes" in message
+    assert "elevat" in message
+    assert fake.proc is not None
+    assert killed == [fake.proc.pid]

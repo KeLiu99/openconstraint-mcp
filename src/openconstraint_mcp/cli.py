@@ -62,7 +62,10 @@ def install_runtime(
         ),
     ),
 ) -> None:
-    """Download and install the managed MiniZinc runtime (Linux x86_64, macOS arm64)."""
+    """Download and install the managed MiniZinc runtime.
+
+    Supported platforms: Linux x86_64, macOS arm64, Windows x86_64.
+    """
     # Lazy-imported so httpx/rich.progress stay out of stdio/check-runtime/list-solvers
     # cold paths. Enforced by test_cli_module_does_not_import_httpx_eagerly.
     from .runtime import get_runtime_dir, write_install_config

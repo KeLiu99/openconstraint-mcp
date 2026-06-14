@@ -4,13 +4,14 @@ import json
 import os
 import shutil
 import subprocess
+import sys
 import tempfile
 from pathlib import Path
 from typing import assert_never
 
 from rich.console import Console
 
-from .archive import _extract_dmg_bundle, _extract_tgz_bundle
+from .archive import _extract_dmg_bundle, _extract_tgz_bundle, _install_nsis_bundle
 from .download import (
     MINIZINC_VERSION,
     BundleSpec,
@@ -159,9 +160,15 @@ def _prepare_staging_runtime(staging: Path, bundle: BundleSpec, console: Console
                 _extract_dmg_bundle(archive_path, staging)
             elif kind == "tgz":
                 _extract_tgz_bundle(archive_path, staging)
+            elif kind == "nsis":
+                _install_nsis_bundle(archive_path, staging)
             else:
                 assert_never(kind)
-        _smoke_check_binary(staging / "bin" / "minizinc")
+        # Match the resolver: it appends minizinc.exe on Windows (runtime.py).
+        # core must not import runtime.py (it is right of runtime_install in the
+        # layering), so the name is computed locally.
+        binary_name = "minizinc.exe" if sys.platform == "win32" else "minizinc"
+        _smoke_check_binary(staging / "bin" / binary_name)
         _write_runtime_marker(staging)
     except BaseException:
         if staging.exists():
