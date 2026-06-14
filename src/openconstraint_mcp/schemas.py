@@ -168,15 +168,21 @@ class SolveJobStatus(BaseModel):
     — and it is *enforced*, so a client can branch on ``state`` and trust
     ``result``'s presence (``result is None`` alone does not imply ``failed``).
     Partial mid-run statistics are not provided in this increment: a
-    ``running`` job reports ``state`` + ``elapsed_ms`` only; ``statistics`` and the
-    ``SolveResult`` populate on terminal success. ``message`` carries
-    failure/cancel detail and never replaces a ``SolveResult.stderr`` (a ``failed``
-    job has no result, so its diagnostic lives only in ``message``).
+    ``running`` job reports ``state``, ``elapsed_ms``, and the requested
+    ``timeout_ms`` only; ``statistics`` and the ``SolveResult`` populate on
+    terminal success. ``timeout_ms`` echoes the caller's solve time-limit (the
+    same value passed to ``submit_solve_job``) and is present in every state, so
+    a polling client can pace itself against the remaining budget
+    (``remaining ≈ timeout_ms - elapsed_ms``) instead of guessing a poll
+    interval. ``message`` carries failure/cancel detail and never replaces a
+    ``SolveResult.stderr`` (a ``failed`` job has no result, so its diagnostic
+    lives only in ``message``).
     """
 
     job_id: str
     state: JobState
     solver: str
+    timeout_ms: int
     submitted_at_ms: int
     started_at_ms: int | None = None
     finished_at_ms: int | None = None

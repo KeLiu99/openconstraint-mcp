@@ -94,6 +94,26 @@ def test_submitted_job_result_matches_direct_solve() -> None:
         registry.shutdown()
 
 
+def test_submitted_job_result_includes_solve_statistics() -> None:
+    # A completed background job is the only place a client can read solve
+    # statistics (a `running` job exposes none), so they MUST survive the
+    # off-request path — the same `--statistics` vocabulary the synchronous solve
+    # produces, not an empty dict.
+    direct = solve_model(_DETERMINISTIC_MODEL)
+
+    registry = JobRegistry()
+    try:
+        job_id = registry.submit(model=_DETERMINISTIC_MODEL)
+        status = _wait_until_terminal(registry, job_id)
+    finally:
+        registry.shutdown()
+
+    assert status.state == "succeeded"
+    assert status.result is not None
+    assert status.result.statistics
+    assert direct.statistics.keys() & status.result.statistics.keys()
+
+
 def _wait_for_running_child(
     registry: JobRegistry, job_id: str, timeout: float = 30.0
 ) -> int:

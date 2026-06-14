@@ -1276,15 +1276,27 @@ def check_model_path(
 
     Same CLI-style execution as ``solve_model_path`` (real path, ``cwd`` = the
     model's parent); returns the inline ``check_model`` ``CheckResult`` shape.
+
+    ``-c`` (compile only) writes ``<model>.fzn``/``.ozn`` into the run's cwd —
+    here the user's model directory — so both are redirected into a private temp
+    dir (auto-deleted) to keep the compile check from littering the project. Only
+    the diagnostics and return code matter for the check, never the artifacts.
     """
     model_path, data_path = _validate_model_data_paths(model_path, data_path)
-    outcome = _run_managed_minizinc_paths(
-        model_path,
-        solver=solver,
-        timeout_ms=timeout_ms,
-        extra_args=("-c",),
-        data_path=data_path,
-    )
+    with tempfile.TemporaryDirectory(prefix="openconstraint-mcp-") as tmp:
+        outcome = _run_managed_minizinc_paths(
+            model_path,
+            solver=solver,
+            timeout_ms=timeout_ms,
+            extra_args=(
+                "-c",
+                "--output-fzn-to-file",
+                str(Path(tmp) / "out.fzn"),
+                "--output-ozn-to-file",
+                str(Path(tmp) / "out.ozn"),
+            ),
+            data_path=data_path,
+        )
     return _build_check_result(outcome, solver=solver)
 
 

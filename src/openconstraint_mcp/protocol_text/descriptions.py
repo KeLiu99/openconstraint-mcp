@@ -304,9 +304,10 @@ SUBMIT_SOLVE_JOB_DESCRIPTION = (
 
 GET_SOLVE_JOB_DESCRIPTION = (
     "Poll a background solve job by its `job_id` (from `submit_solve_job`). "
-    "Returns a SolveJobStatus: `job_id`, `state`, `solver`, `submitted_at_ms`, "
-    "`started_at_ms`, `finished_at_ms`, `elapsed_ms`, an optional `result` (the "
-    "full SolveResult), and an optional `message`. `state` is one of `queued`, "
+    "Returns a SolveJobStatus: `job_id`, `state`, `solver`, `timeout_ms`, "
+    "`submitted_at_ms`, `started_at_ms`, `finished_at_ms`, `elapsed_ms`, an "
+    "optional `result` (the full SolveResult), and an optional `message`. "
+    "`state` is one of `queued`, "
     "`running`, `succeeded`, `failed`, `timeout`, `cancelled`. CONTRACT: "
     "`result` is present exactly when `state` is `succeeded` or `timeout`, and "
     "absent for `queued`/`running`/`failed`/`cancelled`. So `failed` implies "
@@ -317,7 +318,17 @@ GET_SOLVE_JOB_DESCRIPTION = (
     "`succeeded` job whose `result.status == \"error\"`, NOT `failed`. A `timeout` "
     "job still carries its partial SolveResult. While a job is `running` only "
     "`state` + `elapsed_ms` advance; live mid-solve statistics are not provided. "
-    "An unknown `job_id` is an MCP error."
+    "PACE your polling against the job's own budget rather than a fixed `sleep`: "
+    "`timeout_ms` is the requested solve time-limit and `elapsed_ms` how long the "
+    "job has run, so a `running` job has roughly `timeout_ms - elapsed_ms` left "
+    "and is usually terminal shortly after that — wait a fraction of the "
+    "remaining budget between polls instead of looping tightly or guessing an "
+    "interval, since a `running` job exposes no new data between polls. "
+    "On a `succeeded` or `timeout` job, present `result` the way the synchronous "
+    "solve tools require: lead with the plain-language status and the solution in "
+    "the user's terms, and include the COMPLETE model-visible `Statistics:` "
+    "section whenever `result.statistics` is non-empty — do not omit, summarize, "
+    "or condense it to selected fields. An unknown `job_id` is an MCP error."
 )
 
 CANCEL_SOLVE_JOB_DESCRIPTION = (

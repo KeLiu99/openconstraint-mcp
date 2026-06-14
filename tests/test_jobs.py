@@ -71,6 +71,18 @@ def test_submit_returns_job_id(monkeypatch: pytest.MonkeyPatch) -> None:
         registry.shutdown()
 
 
+def test_status_reports_requested_timeout_ms(monkeypatch: pytest.MonkeyPatch) -> None:
+    # The status echoes the caller's solve time-limit so a polling client can pace
+    # against it (remaining = timeout_ms - elapsed_ms) instead of guessing.
+    _patch_solve(monkeypatch, lambda model, *, on_start, **kw: _solve_result())
+    registry = JobRegistry()
+    try:
+        job_id = registry.submit(model="solve satisfy;", timeout_ms=45000)
+        assert registry.get(job_id).timeout_ms == 45000
+    finally:
+        registry.shutdown()
+
+
 def test_fast_solve_reaches_succeeded_with_result(monkeypatch: pytest.MonkeyPatch) -> None:
     _patch_solve(monkeypatch, lambda model, *, on_start, **kw: _solve_result("optimal"))
     registry = JobRegistry()

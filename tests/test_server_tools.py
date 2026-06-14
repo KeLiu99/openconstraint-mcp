@@ -1983,6 +1983,32 @@ async def test_job_tools_are_listed_with_expected_properties() -> None:
 
 
 @pytest.mark.asyncio
+async def test_get_solve_job_description_mandates_surfacing_statistics() -> None:
+    # A completed job's `result` is the only place solve statistics surface, so the
+    # tool description must tell the client to present the full `Statistics:`
+    # section on completion — the same mandate the synchronous solve tools carry —
+    # rather than letting a finished job's statistics be silently dropped.
+    mcp = create_mcp_server()
+    by_name = {tool.name: tool for tool in await mcp.list_tools()}
+
+    description = by_name["get_solve_job"].description or ""
+    assert "Statistics:" in description
+
+
+@pytest.mark.asyncio
+async def test_get_solve_job_description_guides_polling_cadence() -> None:
+    # A `running` job exposes no partial data, so a client that polls in a tight
+    # loop (or guesses a fixed "sleep N") just burns calls. The description must
+    # tell the client to pace its polling against the job's own `timeout_ms`
+    # budget so the cadence is derived, not invented.
+    mcp = create_mcp_server()
+    by_name = {tool.name: tool for tool in await mcp.list_tools()}
+
+    description = by_name["get_solve_job"].description or ""
+    assert "timeout_ms" in description and "pace" in description.lower()
+
+
+@pytest.mark.asyncio
 async def test_submit_returns_running_or_queued_then_get_reaches_succeeded(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
