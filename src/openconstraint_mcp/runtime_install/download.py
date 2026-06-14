@@ -22,7 +22,7 @@ from .errors import RuntimeInstallError
 
 MINIZINC_VERSION: str = "2.9.7"
 
-BundleKind = Literal["tgz", "dmg"]
+BundleKind = Literal["tgz", "dmg", "nsis"]
 
 
 @dataclass(frozen=True)
@@ -62,6 +62,16 @@ _MACOS_ARM64_BUNDLE = BundleSpec(
     kind="dmg",
 )
 
+# Windows ships the runtime only as an NSIS installer (no portable archive); it
+# is run silently into the managed runtime dir (see archive._install_nsis_bundle).
+_WINDOWS_FILENAME = f"MiniZincIDE-{MINIZINC_VERSION}-bundled-setup-win64.exe"
+_WINDOWS_X86_64_BUNDLE = BundleSpec(
+    filename=_WINDOWS_FILENAME,
+    url=_release_url(_WINDOWS_FILENAME),
+    sha256="475547257801629012dc09fac21a7511a73a8931499dd08b3f88893d2e700d5a",
+    kind="nsis",
+)
+
 
 def select_bundle() -> BundleSpec:
     """Resolve the managed bundle for the current platform.
@@ -74,12 +84,14 @@ def select_bundle() -> BundleSpec:
         return _LINUX_X86_64_BUNDLE
     if sys.platform == "darwin" and machine == "arm64":
         return _MACOS_ARM64_BUNDLE
+    if sys.platform == "win32" and machine == "AMD64":
+        return _WINDOWS_X86_64_BUNDLE
     raise RuntimeInstallError(
-        "openconstraint-mcp install-runtime currently supports Linux x86_64 "
-        "and macOS arm64 (Apple Silicon) only. On other platforms, install "
-        "MiniZinc manually and point openconstraint-mcp at it with "
-        "`openconstraint-mcp configure-runtime --runtime-dir <dir>` or by "
-        "setting OPENCONSTRAINT_MCP_RUNTIME_DIR."
+        "openconstraint-mcp install-runtime currently supports Linux x86_64, "
+        "macOS arm64 (Apple Silicon), and Windows x86_64 only. On other "
+        "platforms, install MiniZinc manually and point openconstraint-mcp at "
+        "it with `openconstraint-mcp configure-runtime --runtime-dir <dir>` or "
+        "by setting OPENCONSTRAINT_MCP_RUNTIME_DIR."
     )
 
 

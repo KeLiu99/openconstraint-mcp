@@ -54,12 +54,25 @@ def test_select_bundle_macos_arm64_resolves_dmg(monkeypatch: pytest.MonkeyPatch)
     assert bundle.sha256 == "504d04d3315f2a76455b71feff2cc2b3105ecd5533e8194fa2365bc41289d9d9"
 
 
+def test_select_bundle_windows_x86_64_resolves_nsis(monkeypatch: pytest.MonkeyPatch) -> None:
+    # Windows reports machine() as "AMD64", not "x86_64".
+    _stub_platform(monkeypatch, "win32", "AMD64")
+    bundle = select_bundle()
+    assert bundle.kind == "nsis"
+    assert bundle.filename == "MiniZincIDE-2.9.7-bundled-setup-win64.exe"
+    assert bundle.url == (
+        "https://github.com/MiniZinc/MiniZincIDE/releases/download/2.9.7/"
+        "MiniZincIDE-2.9.7-bundled-setup-win64.exe"
+    )
+    assert bundle.sha256 == "475547257801629012dc09fac21a7511a73a8931499dd08b3f88893d2e700d5a"
+
+
 @pytest.mark.parametrize(
     ("platform_name", "machine"),
     [
         ("darwin", "x86_64"),
         ("linux", "aarch64"),
-        ("win32", "AMD64"),
+        ("win32", "ARM64"),
     ],
 )
 def test_select_bundle_rejects_unsupported_platforms(
@@ -73,6 +86,7 @@ def test_select_bundle_rejects_unsupported_platforms(
     message = str(exc_info.value)
     assert "Linux x86_64" in message
     assert "macOS arm64" in message
+    assert "Windows x86_64" in message
     assert "configure-runtime" in message
 
 

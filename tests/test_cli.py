@@ -110,6 +110,7 @@ def test_install_runtime_help_names_supported_platforms() -> None:
     flat = " ".join(result.stdout.split())
     assert "Linux x86_64" in flat
     assert "macOS arm64" in flat
+    assert "Windows x86_64" in flat
 
 
 def test_install_runtime_succeeds_when_config_write_fails(

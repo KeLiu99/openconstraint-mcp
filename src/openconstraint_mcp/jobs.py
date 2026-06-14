@@ -266,7 +266,7 @@ class JobRegistry:
                     self._finalize(record, "cancelled", None, "Cancelled at shutdown")
         with self._lock:
             handles = [
-                r.handle
+                cast("Popen[str]", r.handle)
                 for r in self._records.values()
                 if r.handle is not None and r.state not in _TERMINAL_STATES
             ]

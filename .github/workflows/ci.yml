@@ -139,3 +139,35 @@ jobs:
           echo "Gecode solve exit code: $GECODE_RC"
           # Verdict is recorded, not gated — never fail the job on the Gecode outcome.
           exit 0
+
+  windows-acceptance:
+    # Windows x86_64 managed-runtime acceptance. The silent NSIS install can't be
+    # verified on a headless runner: setup.exe re-launches itself elevated for UAC
+    # and the consent prompt has no answerer, so it hangs (it once burned a runner
+    # for hours, leaving orphan `…setup-win64.tmp` processes). gsudo hits the same
+    # wall — it needs the same consent. So this job verifies what IS headless: the
+    # pinned bundle downloads and its sha256 matches on Windows
+    # (test_windows_bundle_downloads_and_verifies). The full silent install+solve
+    # (test_install_runtime_end_to_end_on_windows) is gated behind
+    # OPENCONSTRAINT_MCP_RUN_WINDOWS_INSTALL_TEST and skipped here — a maintainer
+    # runs it on a real interactive Windows host, clicking the UAC prompt. Heavy
+    # (downloads the ~35MB installer), so it runs only on manual dispatch.
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: windows-latest
+    # Download is quick; bound the job anyway so a future hang fails fast.
+    timeout-minutes: 15
+    env:
+      OPENCONSTRAINT_MCP_RUN_INSTALL_DOWNLOAD_TEST: "1"
+    steps:
+      - uses: actions/checkout@v5
+      - uses: astral-sh/setup-uv@v8.1.0
+        with:
+          python-version: "3.12"
+          enable-cache: true
+      - uses: extractions/setup-just@v4
+      - run: just sync
+      # Downloads the real pinned NSIS bundle and checks its sha256 on Windows.
+      # The end-to-end install test skips: its UAC elevation can't be answered
+      # headless (see the job comment above).
+      - name: Verify Windows bundle download + integrity (silent install skipped — headless UAC)
+        run: just integration
