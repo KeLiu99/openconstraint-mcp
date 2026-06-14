@@ -299,6 +299,7 @@ class JobRegistry:
             job_id=record.job_id,
             state=record.state,
             solver=record.request.solver,
+            timeout_ms=record.request.timeout_ms,
             submitted_at_ms=record.submitted_at_ms,
             started_at_ms=record.started_at_ms,
             finished_at_ms=record.finished_at_ms,

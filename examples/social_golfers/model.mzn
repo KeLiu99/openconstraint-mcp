@@ -42,24 +42,23 @@ constraint forall(g in GROUP, s in 1..group_size)(
     schedule[1, g, s] = (g - 1) * group_size + s
 );
 
-% Week 2: transversal cross-cutting of week-1 groups.
-% Partition the n_groups into blocks of group_size groups each.
-% Within each block of group_size groups, week-2 group g takes the g-th
-% golfer from EACH of the group_size week-1 groups in that block.
-% For block b (0-indexed), week-1 groups are indices (b*group_size + s)
-% and their g-th golfer is (b*group_size + s - 1)*group_size + g.
-constraint forall(b in 0..(n_groups div group_size - 1))(
-    let {
-        int: block_start = b * group_size
-    } in
-    forall(g in 1..group_size, s in 1..group_size)(
-        schedule[2, block_start + g, s] =
-            (block_start + s - 1) * group_size + g
+% Week 2: transversal cross-cutting of week-1 groups (Liu, Löffler, Hofstedt 2019).
+% Only valid when n_groups is a multiple of group_size — otherwise the leftover
+% groups create an interaction that eliminates all valid completions past week 2.
+constraint if n_groups mod group_size == 0 then
+    forall(b in 0..(n_groups div group_size - 1))(
+        let {
+            int: block_start = b * group_size
+        } in
+        forall(g in 1..group_size, s in 1..group_size)(
+            schedule[2, block_start + g, s] =
+                (block_start + s - 1) * group_size + g
+        )
     )
-);
+endif;
 
-% Symmetry: groups ordered by smallest member within each week (weeks 3+)
-constraint forall(w in WEEK where w > 2)(
+% Symmetry: groups ordered by smallest member within each week (weeks 2+)
+constraint forall(w in WEEK where w > 1)(
     forall(g in 2..n_groups)(
         schedule[w, g-1, 1] < schedule[w, g, 1]
     )
@@ -77,7 +76,10 @@ constraint forall(p1, p2 in GOLFER where p1 < p2)(
     sum(w in WEEK)(golfer_group[w, p1] = golfer_group[w, p2]) <= 1
 );
 
-solve satisfy;
+solve :: int_search(
+    [schedule[w, g, s] | w in WEEK where w > 1, g in GROUP, s in 1..group_size],
+    first_fail, indomain_min, complete)
+satisfy;
 
 output [
     "Week \(w): " ++

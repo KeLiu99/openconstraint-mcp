@@ -571,16 +571,25 @@ no LLM, no telemetry).
   once, further submits sit `"queued"` up to a fixed cap, and a submit beyond
   that is **rejected with an MCP error** (retry once a running job finishes)
   rather than growing the queue unboundedly.
-- **`get_solve_job`** — poll a job by `job_id`. Returns the `SolveJobStatus`:
-  `state` (`"queued"`, `"running"`, `"succeeded"`, `"failed"`, `"timeout"`,
-  `"cancelled"`), timing fields, an optional `result` (the full `SolveResult`),
-  and an optional `message`. **State contract:** `result` is present exactly
-  when `state` is `"succeeded"` or `"timeout"`, so `state == "failed"` **iff**
-  `result is None`. `"failed"` means the job machinery itself raised (see
-  `message`); a *solver*-level `error` verdict is a `"succeeded"` job whose
-  `result.status == "error"`, **not** `"failed"`. A `"timeout"` job still
-  carries its partial `SolveResult`. While a job is `"running"`, only `state`
-  and `elapsed_ms` advance — live mid-solve statistics are not provided.
+- **`get_solve_job`** — poll a job by `job_id`. This is the OS-independent way
+  to watch a background solve — no `ps`/`Get-Process` needed. Returns the
+  `SolveJobStatus`: `state` (`"queued"`, `"running"`, `"succeeded"`,
+  `"failed"`, `"timeout"`, `"cancelled"`), `timeout_ms` (the requested solve
+  time-limit, echoed in every state), timing fields, an optional `result` (the
+  full `SolveResult`), and an optional `message`. **State contract:** `result`
+  is present exactly when `state` is `"succeeded"` or `"timeout"`, so
+  `state == "failed"` **iff** `result is None`. `"failed"` means the job
+  machinery itself raised (see `message`); a *solver*-level `error` verdict is a
+  `"succeeded"` job whose `result.status == "error"`, **not** `"failed"`. A
+  `"timeout"` job still carries its partial `SolveResult`. While a job is
+  `"running"`, only `state` and `elapsed_ms` advance — live mid-solve
+  statistics are not provided, so **pace your polling against the job's own
+  budget** (`remaining ≈ timeout_ms - elapsed_ms`, usually terminal shortly
+  after that) rather than a fixed `sleep`: tight loops just burn calls since a
+  `running` job exposes no new data between polls. A completed `"succeeded"` or
+  `"timeout"` job is the only place a background solve's statistics surface —
+  its `result.statistics` carries the same model-visible `Statistics:` section
+  the synchronous solve tools produce.
 - **`cancel_solve_job`** — request cancellation by `job_id`. A still-`queued`
   job is dropped before it starts; a `running` job has its managed MiniZinc
   **process tree** (solver children included) terminated. Cancellation is

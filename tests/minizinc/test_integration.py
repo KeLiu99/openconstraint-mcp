@@ -328,6 +328,33 @@ def test_stdlib_include_compiles(tmp_path: Path) -> None:
     assert result.status == "ok"
 
 
+def test_check_model_path_leaves_no_intermediate_artifacts(tmp_path: Path) -> None:
+    model_path = tmp_path / "m.mzn"
+    model_path.write_text("var 1..3: x;\nconstraint x > 1;\nsolve satisfy;\n")
+
+    result = check_model_path(model_path)
+
+    # The compile-only (`-c`) run must not leave its FlatZinc/output-model next to
+    # the user's model: those artifacts are redirected to a private temp dir.
+    assert result.status == "ok"
+    leftovers = sorted(p.name for p in tmp_path.iterdir() if p.suffix in {".fzn", ".ozn"})
+    assert leftovers == []
+
+
+def test_check_model_path_error_leaves_no_intermediate_artifacts(tmp_path: Path) -> None:
+    model_path = tmp_path / "m.mzn"
+    # Errors during flattening (here a div-by-zero in a par declaration) can emit a
+    # partial FlatZinc before the run aborts — the artifact redirect must hold on the
+    # error path too, not just the happy path.
+    model_path.write_text("int: x = 1 div 0;\nconstraint x > 0;\nsolve satisfy;\n")
+
+    result = check_model_path(model_path)
+
+    assert result.status == "error"
+    leftovers = sorted(p.name for p in tmp_path.iterdir() if p.suffix in {".fzn", ".ozn"})
+    assert leftovers == []
+
+
 def test_relative_local_include_resolves(tmp_path: Path) -> None:
     proj = tmp_path / "proj"
     proj.mkdir()

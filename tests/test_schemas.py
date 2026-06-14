@@ -408,6 +408,7 @@ def test_solve_job_status_succeeded_round_trips_with_result() -> None:
         job_id="abc123",
         state="succeeded",
         solver="cp-sat",
+        timeout_ms=30000,
         submitted_at_ms=1000,
         started_at_ms=1001,
         finished_at_ms=1050,
@@ -421,7 +422,9 @@ def test_solve_job_status_succeeded_round_trips_with_result() -> None:
 
 
 def test_solve_job_status_queued_serializes_without_result() -> None:
-    status = SolveJobStatus(job_id="q1", state="queued", solver="cp-sat", submitted_at_ms=5)
+    status = SolveJobStatus(
+        job_id="q1", state="queued", solver="cp-sat", timeout_ms=30000, submitted_at_ms=5
+    )
     dumped = status.model_dump(mode="json")
     assert dumped["state"] == "queued"
     assert dumped["result"] is None
@@ -433,6 +436,7 @@ def test_solve_job_status_cancelled_serializes_with_message_and_no_result() -> N
         job_id="c1",
         state="cancelled",
         solver="cp-sat",
+        timeout_ms=30000,
         submitted_at_ms=5,
         started_at_ms=6,
         finished_at_ms=7,
@@ -449,7 +453,12 @@ def test_solve_job_status_failed_has_none_result() -> None:
     # A runner exception → failed with result is None (failed ⇒ result is None; the
     # converse fails — queued/running/cancelled are result-less too).
     status = SolveJobStatus(
-        job_id="f1", state="failed", solver="cp-sat", submitted_at_ms=5, message="boom"
+        job_id="f1",
+        state="failed",
+        solver="cp-sat",
+        timeout_ms=30000,
+        submitted_at_ms=5,
+        message="boom",
     )
     assert status.result is None
 
@@ -460,6 +469,7 @@ def test_solve_job_status_rejects_unknown_state() -> None:
             job_id="x",
             state="bogus",  # type: ignore[arg-type]
             solver="cp-sat",
+            timeout_ms=30000,
             submitted_at_ms=1,
         )
 
@@ -471,6 +481,7 @@ def test_solve_job_status_rejects_failed_carrying_a_result() -> None:
             job_id="f",
             state="failed",
             solver="cp-sat",
+            timeout_ms=30000,
             submitted_at_ms=1,
             result=_job_solve_result("error"),
         )
@@ -479,7 +490,9 @@ def test_solve_job_status_rejects_failed_carrying_a_result() -> None:
 def test_solve_job_status_rejects_succeeded_without_a_result() -> None:
     # The enforced invariant: a result-bearing state must carry a result.
     with pytest.raises(ValidationError):
-        SolveJobStatus(job_id="s", state="succeeded", solver="cp-sat", submitted_at_ms=1)
+        SolveJobStatus(
+            job_id="s", state="succeeded", solver="cp-sat", timeout_ms=30000, submitted_at_ms=1
+        )
 
 
 def test_solver_info_capabilities_default_is_conservative() -> None:
