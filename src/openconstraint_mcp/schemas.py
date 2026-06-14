@@ -1,9 +1,9 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any, Literal, cast
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 
 class RuntimeStatus(BaseModel):
@@ -124,6 +124,81 @@ class SolveResult(BaseModel):
     # `--solution-checker`); None for an ordinary solve. The checker validates
     # each produced solution; it never proves optimality (see CheckerReport).
     checker: CheckerReport | None = None
+
+
+# A background solve job's lifecycle state. `queued`/`running` are non-terminal;
+# `succeeded`/`failed`/`timeout`/`cancelled` are terminal. See `job_state_for_result`
+# and `SolveJobStatus` for the result-presence invariant (D1.9).
+JobState = Literal["queued", "running", "succeeded", "failed", "timeout", "cancelled"]
+# The terminal states that carry a produced `SolveResult`. The load-bearing D1.9
+# invariant: a `SolveJobStatus` has a `result` IFF its state is one of these
+# (`result present ⇔ state ∈ {succeeded, timeout}`). For `failed` this is one-way
+# only — `failed ⇒ result is None`, but `result is None` also holds for
+# `queued`/`running`/`cancelled`.
+_RESULT_BEARING_STATES: frozenset[JobState] = cast(
+    "frozenset[JobState]", frozenset({"succeeded", "timeout"})
+)
+
+
+def job_state_for_result(result: SolveResult) -> JobState:
+    """Map a produced ``SolveResult`` to its terminal ``JobState`` (D1.9).
+
+    Total over all eight ``SolveStatus`` values for the *result-present* paths: a
+    subprocess timeout (``result.timed_out``) or a stream ``timeout`` verdict maps
+    to ``"timeout"``; every other status — INCLUDING ``"error"`` — maps to
+    ``"succeeded"``, because ``status="error"`` is a normal structured
+    solver/driver verdict (e.g. cp-sat rejecting an out-of-range ``random_seed``),
+    not a job-machinery failure. The result-absent terminal states are set by the
+    registry, not derived here: ``"failed"`` for a runner exception (no
+    ``SolveResult`` produced) and ``"cancelled"`` for user cancellation — both
+    result-absent, consistent with ``result present ⇔ state ∈ {succeeded, timeout}``.
+    """
+    if result.timed_out or result.status == "timeout":
+        return "timeout"
+    return "succeeded"
+
+
+class SolveJobStatus(BaseModel):
+    """A background solve job's status snapshot.
+
+    ``result`` is present IFF ``state`` is a result-bearing terminal state
+    (``succeeded`` or ``timeout``); it is ``None`` for ``queued``/``running`` (not
+    finished) and for ``failed``/``cancelled`` (no usable result). This is the
+    load-bearing D1.9 invariant — ``result present ⇔ state ∈ {succeeded, timeout}``
+    — and it is *enforced*, so a client can branch on ``state`` and trust
+    ``result``'s presence (``result is None`` alone does not imply ``failed``).
+    Partial mid-run statistics are not provided in this increment: a
+    ``running`` job reports ``state`` + ``elapsed_ms`` only; ``statistics`` and the
+    ``SolveResult`` populate on terminal success. ``message`` carries
+    failure/cancel detail and never replaces a ``SolveResult.stderr`` (a ``failed``
+    job has no result, so its diagnostic lives only in ``message``).
+    """
+
+    job_id: str
+    state: JobState
+    solver: str
+    submitted_at_ms: int
+    started_at_ms: int | None = None
+    finished_at_ms: int | None = None
+    elapsed_ms: int | None = None
+    result: SolveResult | None = None
+    message: str | None = None
+
+    @model_validator(mode="after")
+    def _result_presence_matches_state(self) -> SolveJobStatus:
+        has_result = self.result is not None
+        expects_result = self.state in _RESULT_BEARING_STATES
+        if has_result and not expects_result:
+            raise ValueError(
+                f"SolveJobStatus state={self.state!r} must not carry a result "
+                "(result is present only for state 'succeeded' or 'timeout')"
+            )
+        if expects_result and not has_result:
+            raise ValueError(
+                f"SolveJobStatus state={self.state!r} requires a result "
+                "(state 'succeeded'/'timeout' ⇔ result is present)"
+            )
+        return self
 
 
 CheckStatus = Literal[

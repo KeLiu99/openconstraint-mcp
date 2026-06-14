@@ -1,10 +1,14 @@
 from __future__ import annotations
 
+import contextlib
 import json
+import os
+import signal
 import subprocess
+import sys
 import tempfile
 import time
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from pathlib import Path
 from typing import Any, NamedTuple
 
@@ -80,6 +84,22 @@ _SOLVE_STREAM_ARGS: tuple[str, ...] = (
     "json",
     "--output-objective",
 )
+
+# Launch the cancellable child as the leader of its own process group/session so
+# the *whole* tree (MiniZinc plus the solver subprocess it forks) can be signalled
+# at once. POSIX: a new session via `start_new_session=True`, killed with
+# `os.killpg`. Windows: `CREATE_NEW_PROCESS_GROUP` (the attribute is only referenced
+# on win32; child-solver cleanup there is best-effort via `taskkill /T` and may not
+# match POSIX — documented in `_terminate_process_tree`). Passed as explicit Popen
+# kwargs (not a `**dict`) so the call still matches a typed overload.
+if sys.platform == "win32":
+    _START_NEW_SESSION: bool = False
+    _CREATION_FLAGS: int = subprocess.CREATE_NEW_PROCESS_GROUP
+else:
+    _START_NEW_SESSION = True
+    _CREATION_FLAGS = 0
+# Grace period between SIGTERM and an escalated SIGKILL when terminating a tree.
+_TERMINATE_GRACE_SECONDS: float = 3.0
 
 
 class MiniZincExecutionError(RuntimeError):
@@ -313,31 +333,233 @@ def _run_managed_minizinc(
     binary = _require_minizinc_binary()
     with tempfile.TemporaryDirectory(prefix="openconstraint-mcp-") as tmp:
         tmp_dir = Path(tmp)
-        model_file = tmp_dir / _MODEL_FILENAME
-        model_file.write_text(model, encoding="utf-8")
-        data_args: list[str] = []
-        if data is not None:
-            data_file = tmp_dir / _DATA_FILENAME
-            data_file.write_text(data, encoding="utf-8")
-            data_args = [str(data_file)]
-        effective_extra_args = tuple(extra_args)
-        if checker is not None:
-            checker_file = tmp_dir / _CHECKER_FILENAME
-            checker_file.write_text(checker, encoding="utf-8")
-            effective_extra_args = (
-                *effective_extra_args,
-                "--solution-checker",
-                str(checker_file),
-            )
-        cmd = _build_minizinc_cmd(
+        cmd = _build_inline_cmd(
             binary,
+            tmp_dir,
+            model=model,
             solver=solver,
             timeout_ms=timeout_ms,
-            extra_args=effective_extra_args,
-            model_arg=str(model_file),
-            data_args=data_args,
+            extra_args=extra_args,
+            data=data,
+            checker=checker,
         )
         return _invoke_minizinc(cmd, timeout_ms=timeout_ms, cwd=str(tmp_dir))
+
+
+def _build_inline_cmd(
+    binary: Path,
+    tmp_dir: Path,
+    *,
+    model: str,
+    solver: str,
+    timeout_ms: int,
+    extra_args: Sequence[str],
+    data: str | None,
+    checker: str | None,
+) -> list[str]:
+    """Write the inline model/data/checker into ``tmp_dir`` and build the argv.
+
+    The temp-dir file contract shared by the blocking runner
+    (``_run_managed_minizinc``) and the cancellable runner
+    (``_run_managed_minizinc_cancellable``): ``model.mzn`` always; ``data.dzn``
+    when ``data`` is not ``None`` (appended positionally after the model, MiniZinc's
+    ``<model>.mzn <data>.dzn`` order); ``checker.mzc.mzn`` when ``checker`` is given
+    (added to ``extra_args`` via ``--solution-checker`` before the positional
+    arguments). Kept in one place so the two runners can't drift on filenames,
+    positioning, or the checker flag; argv assembly itself stays in
+    ``_build_minizinc_cmd``.
+    """
+    model_file = tmp_dir / _MODEL_FILENAME
+    model_file.write_text(model, encoding="utf-8")
+    data_args: list[str] = []
+    if data is not None:
+        data_file = tmp_dir / _DATA_FILENAME
+        data_file.write_text(data, encoding="utf-8")
+        data_args = [str(data_file)]
+    effective_extra_args = tuple(extra_args)
+    if checker is not None:
+        checker_file = tmp_dir / _CHECKER_FILENAME
+        checker_file.write_text(checker, encoding="utf-8")
+        effective_extra_args = (
+            *effective_extra_args,
+            "--solution-checker",
+            str(checker_file),
+        )
+    return _build_minizinc_cmd(
+        binary,
+        solver=solver,
+        timeout_ms=timeout_ms,
+        extra_args=effective_extra_args,
+        model_arg=str(model_file),
+        data_args=data_args,
+    )
+
+
+def _killpg(pgid: int, sig: int) -> None:
+    """Signal a process group, swallowing the already-gone / not-permitted cases."""
+    with contextlib.suppress(ProcessLookupError, PermissionError):
+        os.killpg(pgid, sig)
+
+
+def _terminate_process_tree(
+    proc: subprocess.Popen[str], *, grace_seconds: float = _TERMINATE_GRACE_SECONDS
+) -> None:
+    """Terminate ``proc`` and its child solver tree; idempotent.
+
+    MiniZinc forks the actual solver as a child, so ``proc.terminate()`` alone
+    leaks the solver tree. The cancellable runner launches ``proc`` as the leader
+    of a new session/process group (via ``_START_NEW_SESSION`` / ``_CREATION_FLAGS``)
+    so the whole tree can be signalled together. A handle that has already exited
+    is a no-op (cancel after a job is terminal, or a cancel-before-start race).
+
+    POSIX: SIGTERM the group, then escalate to SIGKILL after ``grace_seconds`` if
+    the leader is still alive. Windows: ``taskkill /T /F`` to tear down the whole
+    tree (parent + solver children) while it is still intact, falling back to
+    ``proc.terminate()`` if taskkill is unavailable — best-effort; guaranteed
+    child-solver cleanup may NOT match POSIX.
+    """
+    if proc.poll() is not None:
+        return
+    if sys.platform == "win32":
+        _terminate_process_tree_windows(proc, grace_seconds=grace_seconds)
+    else:
+        _terminate_process_tree_posix(proc, grace_seconds=grace_seconds)
+
+
+def _terminate_process_tree_posix(
+    proc: subprocess.Popen[str], *, grace_seconds: float
+) -> None:
+    try:
+        pgid = os.getpgid(proc.pid)
+    except ProcessLookupError:
+        return  # already reaped — idempotent no-op
+    _killpg(pgid, signal.SIGTERM)
+    try:
+        proc.wait(timeout=grace_seconds)
+        return
+    except subprocess.TimeoutExpired:
+        _killpg(pgid, signal.SIGKILL)
+    with contextlib.suppress(subprocess.TimeoutExpired):
+        proc.wait(timeout=grace_seconds)
+
+
+def _terminate_process_tree_windows(
+    proc: subprocess.Popen[str], *, grace_seconds: float
+) -> None:
+    # taskkill /T /F tears down the whole tree (parent + solver children) while the
+    # parent is still alive to anchor the tree walk. proc.terminate() (TerminateProcess)
+    # reaches only the parent; once it is reaped, taskkill /T can no longer find the
+    # orphaned solver children — so the tree kill must run FIRST, not as a post-wait
+    # escalation. Fall back to terminating the parent only if taskkill is unavailable.
+    try:
+        subprocess.run(
+            ["taskkill", "/T", "/F", "/PID", str(proc.pid)],
+            capture_output=True,
+            timeout=grace_seconds,
+        )
+    except (OSError, subprocess.SubprocessError):
+        proc.terminate()
+    with contextlib.suppress(subprocess.TimeoutExpired):
+        proc.wait(timeout=grace_seconds)
+
+
+def _run_popen(
+    cmd: Sequence[str],
+    *,
+    timeout_ms: int,
+    cwd: str,
+    on_start: Callable[[subprocess.Popen[str]], None],
+) -> _RunOutcome:
+    """Run ``cmd`` via ``subprocess.Popen`` and capture the raw outcome.
+
+    The cancellable counterpart of ``_invoke_minizinc``: it launches the child in
+    its own process group (``_START_NEW_SESSION`` / ``_CREATION_FLAGS``), publishes
+    the live handle via ``on_start`` so a caller can terminate it externally
+    (cancellation), and applies
+    the same ``(timeout_ms / 1000) + 5`` wall-clock cap. On the cap firing it
+    terminates the whole tree and drains the partial output as a ``timed_out``
+    outcome — byte-compatible with ``_invoke_minizinc`` so ``_build_solve_result``
+    is reused verbatim. An external termination of the handle makes
+    ``communicate`` return normally (the caller then classifies the job as
+    cancelled). An ``OSError`` on launch is wrapped as ``MiniZincExecutionError``.
+    """
+    subprocess_timeout = (timeout_ms / 1000) + 5
+    start = time.monotonic()
+    try:
+        proc = subprocess.Popen(
+            list(cmd),
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            cwd=cwd,
+            start_new_session=_START_NEW_SESSION,
+            creationflags=_CREATION_FLAGS,
+        )
+    except OSError as exc:
+        raise MiniZincExecutionError(
+            f"Managed MiniZinc binary at {cmd[0]} failed to execute: {exc}. "
+            "The runtime may be corrupt — try reinstalling with "
+            "`openconstraint-mcp install-runtime`."
+        ) from exc
+    on_start(proc)
+    try:
+        stdout, stderr = proc.communicate(timeout=subprocess_timeout)
+    except subprocess.TimeoutExpired:
+        _terminate_process_tree(proc)
+        stdout, stderr = proc.communicate()  # drain after the tree is gone
+        elapsed_ms = max(int((time.monotonic() - start) * 1000), 0)
+        return _RunOutcome(
+            timed_out=True,
+            returncode=-1,  # sentinel: never read while timed_out is True
+            stdout=_coerce_to_text(stdout),
+            stderr=_coerce_to_text(stderr),
+            elapsed_ms=elapsed_ms,
+        )
+    elapsed_ms = max(int((time.monotonic() - start) * 1000), 0)
+    return _RunOutcome(
+        timed_out=False,
+        returncode=proc.returncode,
+        stdout=_coerce_to_text(stdout),
+        stderr=_coerce_to_text(stderr),
+        elapsed_ms=elapsed_ms,
+    )
+
+
+def _run_managed_minizinc_cancellable(
+    model: str,
+    *,
+    solver: str,
+    timeout_ms: int,
+    extra_args: Sequence[str],
+    data: str | None = None,
+    checker: str | None = None,
+    on_start: Callable[[subprocess.Popen[str]], None],
+) -> _RunOutcome:
+    """Cancellable mirror of ``_run_managed_minizinc`` (Popen-based, terminable).
+
+    Same temp-dir / model-data-checker file contract (via ``_build_inline_cmd``)
+    and same wall-clock cap as the blocking runner, but launched through
+    ``_run_popen`` so the caller receives the live process handle through
+    ``on_start`` and can terminate the whole tree to cancel. Returns the same
+    ``_RunOutcome``, so ``_build_solve_result`` consumes it unchanged.
+    """
+    _validate_model_and_timeout(model, timeout_ms)
+    binary = _require_minizinc_binary()
+    with tempfile.TemporaryDirectory(prefix="openconstraint-mcp-") as tmp:
+        tmp_dir = Path(tmp)
+        cmd = _build_inline_cmd(
+            binary,
+            tmp_dir,
+            model=model,
+            solver=solver,
+            timeout_ms=timeout_ms,
+            extra_args=extra_args,
+            data=data,
+            checker=checker,
+        )
+        return _run_popen(cmd, timeout_ms=timeout_ms, cwd=str(tmp_dir), on_start=on_start)
 
 
 def _merge_stderr(real_stderr: str, messages: Sequence[str]) -> str:
@@ -671,6 +893,52 @@ def solve_model(
         ),
         data=data,
         checker=checker,
+    )
+    result = _build_solve_result(outcome, solver=solver)
+    if checker is not None:
+        result.checker = _build_checker_report(outcome, result)
+    return result
+
+
+def solve_model_cancellable(
+    model: str,
+    *,
+    solver: str = DEFAULT_SOLVER,
+    data: str | None = None,
+    checker: str | None = None,
+    timeout_ms: int = DEFAULT_SOLVE_TIMEOUT_MS,
+    free_search: bool = False,
+    parallel: int | None = None,
+    random_seed: int | None = None,
+    all_solutions: bool = False,
+    num_solutions: int | None = None,
+    on_start: Callable[[subprocess.Popen[str]], None],
+) -> SolveResult:
+    """Cancellable counterpart of ``solve_model`` for background jobs.
+
+    Identical solve semantics and ``SolveResult`` shape, but executed through the
+    terminable ``_run_managed_minizinc_cancellable`` runner: the live child handle
+    is published to ``on_start`` so a caller (the job registry) can terminate the
+    whole process tree to cancel the solve. Reuses ``_solve_extra_args`` for
+    validation/argv and ``_build_solve_result`` / ``_build_checker_report`` for the
+    parse, so a job's result is byte-for-byte what the synchronous tool would
+    return for the same inputs.
+    """
+    outcome = _run_managed_minizinc_cancellable(
+        model,
+        solver=solver,
+        timeout_ms=timeout_ms,
+        extra_args=_solve_extra_args(
+            solver=solver,
+            free_search=free_search,
+            parallel=parallel,
+            random_seed=random_seed,
+            all_solutions=all_solutions,
+            num_solutions=num_solutions,
+        ),
+        data=data,
+        checker=checker,
+        on_start=on_start,
     )
     result = _build_solve_result(outcome, solver=solver)
     if checker is not None:

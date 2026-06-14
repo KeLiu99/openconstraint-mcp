@@ -548,6 +548,51 @@ produced solution against a checker model without changing result shape:
   telemetry — and it writes only inside (and, transiently while staging,
   beside) the explicit `target_dir`.
 
+### Background solve jobs
+
+`solve_minizinc_model` blocks until the solve finishes, which a hard problem
+can outrun a client's synchronous request timeout. The job tools run the same
+inline solve as a **background job**: submit returns immediately with a
+`job_id`, and the client polls for the result on its own schedule. The job
+registry is **in-process and ephemeral** — jobs do not survive a server
+restart — and runs entirely locally through the managed runtime (no network,
+no LLM, no telemetry).
+
+- **`submit_solve_job`** — admit a solve as a background job. Takes the same
+  inline surface as `solve_minizinc_model` (`model`, optional `data`/`checker`,
+  `solver`, `timeout_ms`, and the `free_search` / `parallel` / `random_seed` /
+  `all_solutions` / `num_solutions` controls). Argument errors (empty model,
+  non-positive timeout, a bad `parallel`/`num_solutions`) are reported
+  synchronously **before any job exists**. Returns a `SolveJobStatus` with a
+  server-generated opaque `job_id` and an initial `state` of `"queued"` or
+  `"running"`. Admission is **bounded**: at most a fixed number of jobs run at
+  once, further submits sit `"queued"` up to a fixed cap, and a submit beyond
+  that is **rejected with an MCP error** (retry once a running job finishes)
+  rather than growing the queue unboundedly.
+- **`get_solve_job`** — poll a job by `job_id`. Returns the `SolveJobStatus`:
+  `state` (`"queued"`, `"running"`, `"succeeded"`, `"failed"`, `"timeout"`,
+  `"cancelled"`), timing fields, an optional `result` (the full `SolveResult`),
+  and an optional `message`. **State contract:** `result` is present exactly
+  when `state` is `"succeeded"` or `"timeout"`, so `state == "failed"` **iff**
+  `result is None`. `"failed"` means the job machinery itself raised (see
+  `message`); a *solver*-level `error` verdict is a `"succeeded"` job whose
+  `result.status == "error"`, **not** `"failed"`. A `"timeout"` job still
+  carries its partial `SolveResult`. While a job is `"running"`, only `state`
+  and `elapsed_ms` advance — live mid-solve statistics are not provided.
+- **`cancel_solve_job`** — request cancellation by `job_id`. A still-`queued`
+  job is dropped before it starts; a `running` job has its managed MiniZinc
+  **process tree** (solver children included) terminated. Cancellation is
+  best-effort and idempotent: cancelling an already-terminal job is a no-op.
+  The job reaches `"cancelled"` (with `result is None`); poll `get_solve_job`
+  to confirm.
+- **`list_solve_jobs`** — list the currently retained jobs, one
+  `SolveJobStatus` per job. Finished jobs are retained only up to a cap, so the
+  oldest terminal jobs may have been evicted.
+
+These four tools return at once, so — unlike the blocking solve/check/inspect
+tools — they emit no progress/log status notifications; watch a job's `state`
+via `get_solve_job` instead. An unknown `job_id` is an MCP error.
+
 ### Path-based file tools
 
 The four tools above take the model (and optional data) as **inline source
@@ -718,8 +763,9 @@ also ships a `model.mzc.mzn` solution checker:
   most-loaded worker's total duration, i.e. balance the load (`solve minimize`).
 - **`examples/social_golfers`** — the Social Golfer Problem: schedule `n_groups`
   groups of `group_size` golfers over `n_weeks` weeks so no pair ever shares a
-  group twice (`solve satisfy`). The shipped data is the 15-golfer instance
-  (5 groups of 3 over 7 weeks — Kirkman's schoolgirls, full socialisation).
+  group twice (`solve satisfy`). The shipped data is the 6-3-8 instance — 18
+  golfers in 6 groups of 3 over 8 weeks, the most weeks a 6-3 schedule can reach
+  before some pair must repeat.
 - **`examples/australia_map_coloring`** — colour Australia's seven
   states/territories with three colours so no two bordering regions share one
   (`solve satisfy`). Its data (`nc = 3`) is inline, so there is no `data.dzn`;
@@ -757,8 +803,8 @@ two workflows beyond a single solve:
 
 - **Longest schedule.** "As many weeks as possible" is the same model re-solved
   with `n_weeks` raised until it turns unsatisfiable. For the shipped instance,
-  `n_weeks = 7` solves but `n_weeks = 8` is `unsatisfiable` (only `C(15,2) = 105`
-  pairs exist, and 8 weeks would need 120 distinct ones), so 7 is the maximum.
+  `n_weeks = 8` solves but `n_weeks = 9` is `unsatisfiable` (only `C(18,2) = 153`
+  pairs exist, and 9 weeks would need 162 distinct ones), so 8 is the maximum.
 - **Multiple schedules.** To enumerate several distinct schedules, lower
   `n_weeks` (e.g. to 5) and request more than one solution with a solver that
   supports it — `num_solutions` works with `org.gecode.gecode` or

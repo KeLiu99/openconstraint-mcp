@@ -280,6 +280,66 @@ INSPECT_MINIZINC_FILES_DESCRIPTION = (
     "names are not surfaced in v1."
 )
 
+SUBMIT_SOLVE_JOB_DESCRIPTION = (
+    "Submit a MiniZinc solve as a BACKGROUND JOB and return immediately, so a "
+    "hard solve cannot hit a synchronous MCP client timeout. Takes the same "
+    "inline surface as `solve_minizinc_model` — `model` (full source), optional "
+    "`data`/`checker`, `solver`, `timeout_ms`, and the solver/search controls "
+    "`free_search`, `parallel`, `random_seed`, `all_solutions`, and the "
+    "solver-gated, satisfaction-only `num_solutions`. Argument errors (empty "
+    "model, non-positive timeout, bad `parallel`/`num_solutions`) are reported "
+    "synchronously as MCP errors before any job exists. Returns a SolveJobStatus "
+    "with a server-generated opaque `job_id` and `state` `queued` or `running`; "
+    "poll it with `get_solve_job(job_id)` and stop it with "
+    "`cancel_solve_job(job_id)`. Admission is BOUNDED: at most a fixed number of "
+    "jobs run at once, further submits sit `queued` up to a fixed cap, and a "
+    "submit beyond that is REJECTED with an MCP error (retry once a running job "
+    "finishes) rather than growing unboundedly. The registry is in-process and "
+    "ephemeral — jobs do not survive a server restart, and finished jobs are "
+    "retained only up to a cap (oldest evicted). This tool returns at once, so "
+    "it emits no progress/log status milestones; watch `state` via "
+    "`get_solve_job` instead. Runs entirely locally through the managed runtime: "
+    "no network calls, no LLM invocation, no telemetry."
+)
+
+GET_SOLVE_JOB_DESCRIPTION = (
+    "Poll a background solve job by its `job_id` (from `submit_solve_job`). "
+    "Returns a SolveJobStatus: `job_id`, `state`, `solver`, `submitted_at_ms`, "
+    "`started_at_ms`, `finished_at_ms`, `elapsed_ms`, an optional `result` (the "
+    "full SolveResult), and an optional `message`. `state` is one of `queued`, "
+    "`running`, `succeeded`, `failed`, `timeout`, `cancelled`. CONTRACT: "
+    "`result` is present exactly when `state` is `succeeded` or `timeout`, and "
+    "absent for `queued`/`running`/`failed`/`cancelled`. So `failed` implies "
+    "`result is None`, but NOT the converse — `queued`/`running`/`cancelled` carry "
+    "no result either, so branch on `state`, not on `result`. `failed` means the "
+    "job machinery itself "
+    "raised (no SolveResult, see `message`); a SOLVER-level `error` verdict is a "
+    "`succeeded` job whose `result.status == \"error\"`, NOT `failed`. A `timeout` "
+    "job still carries its partial SolveResult. While a job is `running` only "
+    "`state` + `elapsed_ms` advance; live mid-solve statistics are not provided. "
+    "An unknown `job_id` is an MCP error."
+)
+
+CANCEL_SOLVE_JOB_DESCRIPTION = (
+    "Request cancellation of a background solve job by `job_id`. A job still "
+    "`queued` is dropped before it starts; a `running` job has its managed "
+    "MiniZinc process tree (the solver children too) terminated. Cancellation "
+    "is best-effort and idempotent: cancelling an already-terminal job "
+    "(`succeeded`/`failed`/`timeout`/`cancelled`) is a no-op that returns the "
+    "current status unchanged. Returns the SolveJobStatus; the job reaches "
+    "`cancelled` (with `result is None`) once the worker observes the request — "
+    "poll `get_solve_job` to confirm the terminal state. An unknown `job_id` is "
+    "an MCP error."
+)
+
+LIST_SOLVE_JOBS_DESCRIPTION = (
+    "List the currently retained background solve jobs as SolveJobStatus "
+    "entries (one per job), covering every state from `queued` to terminal. The "
+    "registry is in-process and bounded: finished jobs are retained only up to a "
+    "cap, so the oldest terminal jobs may have been evicted and a restart clears "
+    "all of them. Takes no arguments and never downloads or runs anything."
+)
+
 SOLVE_CONSTRAINT_PROBLEM_PROMPT_DESCRIPTION = (
     "Guide the MCP client's LLM through translating a natural-language "
     "constraint or optimization problem into MiniZinc and running it "

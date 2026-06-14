@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import json
+import signal
 import subprocess
+import sys
 from pathlib import Path
 from typing import Any
 
@@ -23,7 +25,10 @@ from openconstraint_mcp.minizinc.core import (
     DEFAULT_UNSAT_CORE_TIMEOUT_MS,
     FINDMUS_SOLVER,
     MiniZincExecutionError,
+    _run_managed_minizinc_cancellable,
     _solver_capabilities,
+    _terminate_process_tree,
+    _terminate_process_tree_windows,
     check_model,
     find_unsat_core,
     inspect_model,
@@ -2065,3 +2070,281 @@ def test_save_verified_model_rejects_gated_num_solutions_before_any_subprocess(
     _fail_if_subprocess_called(monkeypatch)
     with pytest.raises(ValueError, match="num_solutions"):
         save_verified_model(_SAVE_MODEL, target_dir=tmp_path / "project", num_solutions=2)
+
+
+# --- cancellable Popen runner (Capability 1, Task 1.2) ---------------------
+
+
+class _FakePopen:
+    """A subprocess.Popen stand-in exposing only what the cancellable runner reads.
+
+    ``timeout_first_communicate`` makes the first ``communicate(timeout=...)`` raise
+    ``TimeoutExpired`` (the wall-clock cap firing); the drain call after termination
+    then returns the partial payload. ``poll()`` returns ``None`` until a wait/kill
+    sets ``returncode``, so ``_terminate_process_tree`` treats a fresh handle as live.
+    """
+
+    def __init__(
+        self,
+        *,
+        stdout: str = "",
+        stderr: str = "",
+        returncode: int = 0,
+        timeout_first_communicate: bool = False,
+    ) -> None:
+        self.pid = 4321
+        self._stdout = stdout
+        self._stderr = stderr
+        self._final_rc = returncode
+        self.returncode: int | None = None
+        self._timeout_first = timeout_first_communicate
+        self.communicate_calls = 0
+        self.wait_calls = 0
+        self.terminate_calls = 0
+
+    def communicate(self, timeout: float | None = None) -> tuple[str, str]:
+        self.communicate_calls += 1
+        if self._timeout_first and timeout is not None and self.communicate_calls == 1:
+            raise subprocess.TimeoutExpired(cmd="minizinc", timeout=timeout)
+        self.returncode = self._final_rc
+        return self._stdout, self._stderr
+
+    def poll(self) -> int | None:
+        return self.returncode
+
+    def wait(self, timeout: float | None = None) -> int:
+        self.wait_calls += 1
+        self.returncode = self._final_rc
+        return self._final_rc
+
+    def terminate(self) -> None:
+        self.terminate_calls += 1
+
+
+def _patch_popen(monkeypatch: pytest.MonkeyPatch, fake: _FakePopen) -> list[dict[str, Any]]:
+    """Patch core.subprocess.Popen to record construction args and return ``fake``."""
+    calls: list[dict[str, Any]] = []
+
+    def _fake_popen(*args: Any, **kwargs: Any) -> _FakePopen:
+        calls.append({"args": args, "kwargs": kwargs})
+        return fake
+
+    monkeypatch.setattr("openconstraint_mcp.minizinc.core.subprocess.Popen", _fake_popen)
+    return calls
+
+
+def test_cancellable_runner_launches_in_new_process_group(
+    fake_minizinc_binary: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The whole-tree-killable launch contract: POSIX gets start_new_session=True
+    # (a new session leader); Windows gets CREATE_NEW_PROCESS_GROUP. The relevant
+    # branch is asserted for the platform the suite runs on.
+    calls = _patch_popen(
+        monkeypatch, _FakePopen(stdout=STREAM_SATISFY, stderr="", returncode=0)
+    )
+
+    _run_managed_minizinc_cancellable(
+        "var 1..5: x;\nsolve satisfy;",
+        solver=DEFAULT_SOLVER,
+        timeout_ms=DEFAULT_SOLVE_TIMEOUT_MS,
+        extra_args=(),
+        on_start=lambda _proc: None,
+    )
+
+    kwargs = calls[0]["kwargs"]
+    if sys.platform == "win32":
+        assert kwargs.get("creationflags") == subprocess.CREATE_NEW_PROCESS_GROUP
+    else:
+        assert kwargs.get("start_new_session") is True
+
+
+def test_cancellable_runner_invokes_on_start_with_the_handle(
+    fake_minizinc_binary: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    fake = _FakePopen(stdout=STREAM_SATISFY, stderr="", returncode=0)
+    _patch_popen(monkeypatch, fake)
+    seen: list[Any] = []
+
+    _run_managed_minizinc_cancellable(
+        "var 1..5: x;\nsolve satisfy;",
+        solver=DEFAULT_SOLVER,
+        timeout_ms=DEFAULT_SOLVE_TIMEOUT_MS,
+        extra_args=(),
+        on_start=seen.append,
+    )
+
+    assert seen == [fake]
+
+
+def test_cancellable_runner_clean_run_returns_outcome(
+    fake_minizinc_binary: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _patch_popen(
+        monkeypatch, _FakePopen(stdout=STREAM_SATISFY, stderr="warn\n", returncode=0)
+    )
+
+    outcome = _run_managed_minizinc_cancellable(
+        "var 1..5: x;\nsolve satisfy;",
+        solver=DEFAULT_SOLVER,
+        timeout_ms=DEFAULT_SOLVE_TIMEOUT_MS,
+        extra_args=(),
+        on_start=lambda _proc: None,
+    )
+
+    assert outcome.timed_out is False
+    assert outcome.returncode == 0
+    assert outcome.stdout == STREAM_SATISFY
+    assert outcome.stderr == "warn\n"
+
+
+def test_cancellable_runner_timeout_terminates_tree_and_flags_timed_out(
+    fake_minizinc_binary: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The wall-clock cap fires (first communicate raises TimeoutExpired); the runner
+    # must terminate the process tree and report a timed_out outcome with the drained
+    # partial output.
+    fake = _FakePopen(stdout="partial\n", stderr="", timeout_first_communicate=True)
+    _patch_popen(monkeypatch, fake)
+    killed: list[tuple[int, int]] = []
+    monkeypatch.setattr("openconstraint_mcp.minizinc.core.os.getpgid", lambda _pid: 9999)
+    monkeypatch.setattr(
+        "openconstraint_mcp.minizinc.core.os.killpg",
+        lambda pgid, sig: killed.append((pgid, sig)),
+    )
+
+    outcome = _run_managed_minizinc_cancellable(
+        "var 1..5: x;\nsolve satisfy;",
+        solver=DEFAULT_SOLVER,
+        timeout_ms=DEFAULT_SOLVE_TIMEOUT_MS,
+        extra_args=(),
+        on_start=lambda _proc: None,
+    )
+
+    assert outcome.timed_out is True
+    assert outcome.stdout == "partial\n"
+    if sys.platform != "win32":
+        # SIGTERM was sent to the whole group (escalation to SIGKILL only if it survived).
+        assert (9999, signal.SIGTERM) in killed
+
+
+def test_cancellable_runner_wraps_oserror_as_execution_error(
+    fake_minizinc_binary: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def _boom(*args: Any, **kwargs: Any) -> Any:
+        raise OSError(8, "Exec format error")
+
+    monkeypatch.setattr("openconstraint_mcp.minizinc.core.subprocess.Popen", _boom)
+
+    with pytest.raises(MiniZincExecutionError) as exc_info:
+        _run_managed_minizinc_cancellable(
+            "solve satisfy;",
+            solver=DEFAULT_SOLVER,
+            timeout_ms=DEFAULT_SOLVE_TIMEOUT_MS,
+            extra_args=(),
+            on_start=lambda _proc: None,
+        )
+    assert "install-runtime" in str(exc_info.value)
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX process-group termination")
+def test_terminate_process_tree_signals_group_when_running(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fake = _FakePopen(returncode=0)  # poll() is None until wait/kill — a live handle
+    killed: list[tuple[int, int]] = []
+    monkeypatch.setattr("openconstraint_mcp.minizinc.core.os.getpgid", lambda _pid: 5555)
+    monkeypatch.setattr(
+        "openconstraint_mcp.minizinc.core.os.killpg",
+        lambda pgid, sig: killed.append((pgid, sig)),
+    )
+
+    _terminate_process_tree(fake)  # type: ignore[arg-type]
+
+    assert killed[0] == (5555, signal.SIGTERM)
+    assert fake.wait_calls >= 1
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX process-group termination")
+def test_terminate_process_tree_is_noop_after_terminal(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # An already-exited handle (poll() returns a code) must not be signalled again.
+    fake = _FakePopen(returncode=0)
+    fake.returncode = 0  # already terminal
+    killed: list[tuple[int, int]] = []
+    monkeypatch.setattr(
+        "openconstraint_mcp.minizinc.core.os.killpg",
+        lambda pgid, sig: killed.append((pgid, sig)),
+    )
+
+    _terminate_process_tree(fake)  # type: ignore[arg-type]
+
+    assert killed == []
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX process-group termination")
+def test_terminate_process_tree_is_noop_when_group_already_gone(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # A race/cancel-before-start: the process is gone before getpgid, which raises
+    # ProcessLookupError; termination degrades to a no-op rather than crashing.
+    fake = _FakePopen(returncode=0)
+    killed: list[tuple[int, int]] = []
+
+    def _gone(_pid: int) -> int:
+        raise ProcessLookupError
+
+    monkeypatch.setattr("openconstraint_mcp.minizinc.core.os.getpgid", _gone)
+    monkeypatch.setattr(
+        "openconstraint_mcp.minizinc.core.os.killpg",
+        lambda pgid, sig: killed.append((pgid, sig)),
+    )
+
+    _terminate_process_tree(fake)  # type: ignore[arg-type]
+
+    assert killed == []
+
+
+# The Windows branch is exercised directly (not via the platform-dispatching
+# _terminate_process_tree) so the control-flow regression is caught on the Linux CI
+# host, where TerminateProcess/taskkill cannot run for real.
+def test_terminate_process_tree_windows_kills_tree_via_taskkill_when_parent_exits_fast(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Regression: proc.terminate() (TerminateProcess) reaps only the parent, so
+    # gating taskkill behind the parent OUTLIVING the grace window meant the happy
+    # path returned having orphaned the solver child. taskkill /T /F must run while
+    # the parent is alive to anchor the tree walk, not as a post-wait escalation.
+    fake = _FakePopen(returncode=0)  # poll() is None → live; wait() returns at once
+    run_calls: list[list[str]] = []
+
+    def _fake_run(cmd: Any, **_kwargs: Any) -> subprocess.CompletedProcess[Any]:
+        run_calls.append(list(cmd))
+        return subprocess.CompletedProcess(cmd, 0)
+
+    monkeypatch.setattr("openconstraint_mcp.minizinc.core.subprocess.run", _fake_run)
+
+    _terminate_process_tree_windows(fake, grace_seconds=0.01)  # type: ignore[arg-type]
+
+    assert run_calls == [["taskkill", "/T", "/F", "/PID", "4321"]]
+    assert fake.terminate_calls == 0  # whole-tree kill, not a parent-only terminate
+
+
+def test_terminate_process_tree_windows_falls_back_to_terminate_when_taskkill_unavailable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # If taskkill is missing/unrunnable (OSError), still attempt it first, then
+    # degrade to terminating the parent rather than skipping teardown entirely.
+    fake = _FakePopen(returncode=0)
+    attempted: list[str] = []
+
+    def _no_taskkill(_cmd: Any, **_kwargs: Any) -> subprocess.CompletedProcess[Any]:
+        attempted.append("run")
+        raise FileNotFoundError("taskkill not found")
+
+    monkeypatch.setattr("openconstraint_mcp.minizinc.core.subprocess.run", _no_taskkill)
+
+    _terminate_process_tree_windows(fake, grace_seconds=0.01)  # type: ignore[arg-type]
+
+    assert attempted == ["run"]  # taskkill attempted before the fallback
+    assert fake.terminate_calls == 1  # then fell back to the parent terminate
