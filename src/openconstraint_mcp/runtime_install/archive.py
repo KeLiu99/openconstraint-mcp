@@ -124,9 +124,7 @@ def _install_nsis_bundle(installer: Path, dest: Path) -> None:
         log = Path(logdir) / "installer.log"
         try:
             with log.open("w") as sink:
-                proc = subprocess.Popen(
-                    command, stdout=sink, stderr=subprocess.STDOUT, text=True
-                )
+                proc = subprocess.Popen(command, stdout=sink, stderr=subprocess.STDOUT, text=True)
         except FileNotFoundError as exc:
             raise RuntimeInstallError(
                 f"could not run the MiniZinc Windows installer {installer}; installing "
@@ -146,9 +144,7 @@ def _install_nsis_bundle(installer: Path, dest: Path) -> None:
         output = log.read_text(errors="replace").strip()
 
     if proc.returncode != 0:
-        raise RuntimeInstallError(
-            f"MiniZinc Windows installer exited {proc.returncode}: {output}"
-        )
+        raise RuntimeInstallError(f"MiniZinc Windows installer exited {proc.returncode}: {output}")
 
     missing = [
         str(rel) for rel in (_NSIS_RUNTIME_BINARY, _NSIS_RUNTIME_SHARE) if not (dest / rel).exists()
@@ -213,9 +209,7 @@ def _copy_dmg_runtime_tree(mountpoint: Path, dest: Path) -> None:
     """
     app_dir = mountpoint / _DMG_APP_DIR
     if not app_dir.is_dir():
-        raise RuntimeInstallError(
-            f"mounted MiniZinc disk image does not contain {_DMG_APP_DIR}"
-        )
+        raise RuntimeInstallError(f"mounted MiniZinc disk image does not contain {_DMG_APP_DIR}")
     resources = app_dir / _DMG_RESOURCES_SUBPATH
     if not resources.is_dir():
         raise RuntimeInstallError(

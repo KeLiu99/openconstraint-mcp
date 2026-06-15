@@ -35,13 +35,16 @@ from openconstraint_mcp.minizinc.core import (
     list_solvers,
     save_verified_model,
     solve_model,
+    solve_model_cancellable,
     solver_supports_num_solutions,
 )
 from openconstraint_mcp.runtime import RuntimeMissingError
 from openconstraint_mcp.schemas import (
     CheckResult,
     ModelInspectionResult,
+    SolverCapabilities,
     SolveResult,
+    SolverInfo,
     SolverList,
 )
 from tests.minizinc.helpers import (
@@ -617,7 +620,20 @@ def test_solve_model_with_checker_transcript_is_raw_stdout(
 
 
 def _solve_cmd_with_flags(monkeypatch: pytest.MonkeyPatch, **flags: Any) -> list[str]:
-    """Solve a trivial model with the given flags; return the argv it built."""
+    """Solve a trivial model with the given flags; return the argv it built.
+
+    Reports every gated control as supported for the solve's solver — the unit
+    under test here is argv assembly, not capability rejection — so a requested
+    ``-a/-f/-p/-r`` resolves and appends its flag instead of raising.
+    """
+    solver = str(flags.get("solver", DEFAULT_SOLVER))
+    full = SolverCapabilities(
+        supports_all_solutions=True,
+        supports_free_search=True,
+        supports_parallel=True,
+        supports_random_seed=True,
+    )
+    _patch_capabilities(monkeypatch, {DEFAULT_SOLVER: full, solver: full})
     calls = _record_subprocess(
         monkeypatch, FakeCompletedProcess(stdout=STREAM_SATISFY, stderr="", returncode=0)
     )
@@ -789,6 +805,112 @@ def test_solve_model_default_omits_num_solutions_flag(
 )
 def test_solver_supports_num_solutions_truth_table(solver: str, expected: bool) -> None:
     assert solver_supports_num_solutions(solver) is expected
+
+
+# --- capability enforcement (-a/-f/-p/-r, runtime-local) --------------------
+
+
+def _patch_capabilities(
+    monkeypatch: pytest.MonkeyPatch, caps_by_id: dict[str, SolverCapabilities]
+) -> list[int]:
+    """Patch ``core.list_solvers`` to report ``caps_by_id``; return a call counter.
+
+    The resolver reads ``list_solvers()``; patching it here lets a test mock the
+    runtime-local capability map without a real ``--solvers-json`` subprocess. The
+    returned single-element list counts how many times the resolver invoked it, so
+    a test can assert a default solve never resolves (count stays 0).
+    """
+    calls = [0]
+    solvers = [
+        SolverInfo(id=solver_id, name=solver_id, capabilities=caps)
+        for solver_id, caps in caps_by_id.items()
+    ]
+
+    def _fake_list_solvers() -> SolverList:
+        calls[0] += 1
+        return SolverList(solvers=solvers)
+
+    monkeypatch.setattr("openconstraint_mcp.minizinc.core.list_solvers", _fake_list_solvers)
+    return calls
+
+
+def _fail_if_solve_runs(monkeypatch: pytest.MonkeyPatch) -> None:
+    def _fail(*args: Any, **kwargs: Any) -> Any:
+        raise AssertionError("solve subprocess must not run when a control is unsupported")
+
+    monkeypatch.setattr("openconstraint_mcp.minizinc.core.subprocess.run", _fail)
+
+
+@pytest.mark.parametrize(
+    ("control", "flag", "kwargs"),
+    [
+        ("all_solutions", "-a", {"all_solutions": True}),
+        ("free_search", "-f", {"free_search": True}),
+        ("parallel", "-p", {"parallel": 2}),
+        ("random_seed", "-r", {"random_seed": 7}),
+    ],
+)
+def test_solve_model_rejects_unsupported_control(
+    control: str,
+    flag: str,
+    kwargs: dict[str, Any],
+    fake_minizinc_binary: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # The resolved default solver declares no stdFlags, so each gated control is
+    # rejected before the solve runs (D4 case a), naming the solver, the control,
+    # and its MiniZinc flag.
+    _patch_capabilities(monkeypatch, {"cp-sat": SolverCapabilities()})
+    _fail_if_solve_runs(monkeypatch)
+    with pytest.raises(ValueError, match=control) as exc_info:
+        solve_model("solve satisfy;", **kwargs)
+    message = str(exc_info.value)
+    assert "cp-sat" in message
+    assert flag in message
+
+
+def test_solve_model_unresolved_solver_passes_capability_check(
+    fake_minizinc_binary: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # A solver string that resolves to no entry id (a short alias) is NOT rejected
+    # and gets no "missing capability" message — it passes through to the solve so
+    # MiniZinc resolves the alias, exactly as before (D4 case c).
+    _patch_capabilities(monkeypatch, {"cp-sat": SolverCapabilities()})
+    _record_subprocess(
+        monkeypatch, FakeCompletedProcess(stdout=STREAM_SATISFY, stderr="", returncode=0)
+    )
+    result = solve_model("solve satisfy;", solver="gecode", free_search=True)
+    assert result.status == "satisfied"
+
+
+def test_solve_model_default_controls_skip_capability_resolution(
+    fake_minizinc_binary: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # With no gated control requested, the lazy resolver is never invoked, so a
+    # default solve pays no --solvers-json cost (D2).
+    resolve_calls = _patch_capabilities(monkeypatch, {"cp-sat": SolverCapabilities()})
+    _record_subprocess(
+        monkeypatch, FakeCompletedProcess(stdout=STREAM_SATISFY, stderr="", returncode=0)
+    )
+    result = solve_model("solve satisfy;")
+    assert result.status == "satisfied"
+    assert resolve_calls[0] == 0
+
+
+def test_solve_model_supported_control_resolves_once_and_solves(
+    fake_minizinc_binary: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # A declared control resolves the capability map exactly once (D2/D3) and the
+    # solve proceeds (D4 case b).
+    resolve_calls = _patch_capabilities(
+        monkeypatch, {"cp-sat": SolverCapabilities(supports_free_search=True)}
+    )
+    _record_subprocess(
+        monkeypatch, FakeCompletedProcess(stdout=STREAM_SATISFY, stderr="", returncode=0)
+    )
+    result = solve_model("solve satisfy;", free_search=True)
+    assert result.status == "satisfied"
+    assert resolve_calls[0] == 1
 
 
 def test_solve_model_forwards_inline_data_positionally(
@@ -1755,6 +1877,24 @@ def _fake_check_then_solve(
     return cmds
 
 
+def test_save_verified_model_rejects_unsupported_control_before_check(
+    fake_minizinc_binary: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    # An unsupported -a/-f/-p/-r is rejected before the compile check, the solve,
+    # or any write — and the capability map is resolved at most once for the whole
+    # save (D1). subprocess.run would run the check/solve, so it must not fire.
+    _patch_capabilities(monkeypatch, {"cp-sat": SolverCapabilities()})
+    _fail_if_solve_runs(monkeypatch)
+    target = tmp_path / "project"
+
+    with pytest.raises(ValueError, match="free_search"):
+        save_verified_model(_SAVE_MODEL, target_dir=target, free_search=True)
+
+    assert not target.exists()
+
+
 def test_save_verified_model_satisfied_solve_writes_project(
     fake_minizinc_binary: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -2133,15 +2273,31 @@ def _patch_popen(monkeypatch: pytest.MonkeyPatch, fake: _FakePopen) -> list[dict
     return calls
 
 
+def test_solve_model_cancellable_does_not_resolve_capabilities(
+    fake_minizinc_binary: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The job worker trusts admission: the cancellable solve must NOT resolve
+    # capabilities even with a gated control set (the patched cp-sat declares no
+    # stdFlags, so a re-resolve would also wrongly reject). A gated-control job
+    # thus runs --solvers-json at most once — at admission, never in the worker.
+    resolve_calls = _patch_capabilities(monkeypatch, {"cp-sat": SolverCapabilities()})
+    _patch_popen(monkeypatch, _FakePopen(stdout=STREAM_SATISFY, stderr="", returncode=0))
+    result = solve_model_cancellable(
+        "var 1..5: x;\nsolve satisfy;",
+        free_search=True,
+        on_start=lambda _proc: None,
+    )
+    assert result.status == "satisfied"
+    assert resolve_calls[0] == 0
+
+
 def test_cancellable_runner_launches_in_new_process_group(
     fake_minizinc_binary: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     # The whole-tree-killable launch contract: POSIX gets start_new_session=True
     # (a new session leader); Windows gets CREATE_NEW_PROCESS_GROUP. The relevant
     # branch is asserted for the platform the suite runs on.
-    calls = _patch_popen(
-        monkeypatch, _FakePopen(stdout=STREAM_SATISFY, stderr="", returncode=0)
-    )
+    calls = _patch_popen(monkeypatch, _FakePopen(stdout=STREAM_SATISFY, stderr="", returncode=0))
 
     _run_managed_minizinc_cancellable(
         "var 1..5: x;\nsolve satisfy;",
@@ -2179,9 +2335,7 @@ def test_cancellable_runner_invokes_on_start_with_the_handle(
 def test_cancellable_runner_clean_run_returns_outcome(
     fake_minizinc_binary: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    _patch_popen(
-        monkeypatch, _FakePopen(stdout=STREAM_SATISFY, stderr="warn\n", returncode=0)
-    )
+    _patch_popen(monkeypatch, _FakePopen(stdout=STREAM_SATISFY, stderr="warn\n", returncode=0))
 
     outcome = _run_managed_minizinc_cancellable(
         "var 1..5: x;\nsolve satisfy;",

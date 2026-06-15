@@ -1,0 +1,459 @@
+"""Unit tests for the background portfolio-job registry (collect-on-poll).
+
+A real ``JobRegistry`` drives the attempts (its ``solve_model_cancellable`` is
+mocked) and a real ``PortfolioJobRegistry`` selects the winner lazily on each
+``get``. These prove the async portfolio path — submit returns at once, polling
+finalizes the race, cancel stops it — without a runtime and without a background
+worker pool: winner-selection is a pure function of the attempts' statuses.
+"""
+
+from __future__ import annotations
+
+import threading
+import time
+from typing import Any
+
+import pytest
+
+from openconstraint_mcp.jobs import JobRegistry, JobRejectedError
+from openconstraint_mcp.portfolio_jobs import PortfolioJobRegistry
+from openconstraint_mcp.schemas import PortfolioSolveResult, SolveResult
+
+_TERMINAL = {"succeeded", "cancelled"}
+_SOLVE_TERMINAL = {"succeeded", "failed", "timeout", "cancelled"}
+
+
+def _solve_result(status: str = "satisfied", *, solver: str = "cp-sat") -> SolveResult:
+    return SolveResult(
+        status=status,  # type: ignore[arg-type]
+        solver=solver,
+        return_code=0,
+        timed_out=False,
+        stdout="x = 1;\n",
+        stderr="",
+        elapsed_ms=3,
+        solution={"x": 1},
+        solutions=[{"x": 1}],
+        objective=22 if status == "optimal" else None,
+    )
+
+
+class _FakeProc:
+    def poll(self) -> int:
+        return 0
+
+
+def _patch_solve(monkeypatch: pytest.MonkeyPatch, fake: Any) -> None:
+    monkeypatch.setattr("openconstraint_mcp.jobs.solve_model_cancellable", fake)
+
+
+def _poll(registry: PortfolioJobRegistry, job_id: str, timeout: float = 5.0) -> Any:
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        status = registry.get(job_id)
+        if status.state in _TERMINAL:
+            return status
+        time.sleep(0.01)
+    raise AssertionError(f"portfolio job {job_id} did not finish within {timeout}s")
+
+
+def _wait_solve_terminal(registry: JobRegistry, job_id: str, timeout: float = 3.0) -> str:
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        state = registry.get(job_id).state
+        if state in _SOLVE_TERMINAL:
+            return state
+        time.sleep(0.005)
+    raise AssertionError(f"solve job {job_id} did not reach terminal state within {timeout}s")
+
+
+def test_submit_then_poll_reaches_succeeded_with_winner(monkeypatch: pytest.MonkeyPatch) -> None:
+    def _fake_solve(model: str, *, solver: str, on_start: Any, **kw: Any) -> SolveResult:
+        on_start(_FakeProc())
+        return _solve_result("optimal", solver=solver)
+
+    _patch_solve(monkeypatch, _fake_solve)
+
+    job_registry = JobRegistry(max_running_jobs=4)
+    portfolios = PortfolioJobRegistry(job_registry)
+    try:
+        job_id = portfolios.submit(
+            models=["solve satisfy;"], solvers=["cp-sat", "org.gecode.gecode"]
+        )
+        final = _poll(portfolios, job_id)
+        assert final.state == "succeeded"
+        assert final.result is not None
+        assert final.result.status == "winner"
+        assert final.result.winner is not None
+        assert final.result.winner.status == "optimal"
+    finally:
+        job_registry.shutdown()
+
+
+def test_poll_succeeds_after_child_attempt_would_exceed_solve_retention(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def _fake_solve(model: str, *, solver: str, on_start: Any, **kw: Any) -> SolveResult:
+        on_start(_FakeProc())
+        return _solve_result("optimal", solver=solver)
+
+    _patch_solve(monkeypatch, _fake_solve)
+
+    job_registry = JobRegistry(max_running_jobs=1, max_queued_jobs=4, max_retained_terminal=2)
+    portfolios = PortfolioJobRegistry(job_registry)
+    try:
+        job_id = portfolios.submit(models=["solve satisfy;"], solvers=["cp-sat"])
+        (attempt_id,) = portfolios._records[job_id].attempt_job_ids
+        _wait_solve_terminal(job_registry, attempt_id)
+
+        for _ in range(3):
+            unrelated_id = job_registry.submit(model="solve satisfy;")
+            _wait_solve_terminal(job_registry, unrelated_id)
+
+        final = portfolios.get(job_id)
+        assert final.state == "succeeded"
+        assert final.result is not None
+        assert final.result.winner_index == 0
+        assert final.result.winner is not None
+    finally:
+        job_registry.shutdown()
+
+
+def test_successful_portfolio_releases_child_pin_for_retention_eviction(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def _fake_solve(model: str, *, solver: str, on_start: Any, **kw: Any) -> SolveResult:
+        on_start(_FakeProc())
+        return _solve_result("optimal", solver=solver)
+
+    _patch_solve(monkeypatch, _fake_solve)
+
+    job_registry = JobRegistry(max_running_jobs=1, max_queued_jobs=4, max_retained_terminal=2)
+    portfolios = PortfolioJobRegistry(job_registry)
+    try:
+        job_id = portfolios.submit(models=["solve satisfy;"], solvers=["cp-sat"])
+        (attempt_id,) = portfolios._records[job_id].attempt_job_ids
+        _wait_solve_terminal(job_registry, attempt_id)
+
+        for _ in range(2):
+            unrelated_id = job_registry.submit(model="solve satisfy;")
+            _wait_solve_terminal(job_registry, unrelated_id)
+        assert job_registry.get(attempt_id).state == "succeeded"
+
+        assert portfolios.get(job_id).state == "succeeded"
+        evicting_id = job_registry.submit(model="solve satisfy;")
+        _wait_solve_terminal(job_registry, evicting_id)
+
+        with pytest.raises(ValueError, match="unknown job_id"):
+            job_registry.get(attempt_id)
+    finally:
+        job_registry.shutdown()
+
+
+def test_submit_does_not_block_while_attempts_run(monkeypatch: pytest.MonkeyPatch) -> None:
+    # The attempts block until released; submit must still return promptly (it only
+    # admits them), and a poll while they run reports `running` — selection is lazy.
+    release = threading.Event()
+
+    def _slow_solve(model: str, *, solver: str, on_start: Any, **kw: Any) -> SolveResult:
+        on_start(_FakeProc())
+        release.wait(timeout=5)
+        return _solve_result("satisfied", solver=solver)
+
+    _patch_solve(monkeypatch, _slow_solve)
+
+    job_registry = JobRegistry(max_running_jobs=4)
+    portfolios = PortfolioJobRegistry(job_registry)
+    try:
+        start = time.monotonic()
+        job_id = portfolios.submit(models=["solve satisfy;"], solvers=["cp-sat"])
+        assert time.monotonic() - start < 1.0  # did not wait for the 5s-blocked solve
+        assert portfolios.get(job_id).state == "running"
+    finally:
+        release.set()
+        job_registry.shutdown()
+
+
+def test_single_attempt_succeeds_on_capacity_one_registry(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # A 1-attempt portfolio on a max_running=1 attempt registry completes: there is
+    # no orchestration thread competing for the single attempt slot.
+    def _fake_solve(model: str, *, solver: str, on_start: Any, **kw: Any) -> SolveResult:
+        on_start(_FakeProc())
+        return _solve_result("optimal", solver=solver)
+
+    _patch_solve(monkeypatch, _fake_solve)
+
+    job_registry = JobRegistry(max_running_jobs=1, max_queued_jobs=0)
+    portfolios = PortfolioJobRegistry(job_registry)
+    try:
+        job_id = portfolios.submit(models=["solve satisfy;"], solvers=["cp-sat"])
+        final = _poll(portfolios, job_id)
+        assert final.state == "succeeded"
+        assert final.result is not None
+        assert final.result.winner is not None
+    finally:
+        job_registry.shutdown()
+
+
+def test_submit_empty_models_raises_synchronously_without_creating_a_job(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def _never(model: str, *, on_start: Any, **kw: Any) -> SolveResult:
+        raise AssertionError("no solve should run when admission rejects the plan")
+
+    _patch_solve(monkeypatch, _never)
+
+    job_registry = JobRegistry()
+    portfolios = PortfolioJobRegistry(job_registry)
+    try:
+        with pytest.raises(ValueError, match="models must not be empty"):
+            portfolios.submit(models=[], solvers=["cp-sat"])
+        assert portfolios.list() == []
+    finally:
+        job_registry.shutdown()
+
+
+def test_submit_rejects_plan_exceeding_capacity_synchronously(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # The attempt registry's running+queued bound is the only breadth cap; a plan
+    # past it is rejected by submit_many at admission, synchronously, before the
+    # portfolio job exists.
+    def _never(model: str, *, on_start: Any, **kw: Any) -> SolveResult:
+        raise AssertionError("no solve should run when the batch exceeds capacity")
+
+    _patch_solve(monkeypatch, _never)
+
+    job_registry = JobRegistry(max_running_jobs=1, max_queued_jobs=0)
+    portfolios = PortfolioJobRegistry(job_registry)
+    try:
+        with pytest.raises(JobRejectedError):
+            portfolios.submit(models=["solve satisfy;"], solvers=["cp-sat", "org.gecode.gecode"])
+        assert portfolios.list() == []
+    finally:
+        job_registry.shutdown()
+
+
+def test_max_running_bounds_live_portfolios_and_frees_on_terminal(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # A running portfolio keeps its attempt records pinned until it is polled or
+    # cancelled, so an abandon-and-resubmit client could grow them without bound.
+    # `max_running` caps concurrent non-terminal portfolios (symmetric with the
+    # attempt queue's in-flight bound); the slot frees the instant a portfolio
+    # reaches a terminal state.
+    release = threading.Event()
+
+    def _blocking_solve(model: str, *, solver: str, on_start: Any, **kw: Any) -> SolveResult:
+        on_start(_FakeProc())
+        release.wait(timeout=5)
+        return _solve_result("satisfied", solver=solver)
+
+    _patch_solve(monkeypatch, _blocking_solve)
+
+    # Ample attempt capacity, so the rejection below is the portfolio cap (max_running=1)
+    # and not submit_many's attempt-queue bound.
+    job_registry = JobRegistry(max_running_jobs=4)
+    portfolios = PortfolioJobRegistry(job_registry, max_running=1)
+    try:
+        first = portfolios.submit(models=["solve satisfy;"], solvers=["cp-sat"])
+        with pytest.raises(JobRejectedError, match="Too many running portfolio jobs"):
+            portfolios.submit(models=["solve satisfy;"], solvers=["cp-sat"])
+        assert len(portfolios.list()) == 1  # the rejected submit created no job
+
+        release.set()
+        assert _poll(portfolios, first).state == "succeeded"
+
+        # The finished portfolio no longer counts against the cap.
+        second = portfolios.submit(models=["solve satisfy;"], solvers=["cp-sat"])
+        assert _poll(portfolios, second).state == "succeeded"
+    finally:
+        release.set()
+        job_registry.shutdown()
+
+
+def test_cancel_running_portfolio_reaches_cancelled_and_stops_attempts(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    started = threading.Event()
+    release = threading.Event()
+    terminated: list[Any] = []
+
+    def _blocking_solve(model: str, *, solver: str, on_start: Any, **kw: Any) -> SolveResult:
+        on_start(_FakeProc())
+        started.set()
+        release.wait(timeout=5)
+        return _solve_result("satisfied", solver=solver)
+
+    def _fake_terminate(proc: Any, **kwargs: Any) -> None:
+        terminated.append(proc)
+        release.set()  # the "process" dying unblocks the worker
+
+    _patch_solve(monkeypatch, _blocking_solve)
+    monkeypatch.setattr("openconstraint_mcp.jobs._terminate_process_tree", _fake_terminate)
+
+    job_registry = JobRegistry(max_running_jobs=4)
+    portfolios = PortfolioJobRegistry(job_registry)
+    try:
+        job_id = portfolios.submit(models=["solve satisfy;"], solvers=["cp-sat"])
+        assert started.wait(timeout=3)
+        cancelled = portfolios.cancel(job_id)
+        assert cancelled.state == "cancelled"
+        assert cancelled.result is None
+        assert terminated  # the attempt's process tree was signalled
+    finally:
+        release.set()
+        job_registry.shutdown()
+
+
+def test_cancelled_portfolio_releases_child_pin_for_retention_eviction(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    started = threading.Event()
+    release = threading.Event()
+
+    def _blocking_solve(model: str, *, solver: str, on_start: Any, **kw: Any) -> SolveResult:
+        on_start(_FakeProc())
+        started.set()
+        release.wait(timeout=5)
+        return _solve_result("satisfied", solver=solver)
+
+    def _fake_terminate(proc: Any, **kwargs: Any) -> None:
+        release.set()
+
+    _patch_solve(monkeypatch, _blocking_solve)
+    monkeypatch.setattr("openconstraint_mcp.jobs._terminate_process_tree", _fake_terminate)
+
+    job_registry = JobRegistry(max_running_jobs=1, max_queued_jobs=4, max_retained_terminal=2)
+    portfolios = PortfolioJobRegistry(job_registry)
+    try:
+        job_id = portfolios.submit(models=["solve satisfy;"], solvers=["cp-sat"])
+        (attempt_id,) = portfolios._records[job_id].attempt_job_ids
+        assert started.wait(timeout=3)
+
+        cancelled = portfolios.cancel(job_id)
+        assert cancelled.state == "cancelled"
+        assert _wait_solve_terminal(job_registry, attempt_id) == "cancelled"
+
+        for _ in range(2):
+            unrelated_id = job_registry.submit(model="solve satisfy;")
+            _wait_solve_terminal(job_registry, unrelated_id)
+
+        with pytest.raises(ValueError, match="unknown job_id"):
+            job_registry.get(attempt_id)
+    finally:
+        release.set()
+        job_registry.shutdown()
+
+
+def test_list_returns_one_entry_per_submitted_portfolio(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def _fake_solve(model: str, *, solver: str, on_start: Any, **kw: Any) -> SolveResult:
+        on_start(_FakeProc())
+        return _solve_result("optimal", solver=solver)
+
+    _patch_solve(monkeypatch, _fake_solve)
+
+    job_registry = JobRegistry(max_running_jobs=4)
+    portfolios = PortfolioJobRegistry(job_registry)
+    try:
+        ids = {portfolios.submit(models=["solve satisfy;"], solvers=["cp-sat"]) for _ in range(2)}
+        for job_id in ids:
+            _poll(portfolios, job_id)
+        assert {entry.job_id for entry in portfolios.list()} == ids
+    finally:
+        job_registry.shutdown()
+
+
+def test_get_unknown_job_id_raises() -> None:
+    job_registry = JobRegistry()
+    portfolios = PortfolioJobRegistry(job_registry)
+    try:
+        with pytest.raises(ValueError, match="unknown"):
+            portfolios.get("does-not-exist")
+    finally:
+        job_registry.shutdown()
+
+
+def test_list_does_not_observe_partially_finalized_record(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # _finalize sets state='succeeded' before result, under record.lock. A list()
+    # that skips that lock can read the transient state='succeeded' with result=None
+    # and trip the PortfolioJobStatus validator. Holding record.lock in exactly that
+    # transient state proves list() WAITS for the lock rather than reading through it.
+    def _fake_solve(model: str, *, solver: str, on_start: Any, **kw: Any) -> SolveResult:
+        on_start(_FakeProc())
+        return _solve_result("optimal", solver=solver)
+
+    _patch_solve(monkeypatch, _fake_solve)
+
+    job_registry = JobRegistry(max_running_jobs=4)
+    portfolios = PortfolioJobRegistry(job_registry)
+    try:
+        job_id = portfolios.submit(models=["solve satisfy;"], solvers=["cp-sat"])
+        record = portfolios._records[job_id]
+        consistent = PortfolioSolveResult(
+            status="no_winner",
+            winner_index=None,
+            winner=None,
+            attempts=[],
+            elapsed_ms=1,
+            selection_policy="first-decisive-result",
+        )
+        listed: list[Any] = []
+        errors: list[BaseException] = []
+        started = threading.Event()
+
+        def _call_list() -> None:
+            started.set()
+            try:
+                listed.append(portfolios.list())
+            except BaseException as exc:  # noqa: BLE001 - capture the validator crash
+                errors.append(exc)
+
+        with record.lock:
+            # The transient inconsistent state that _finalize passes through.
+            record.state = "succeeded"
+            record.result = None
+            lister = threading.Thread(target=_call_list)
+            lister.start()
+            assert started.wait(timeout=2)
+            lister.join(timeout=0.2)
+            assert lister.is_alive(), "list() read a record without taking its lock"
+            # Complete the finalize before releasing, exactly as _finalize does.
+            record.result = consistent
+        lister.join(timeout=2)
+
+        assert not errors
+        assert len(listed) == 1
+        (status,) = listed[0]
+        assert status.state == "succeeded"
+        assert status.result is consistent
+    finally:
+        job_registry.shutdown()
+
+
+def test_poll_with_all_attempts_failing_is_succeeded_no_winner(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # A race that produces no usable result is a SUCCESSFUL orchestration carrying a
+    # `no_winner` PortfolioSolveResult — not a failed job.
+    def _boom(model: str, *, on_start: Any, **kw: Any) -> SolveResult:
+        raise RuntimeError("boom")
+
+    _patch_solve(monkeypatch, _boom)
+
+    job_registry = JobRegistry(max_running_jobs=4)
+    portfolios = PortfolioJobRegistry(job_registry)
+    try:
+        job_id = portfolios.submit(models=["solve satisfy;"], solvers=["cp-sat"])
+        final = _poll(portfolios, job_id)
+        assert final.state == "succeeded"
+        assert final.result is not None
+        assert final.result.status == "no_winner"
+    finally:
+        job_registry.shutdown()

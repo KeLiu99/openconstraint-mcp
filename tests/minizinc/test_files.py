@@ -22,7 +22,10 @@ from openconstraint_mcp.runtime import RuntimeMissingError
 from openconstraint_mcp.schemas import (
     CheckResult,
     ModelInspectionResult,
+    SolverCapabilities,
     SolveResult,
+    SolverInfo,
+    SolverList,
     UnsatCoreResult,
 )
 from tests.minizinc.helpers import (
@@ -32,6 +35,20 @@ from tests.minizinc.helpers import (
     solution_obj,
     stream,
 )
+
+
+def _patch_capabilities(
+    monkeypatch: pytest.MonkeyPatch, caps_by_id: dict[str, SolverCapabilities]
+) -> None:
+    """Point the capability resolver's ``list_solvers`` at ``caps_by_id``."""
+    solvers = [
+        SolverInfo(id=solver_id, name=solver_id, capabilities=caps)
+        for solver_id, caps in caps_by_id.items()
+    ]
+    monkeypatch.setattr(
+        "openconstraint_mcp.minizinc.core.list_solvers", lambda: SolverList(solvers=solvers)
+    )
+
 
 # A minimal single-line interface object for `_MODEL_SRC` (no params, one output
 # var, satisfy) as the managed binary would emit under `--model-interface-only`.
@@ -365,6 +382,25 @@ def test_solve_model_path_rejects_non_positive_num_solutions(
 
     with pytest.raises(ValueError, match="num_solutions"):
         solve_model_path(model_path, num_solutions=0, solver="org.chuffed.chuffed")
+
+
+def test_solve_model_path_rejects_unsupported_control_before_solve(
+    tmp_path: Path,
+    fake_minizinc_binary: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # The path solve inherits the inline capability gate: a control the resolved
+    # solver omits is rejected before the solve runs (D4 case a).
+    model_path = tmp_path / "entry.mzn"
+    model_path.write_text(_MODEL_SRC)
+    _patch_capabilities(monkeypatch, {"cp-sat": SolverCapabilities()})
+    _fail_if_run_called(monkeypatch)
+
+    with pytest.raises(ValueError, match="free_search") as exc_info:
+        solve_model_path(model_path, free_search=True)
+    message = str(exc_info.value)
+    assert "cp-sat" in message
+    assert "-f" in message
 
 
 # --- _validate_model_data_paths --------------------------------------------

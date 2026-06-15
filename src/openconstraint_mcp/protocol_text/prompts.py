@@ -87,7 +87,12 @@ Otherwise:
 
 6. On a syntax, type, or solver error, revise and retry — but only through
    `solve_minizinc_model` when that tool is actually available. Never
-   fabricate solver output.
+   fabricate solver output. A single-solver `solve_minizinc_model` is the
+   default first attempt; only when one solver is too slow or the best choice
+   is genuinely unclear, you may race several by submitting a background
+   portfolio with `submit_portfolio_job` (a local race over the managed
+   runtime that returns the winning solver's result) on a cleanly-checked
+   model, then poll `get_portfolio_job` for the winner.
 
 7. Present the result as a short, structured summary; do not dump the raw
    `SolveResult`. Lead with the result itself; do not narrate the prompt,

@@ -426,9 +426,7 @@ def _terminate_process_tree(
         _terminate_process_tree_posix(proc, grace_seconds=grace_seconds)
 
 
-def _terminate_process_tree_posix(
-    proc: subprocess.Popen[str], *, grace_seconds: float
-) -> None:
+def _terminate_process_tree_posix(proc: subprocess.Popen[str], *, grace_seconds: float) -> None:
     try:
         pgid = os.getpgid(proc.pid)
     except ProcessLookupError:
@@ -443,9 +441,7 @@ def _terminate_process_tree_posix(
         proc.wait(timeout=grace_seconds)
 
 
-def _terminate_process_tree_windows(
-    proc: subprocess.Popen[str], *, grace_seconds: float
-) -> None:
+def _terminate_process_tree_windows(proc: subprocess.Popen[str], *, grace_seconds: float) -> None:
     # taskkill /T /F tears down the whole tree (parent + solver children) while the
     # parent is still alive to anchor the tree walk. proc.terminate() (TerminateProcess)
     # reaches only the parent; once it is reaped, taskkill /T can no longer find the
@@ -866,6 +862,118 @@ def _solve_extra_args(
     return *_SOLVE_STREAM_ARGS, *flags
 
 
+def _validate_solver_capabilities(
+    *,
+    solver: str,
+    capabilities: SolverCapabilities,
+    free_search: bool,
+    parallel: int | None,
+    random_seed: int | None,
+    all_solutions: bool,
+) -> None:
+    """Reject a requested ``-a/-f/-p/-r`` control the resolved solver omits (D4 case a).
+
+    Pure: it runs no subprocess — the caller passes an already-resolved
+    ``capabilities`` (D1), so the same resolved map can validate one solver
+    (single solve) or many (a portfolio plan). A requested control whose matching
+    ``supports_*`` field is False raises a ``ValueError`` naming the solver, the
+    MCP control, and the MiniZinc flag, plus the actionable fix. ``num_solutions``
+    is deliberately NOT checked here — it keeps its canonical allowlist gate in
+    ``_solve_extra_args`` (``org.gecode.gist`` lists ``-n`` but is excluded), so it
+    must not be folded into these stdFlags-derived booleans.
+    """
+    checks = (
+        (all_solutions, capabilities.supports_all_solutions, "all_solutions", "-a"),
+        (free_search, capabilities.supports_free_search, "free_search", "-f"),
+        (parallel is not None, capabilities.supports_parallel, "parallel", "-p"),
+        (random_seed is not None, capabilities.supports_random_seed, "random_seed", "-r"),
+    )
+    for requested, supported, control, flag in checks:
+        if requested and not supported:
+            raise ValueError(
+                f"solver '{solver}' does not support {control} (the {flag} flag). "
+                "Call list_available_solvers to see each solver's capabilities, or "
+                f"choose a solver whose {control} capability is supported."
+            )
+
+
+def _resolve_capability_map() -> dict[str, SolverCapabilities]:
+    """Resolve the runtime-local ``solver_id -> capabilities`` map (one ``list_solvers()``).
+
+    A single ``--solvers-json`` subprocess; the result is not cached (D3). Keyed by
+    exact solver ``id`` so capability enforcement matches the canonical-id stance of
+    the ``num_solutions`` gate. Callers resolve this once per entry point and reuse
+    it (a portfolio resolves it once for the whole plan).
+    """
+    return {solver.id: solver.capabilities for solver in list_solvers().solvers}
+
+
+def _enforce_solver_capabilities(
+    *,
+    solver: str,
+    free_search: bool,
+    parallel: int | None,
+    random_seed: int | None,
+    all_solutions: bool,
+) -> None:
+    """Lazily resolve runtime capabilities and reject unsupported ``-a/-f/-p/-r``.
+
+    No-op — and NO ``--solvers-json`` subprocess — when none of the four gated
+    controls is requested, so a default solve stays byte-identical and pays no
+    capability-lookup cost (D2). When at least one is requested, resolves the map
+    once and applies D4: (a) the solver resolves to an entry that omits the flag ->
+    raise; (b) it resolves and declares the flag -> pass; (c) the solver string
+    does not resolve to any entry ``id`` (a short alias like ``gecode`` or an
+    unknown solver) -> pass through untouched and let MiniZinc resolve it, exactly
+    as today. Each entry point calls this once; the job worker trusts admission and
+    never re-resolves.
+    """
+    if not (free_search or all_solutions or parallel is not None or random_seed is not None):
+        return
+    capabilities = _resolve_capability_map().get(solver)
+    if capabilities is None:
+        return
+    _validate_solver_capabilities(
+        solver=solver,
+        capabilities=capabilities,
+        free_search=free_search,
+        parallel=parallel,
+        random_seed=random_seed,
+        all_solutions=all_solutions,
+    )
+
+
+def _run_solve(
+    model: str,
+    *,
+    solver: str,
+    data: str | None,
+    checker: str | None,
+    timeout_ms: int,
+    extra_args: Sequence[str],
+) -> SolveResult:
+    """Run a prepared (validated, capability-enforced) inline solve and build its result.
+
+    The enforcement-free tail shared by ``solve_model`` and the internal solve of
+    ``save_verified_model``: both validate controls and enforce capabilities once
+    up front (so the save path resolves capabilities at most once — D1), build the
+    ``extra_args``, then call this to run and parse. ``extra_args`` already carries
+    the json-stream transport plus any control flags from ``_solve_extra_args``.
+    """
+    outcome = _run_managed_minizinc(
+        model,
+        solver=solver,
+        timeout_ms=timeout_ms,
+        extra_args=extra_args,
+        data=data,
+        checker=checker,
+    )
+    result = _build_solve_result(outcome, solver=solver)
+    if checker is not None:
+        result.checker = _build_checker_report(outcome, result)
+    return result
+
+
 def solve_model(
     model: str,
     *,
@@ -879,25 +987,32 @@ def solve_model(
     all_solutions: bool = False,
     num_solutions: int | None = None,
 ) -> SolveResult:
-    outcome = _run_managed_minizinc(
+    # Pure validation + arg build first (raises on a bad parallel/num_solutions
+    # before any subprocess), THEN the lazy capability resolution (one
+    # --solvers-json only when a gated control is requested), THEN the solve.
+    extra_args = _solve_extra_args(
+        solver=solver,
+        free_search=free_search,
+        parallel=parallel,
+        random_seed=random_seed,
+        all_solutions=all_solutions,
+        num_solutions=num_solutions,
+    )
+    _enforce_solver_capabilities(
+        solver=solver,
+        free_search=free_search,
+        parallel=parallel,
+        random_seed=random_seed,
+        all_solutions=all_solutions,
+    )
+    return _run_solve(
         model,
         solver=solver,
-        timeout_ms=timeout_ms,
-        extra_args=_solve_extra_args(
-            solver=solver,
-            free_search=free_search,
-            parallel=parallel,
-            random_seed=random_seed,
-            all_solutions=all_solutions,
-            num_solutions=num_solutions,
-        ),
         data=data,
         checker=checker,
+        timeout_ms=timeout_ms,
+        extra_args=extra_args,
     )
-    result = _build_solve_result(outcome, solver=solver)
-    if checker is not None:
-        result.checker = _build_checker_report(outcome, result)
-    return result
 
 
 def solve_model_cancellable(
@@ -1036,15 +1151,25 @@ def save_verified_model(
     """
     _validate_model_and_timeout(model, timeout_ms)
     # Validates the solve controls (parallel/num_solutions ranges and the
-    # solver-gated -n) with the exact solve_model rules; the result is rebuilt
-    # by the solve itself, so it is discarded here.
-    _solve_extra_args(
+    # solver-gated -n) with the exact solve_model rules and keeps the built args so
+    # the internal solve does not rebuild them.
+    extra_args = _solve_extra_args(
         solver=solver,
         free_search=free_search,
         parallel=parallel,
         random_seed=random_seed,
         all_solutions=all_solutions,
         num_solutions=num_solutions,
+    )
+    # Reject an unsupported -a/-f/-p/-r control before check, solve, or write
+    # (one --solvers-json at most for the whole save — D1); the internal solve uses
+    # _run_solve, which does not re-enforce.
+    _enforce_solver_capabilities(
+        solver=solver,
+        free_search=free_search,
+        parallel=parallel,
+        random_seed=random_seed,
+        all_solutions=all_solutions,
     )
     target = validate_save_target(target_dir, overwrite=overwrite)
 
@@ -1053,24 +1178,19 @@ def save_verified_model(
         return SaveVerifiedModelResult(
             status="not_verified",
             message=(
-                f"Model failed the compile check (status: {check.status}); "
-                "nothing was written."
+                f"Model failed the compile check (status: {check.status}); nothing was written."
             ),
             target_dir=str(target),
             check=check,
         )
 
-    solve = solve_model(
+    solve = _run_solve(
         model,
         solver=solver,
         data=data,
         checker=checker,
         timeout_ms=timeout_ms,
-        free_search=free_search,
-        parallel=parallel,
-        random_seed=random_seed,
-        all_solutions=all_solutions,
-        num_solutions=num_solutions,
+        extra_args=extra_args,
     )
     failure = _verification_failure(solve, checker_supplied=checker is not None)
     if failure is not None:
@@ -1249,6 +1369,15 @@ def solve_model_path(
         random_seed=random_seed,
         all_solutions=all_solutions,
         num_solutions=num_solutions,
+    )
+    # Reject an unsupported -a/-f/-p/-r control before the solve, same lazy
+    # one-shot resolution as the inline path (D2/D4).
+    _enforce_solver_capabilities(
+        solver=solver,
+        free_search=free_search,
+        parallel=parallel,
+        random_seed=random_seed,
+        all_solutions=all_solutions,
     )
     if checker_path is not None:
         extra_args = (*extra_args, "--solution-checker", str(checker_path))

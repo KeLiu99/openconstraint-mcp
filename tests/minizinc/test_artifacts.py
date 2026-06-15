@@ -235,9 +235,7 @@ def test_write_verified_model_dir_manifest_records_provenance(tmp_path: Path) ->
     }
     # The manifest lists every file except itself; the result list appends the
     # manifest as its final entry (hashed after write — it cannot self-hash).
-    assert manifest["artifacts"] == [
-        artifact.model_dump(mode="json") for artifact in files[:-1]
-    ]
+    assert manifest["artifacts"] == [artifact.model_dump(mode="json") for artifact in files[:-1]]
     assert files[-1].role == "manifest"
 
 

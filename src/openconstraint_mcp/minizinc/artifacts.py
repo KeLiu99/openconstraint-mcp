@@ -163,9 +163,7 @@ def _write_staged_artifacts(
     for role, filename, text in texts:
         file_path = staging / filename
         file_path.write_text(text, encoding="utf-8")
-        artifacts.append(
-            SavedModelArtifact(role=role, path=filename, sha256=_sha256_of(file_path))
-        )
+        artifacts.append(SavedModelArtifact(role=role, path=filename, sha256=_sha256_of(file_path)))
 
     manifest = {
         "managed_by": _MANIFEST_MANAGED_BY,

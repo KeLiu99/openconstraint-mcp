@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import functools
 import inspect
+import os
 import sys
 from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import AbstractAsyncContextManager, asynccontextmanager
@@ -32,23 +33,28 @@ from .minizinc.core import (
     solve_model_path,
 )
 from .minizinc.core import find_unsat_core as _find_unsat_core
+from .portfolio_jobs import PortfolioJobRegistry
 from .protocol_text.descriptions import (
+    CANCEL_PORTFOLIO_JOB_DESCRIPTION,
     CANCEL_SOLVE_JOB_DESCRIPTION,
     CHECK_MINIZINC_FILES_DESCRIPTION,
     CHECK_MINIZINC_MODEL_DESCRIPTION,
     CHECK_RUNTIME_DESCRIPTION,
     FIND_UNSAT_CORE_DESCRIPTION,
     FIND_UNSAT_CORE_FILES_DESCRIPTION,
+    GET_PORTFOLIO_JOB_DESCRIPTION,
     GET_SOLVE_JOB_DESCRIPTION,
     INSPECT_MINIZINC_FILES_DESCRIPTION,
     INSPECT_MINIZINC_MODEL_DESCRIPTION,
     LIST_AVAILABLE_SOLVERS_DESCRIPTION,
+    LIST_PORTFOLIO_JOBS_DESCRIPTION,
     LIST_SOLVE_JOBS_DESCRIPTION,
     MCP_SERVER_INSTRUCTIONS,
     SAVE_VERIFIED_MINIZINC_MODEL_DESCRIPTION,
     SOLVE_CONSTRAINT_PROBLEM_PROMPT_DESCRIPTION,
     SOLVE_MINIZINC_FILES_DESCRIPTION,
     SOLVE_MINIZINC_MODEL_DESCRIPTION,
+    SUBMIT_PORTFOLIO_JOB_DESCRIPTION,
     SUBMIT_SOLVE_JOB_DESCRIPTION,
 )
 from .protocol_text.prompts import SOLVE_CONSTRAINT_PROBLEM_PROMPT
@@ -64,6 +70,7 @@ from .runtime import RuntimeMissingError, get_runtime_status
 from .schemas import (
     CheckResult,
     ModelInspectionResult,
+    PortfolioJobStatus,
     RuntimeStatus,
     SaveVerifiedModelResult,
     SolveJobStatus,
@@ -354,6 +361,10 @@ async def _status_finished(ctx: Context | None, stages: tuple[str, str, str, str
     await _report_status(ctx, 4, stages[3])
 
 
+# fn is zero-arg, so run_sync's variadic *args (a TypeVarTuple) binds to the empty
+# tuple; PyCharm mis-models that and reports a false "Parameter 'args' unfilled,
+# expected '*tuple[]'". mypy passes — suppress both inspections that emit it.
+# noinspection PyArgumentList,PyTypeChecker
 async def _run_blocking[T](fn: Callable[[], T]) -> T:
     """Run a blocking MiniZinc core call in a worker thread.
 
@@ -437,9 +448,11 @@ def _make_lifespan(
     """Build the server lifespan bound to ``registry``.
 
     Startup emits the boot diagnostic; teardown (after ``yield``) calls
-    ``registry.shutdown()`` so any still-running solve children are terminated
-    and the worker pool joined before the process exits. The registry is created
-    in ``create_mcp_server`` and captured by the job-tool closures, so the
+    ``registry.shutdown()`` so any still-running solve children are terminated and
+    the worker pool joined before the process exits. This also covers a background
+    portfolio's attempts — they are ordinary jobs in this same registry, and the
+    ``PortfolioJobRegistry`` owns no threads or processes of its own. The registry is
+    created in ``create_mcp_server`` and captured by the job-tool closures, so the
     lifespan must close over that same instance — hence a factory rather than a
     module-level function.
     """
@@ -455,12 +468,46 @@ def _make_lifespan(
     return _lifespan
 
 
+def _env_int(name: str, default: int, *, minimum: int) -> int:
+    """Read an integer registry bound from ``os.environ[name]`` and enforce ``minimum``.
+
+    Returns ``default`` when the variable is unset. Otherwise parses the value and
+    requires an integer ``>= minimum``, raising a ``ValueError`` that NAMES the
+    offending variable — for both a non-integer and an out-of-range value — so a
+    malformed bound fails fast at boot instead of silently falling back to the
+    default or reaching ``JobRegistry``'s parameter-named constructor check (which
+    says ``max_running_jobs must be >= 1``, not which env var was wrong). The
+    constructor's own guards stay as a backstop.
+    """
+    raw = os.environ.get(name)
+    if raw is None:
+        return default
+    try:
+        value = int(raw)
+    except ValueError:
+        raise ValueError(f"{name} must be an integer (got {raw!r})") from None
+    if value < minimum:
+        raise ValueError(f"{name} must be >= {minimum} (got {value})")
+    return value
+
+
 def create_mcp_server() -> FastMCP:
     """Build a fresh FastMCP server and register all tools and prompts."""
     # The single server-owned job registry (D1.1): one instance per server,
     # captured by the job-tool closures and torn down by the lifespan. This is
-    # the deliberate, bounded exception to "no global mutable state".
-    registry = JobRegistry()
+    # the deliberate, bounded exception to "no global mutable state". The three
+    # bounds default to today's values and are overridable via env vars (a
+    # malformed value fails fast at boot, naming the variable).
+    registry = JobRegistry(
+        max_running_jobs=_env_int("OPENCONSTRAINT_MCP_MAX_RUNNING_JOBS", 4, minimum=1),
+        max_queued_jobs=_env_int("OPENCONSTRAINT_MCP_MAX_QUEUED_JOBS", 16, minimum=0),
+        max_retained_terminal=_env_int("OPENCONSTRAINT_MCP_MAX_RETAINED_TERMINAL", 64, minimum=1),
+    )
+    # The server-owned background-portfolio registry: it drives the SAME `registry`
+    # for attempts and selects a winner lazily on each poll, so it owns no worker
+    # pool and cannot starve the attempt pool. Retention of finished portfolio
+    # records is bounded; the dominant capacity bound is the solve registry's.
+    portfolios = PortfolioJobRegistry(registry)
     mcp: FastMCP[Any] = FastMCP(
         "openconstraint-mcp",
         instructions=MCP_SERVER_INSTRUCTIONS,
@@ -541,9 +588,7 @@ def create_mcp_server() -> FastMCP:
     ) -> ModelInspectionResult:
         await _status_starting(ctx, _INSPECT_STAGES)
         result = await _run_blocking(
-            functools.partial(
-                inspect_model, model, solver=solver, data=data, timeout_ms=timeout_ms
-            )
+            functools.partial(inspect_model, model, solver=solver, data=data, timeout_ms=timeout_ms)
         )
         await _status_finished(ctx, _INSPECT_STAGES)
         return result
@@ -704,10 +749,12 @@ def create_mcp_server() -> FastMCP:
 
     @mcp.tool(description=SUBMIT_SOLVE_JOB_DESCRIPTION)
     # Validation raises ValueError; a full bounded queue raises JobRejectedError
-    # (a direct RuntimeError subclass, NOT in the default caught set) — both must
-    # surface as actionable MCP errors. The runtime is touched only in the worker,
-    # so RuntimeMissingError/MiniZincExecutionError cannot reach this submit path.
-    @_as_mcp_error(ValueError, JobRejectedError)
+    # (a direct RuntimeError subclass, NOT in the default caught set). A gated
+    # control (free_search/parallel/random_seed/all_solutions) makes admission
+    # resolve solver capabilities via list_solvers(), so the runtime/binary triad
+    # can fire here too — exactly as for submit_portfolio_job. All must surface as
+    # actionable MCP errors.
+    @_as_mcp_error(RuntimeMissingError, MiniZincExecutionError, ValueError, JobRejectedError)
     def submit_solve_job(
         model: str,
         data: str | None = None,
@@ -751,6 +798,58 @@ def create_mcp_server() -> FastMCP:
     # reachable — nothing to translate.
     def list_solve_jobs() -> list[SolveJobStatus]:
         return registry.list()
+
+    @mcp.tool(description=SUBMIT_PORTFOLIO_JOB_DESCRIPTION)
+    # Admission runs plan validation, the capability gate, and an atomic batch
+    # admission synchronously — so it can raise the runtime/binary triad (resolving
+    # a gated control), a plan ValueError, or JobRejectedError when the batch exceeds
+    # the bounded queue. All must surface as actionable MCP errors.
+    @_as_mcp_error(RuntimeMissingError, MiniZincExecutionError, ValueError, JobRejectedError)
+    def submit_portfolio_job(
+        models: list[str],
+        solvers: list[str],
+        data: str | None = None,
+        checker: str | None = None,
+        seed_count: int = 1,
+        seeds: list[int] | None = None,
+        per_attempt_timeout_ms: int = DEFAULT_SOLVE_TIMEOUT_MS,
+        free_search: bool = False,
+        parallel: int | None = None,
+        all_solutions: bool = False,
+        num_solutions: int | None = None,
+    ) -> PortfolioJobStatus:
+        job_id = portfolios.submit(
+            models=models,
+            solvers=solvers,
+            data=data,
+            checker=checker,
+            seed_count=seed_count,
+            seeds=seeds,
+            per_attempt_timeout_ms=per_attempt_timeout_ms,
+            free_search=free_search,
+            parallel=parallel,
+            all_solutions=all_solutions,
+            num_solutions=num_solutions,
+        )
+        return portfolios.get(job_id)
+
+    @mcp.tool(description=GET_PORTFOLIO_JOB_DESCRIPTION)
+    # An unknown job_id is the only domain error (ValueError); the registry reads
+    # touch no runtime, so the narrower caught set is honest.
+    @_as_mcp_error(ValueError)
+    def get_portfolio_job(job_id: str) -> PortfolioJobStatus:
+        return portfolios.get(job_id)
+
+    @mcp.tool(description=CANCEL_PORTFOLIO_JOB_DESCRIPTION)
+    @_as_mcp_error(ValueError)
+    def cancel_portfolio_job(job_id: str) -> PortfolioJobStatus:
+        return portfolios.cancel(job_id)
+
+    @mcp.tool(description=LIST_PORTFOLIO_JOBS_DESCRIPTION)
+    # Takes no arguments and only reads the registry, so no domain exception is
+    # reachable — nothing to translate.
+    def list_portfolio_jobs() -> list[PortfolioJobStatus]:
+        return portfolios.list()
 
     @mcp.prompt(
         name="solve_constraint_problem",

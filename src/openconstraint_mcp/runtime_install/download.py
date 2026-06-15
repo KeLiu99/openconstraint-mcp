@@ -37,8 +37,7 @@ class BundleSpec:
 
 def _release_url(filename: str) -> str:
     return (
-        f"https://github.com/MiniZinc/MiniZincIDE/releases/download/{MINIZINC_VERSION}/"
-        f"{filename}"
+        f"https://github.com/MiniZinc/MiniZincIDE/releases/download/{MINIZINC_VERSION}/{filename}"
     )
 
 

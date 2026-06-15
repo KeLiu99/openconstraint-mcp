@@ -577,9 +577,7 @@ def test_vendor_missing_dev_tools_reports_xcode_clt(
     assert "xcode-select" in str(exc_info.value)
 
 
-def test_vendor_missing_framework_raises(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_vendor_missing_framework_raises(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     app_dir = tmp_path / "MiniZincIDE.app"
     _build_app_with_frameworks(app_dir, ["QtCore"])  # QtGui is absent from the bundle
     dest = tmp_path / "runtime"

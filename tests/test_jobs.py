@@ -6,8 +6,47 @@ from typing import Any
 
 import pytest
 
-from openconstraint_mcp.jobs import JobRegistry, JobRejectedError
-from openconstraint_mcp.schemas import SolveResult
+from openconstraint_mcp.jobs import JobRegistry, JobRejectedError, SolveRequest
+from openconstraint_mcp.schemas import (
+    SolverCapabilities,
+    SolveResult,
+    SolverInfo,
+    SolverList,
+)
+
+
+def _request(model: str = "solve satisfy;", **overrides: Any) -> SolveRequest:
+    fields: dict[str, Any] = {
+        "model": model,
+        "solver": "cp-sat",
+        "data": None,
+        "checker": None,
+        "timeout_ms": 30000,
+        "free_search": False,
+        "parallel": None,
+        "random_seed": None,
+        "all_solutions": False,
+        "num_solutions": None,
+    }
+    fields.update(overrides)
+    return SolveRequest(**fields)
+
+
+def _patch_list_solvers(monkeypatch: pytest.MonkeyPatch, caps: SolverCapabilities) -> list[int]:
+    """Point the admission resolver's ``list_solvers`` at one ``cp-sat`` entry.
+
+    Returns a single-element counter of resolver invocations so a test can assert
+    a gated-control job resolves capabilities exactly once (at admission, not the
+    worker — the worker's ``solve_model_cancellable`` is mocked away here anyway).
+    """
+    calls = [0]
+
+    def _fake_list_solvers() -> SolverList:
+        calls[0] += 1
+        return SolverList(solvers=[SolverInfo(id="cp-sat", name="cp-sat", capabilities=caps)])
+
+    monkeypatch.setattr("openconstraint_mcp.minizinc.core.list_solvers", _fake_list_solvers)
+    return calls
 
 
 def _solve_result(status: str = "satisfied") -> SolveResult:
@@ -183,6 +222,101 @@ def test_cancel_running_job_reaches_cancelled_and_terminates_handle(
         assert registry.get(job_id).result is None
     finally:
         release.set()
+        registry.shutdown()
+
+
+def test_submit_resolves_capabilities_once_at_admission(monkeypatch: pytest.MonkeyPatch) -> None:
+    # A gated-control job resolves the capability map exactly once, at admission;
+    # the worker trusts that and never re-resolves (D1/D2).
+    resolve_calls = _patch_list_solvers(monkeypatch, SolverCapabilities(supports_free_search=True))
+    _patch_solve(monkeypatch, lambda model, *, on_start, **kw: _solve_result())
+    registry = JobRegistry()
+    try:
+        job_id = registry.submit(model="solve satisfy;", free_search=True)
+        assert _wait_until_terminal(registry, job_id) == "succeeded"
+        assert resolve_calls[0] == 1
+    finally:
+        registry.shutdown()
+
+
+def test_submit_rejects_unsupported_control_before_creating_job(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # An unsupported control is rejected at admission before any job record exists
+    # and before a worker/solve is created.
+    _patch_list_solvers(monkeypatch, SolverCapabilities())
+
+    def _fail_solve(model: str, *, on_start: Any, **kw: Any) -> SolveResult:
+        raise AssertionError("worker solve must not run for a rejected control")
+
+    _patch_solve(monkeypatch, _fail_solve)
+    registry = JobRegistry()
+    try:
+        with pytest.raises(ValueError, match="free_search"):
+            registry.submit(model="solve satisfy;", free_search=True)
+        assert registry.list() == []
+    finally:
+        registry.shutdown()
+
+
+def test_submit_many_admits_whole_batch_in_order(monkeypatch: pytest.MonkeyPatch) -> None:
+    _patch_solve(monkeypatch, lambda model, *, on_start, **kw: _solve_result())
+    registry = JobRegistry(max_running_jobs=4)
+    try:
+        job_ids = registry.submit_many(
+            [_request(solver="cp-sat"), _request(solver="org.gecode.gecode")]
+        )
+        assert len(job_ids) == 2
+        assert len(set(job_ids)) == 2
+        for job_id in job_ids:
+            assert _wait_until_terminal(registry, job_id) == "succeeded"
+    finally:
+        registry.shutdown()
+
+
+def test_submit_many_rejects_whole_batch_when_over_capacity(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Atomic admission (D8): a batch that would exceed running+queued capacity
+    # admits NONE — no record is created and in_flight is unchanged.
+    release = threading.Event()
+    started = threading.Event()
+
+    def _blocking_solve(model: str, *, on_start: Any, **kw: Any) -> SolveResult:
+        on_start(_FakeProc())
+        started.set()
+        release.wait(timeout=5)
+        return _solve_result()
+
+    _patch_solve(monkeypatch, _blocking_solve)
+    registry = JobRegistry(max_running_jobs=1, max_queued_jobs=1)  # capacity 2
+    try:
+        registry.submit(model="solve satisfy;")  # occupies the running slot
+        assert started.wait(timeout=3)
+        with pytest.raises(JobRejectedError):
+            registry.submit_many([_request(), _request()])  # 1 + 2 > 2 → reject all
+        # Nothing from the rejected batch was admitted: only the one running job.
+        assert len(registry.list()) == 1
+    finally:
+        release.set()
+        registry.shutdown()
+
+
+def test_submit_many_validates_every_request_before_admitting(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # A bad request anywhere in the batch fails the whole call before any job is
+    # created (validation precedes the admission lock).
+    def _fail_solve(model: str, *, on_start: Any, **kw: Any) -> SolveResult:
+        raise AssertionError("no worker should run when a batch request is invalid")
+
+    _patch_solve(monkeypatch, _fail_solve)
+    registry = JobRegistry()
+    try:
+        with pytest.raises(ValueError, match="parallel"):
+            registry.submit_many([_request(), _request(parallel=0)])
+        assert registry.list() == []
+    finally:
         registry.shutdown()
 
 
