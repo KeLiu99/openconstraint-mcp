@@ -14,6 +14,36 @@ from anyio import to_thread
 from mcp.server.fastmcp import Context, FastMCP
 from mcp.types import CallToolResult, TextContent
 
+from .cpsat.core import solve_model as _solve_ortools_model
+from .cpsat.domains.allocation import (
+    SolveBudgetAllocationRequest,
+    SolveBudgetAllocationResponse,
+)
+from .cpsat.domains.allocation import (
+    solve_budget_allocation as _solve_budget_allocation,
+)
+from .cpsat.domains.assignment import (
+    SolveAssignmentProblemRequest,
+    SolveAssignmentProblemResponse,
+)
+from .cpsat.domains.assignment import (
+    solve_assignment_problem as _solve_assignment_problem,
+)
+from .cpsat.domains.routing import (
+    SolveRoutingProblemRequest,
+    SolveRoutingProblemResponse,
+)
+from .cpsat.domains.routing import (
+    solve_routing_problem as _solve_routing_problem,
+)
+from .cpsat.domains.scheduling import (
+    SolveSchedulingProblemRequest,
+    SolveSchedulingProblemResponse,
+)
+from .cpsat.domains.scheduling import (
+    solve_scheduling_problem as _solve_scheduling_problem,
+)
+from .cpsat.schemas import ORToolsSolveRequest, ORToolsSolveResult
 from .jobs import JobRegistry, JobRejectedError
 from .minizinc.core import (
     DEFAULT_CHECK_TIMEOUT_MS,
@@ -34,6 +64,7 @@ from .minizinc.core import (
 )
 from .minizinc.core import find_unsat_core as _find_unsat_core
 from .portfolio_jobs import PortfolioJobRegistry
+from .protocol_text import status
 from .protocol_text.descriptions import (
     CANCEL_PORTFOLIO_JOB_DESCRIPTION,
     CANCEL_SOLVE_JOB_DESCRIPTION,
@@ -51,9 +82,14 @@ from .protocol_text.descriptions import (
     LIST_SOLVE_JOBS_DESCRIPTION,
     MCP_SERVER_INSTRUCTIONS,
     SAVE_VERIFIED_MINIZINC_MODEL_DESCRIPTION,
+    SOLVE_ASSIGNMENT_PROBLEM_DESCRIPTION,
+    SOLVE_BUDGET_ALLOCATION_DESCRIPTION,
     SOLVE_CONSTRAINT_PROBLEM_PROMPT_DESCRIPTION,
     SOLVE_MINIZINC_FILES_DESCRIPTION,
     SOLVE_MINIZINC_MODEL_DESCRIPTION,
+    SOLVE_ORTOOLS_MODEL_DESCRIPTION,
+    SOLVE_ROUTING_PROBLEM_DESCRIPTION,
+    SOLVE_SCHEDULING_PROBLEM_DESCRIPTION,
     SUBMIT_PORTFOLIO_JOB_DESCRIPTION,
     SUBMIT_SOLVE_JOB_DESCRIPTION,
 )
@@ -126,13 +162,13 @@ def _log_boot_diagnostic() -> None:
     so any stray write there corrupts the protocol. This only *reads* the
     already-resolved runtime status — it never downloads or installs anything.
     """
-    status = get_runtime_status()
+    runtime_status = get_runtime_status()
     lines = [
         f"{_PACKAGE_NAME} {_server_version()}",
-        f"runtime dir: {status.runtime_dir}",
+        f"runtime dir: {runtime_status.runtime_dir}",
     ]
-    if status.installed:
-        lines.append(f"runtime: installed ({status.minizinc_binary})")
+    if runtime_status.installed:
+        lines.append(f"runtime: installed ({runtime_status.minizinc_binary})")
     else:
         lines.append(f"runtime: NOT installed → run `{_PACKAGE_NAME} install-runtime`")
     print("\n".join(lines), file=sys.stderr, flush=True)
@@ -294,62 +330,14 @@ async def _report_status(
             raise
 
 
-# One four-stage milestone schedule per tool family, shared by the string- and
-# path-based variants so the two cannot drift.
-_CHECK_STAGES = (
-    "Validating check request",
-    "MiniZinc compile check is running",
-    "MiniZinc finished; parsing check result",
-    "Check complete",
-)
-_INSPECT_STAGES = (
-    "Validating inspect request",
-    "MiniZinc model interface analysis is running",
-    "MiniZinc finished; parsing model interface",
-    "Inspection complete",
-)
-_UNSAT_CORE_STAGES = (
-    "Validating unsat-core request",
-    "findMUS is running",
-    "findMUS finished; parsing core",
-    "Unsat-core analysis complete",
-)
-# The save family re-verifies (check, then solve) and commits inside one
-# blocking call, so stage 2 spans the whole pipeline and stages 3-4 are honest
-# for both outcomes — a committed save and a not_verified refusal.
-_SAVE_STAGES = (
-    "Validating save request",
-    "MiniZinc verification (check, then solve) and save are running",
-    "MiniZinc finished; save decision made",
-    "Save request complete",
-)
-
-
-def _solve_stages(with_checker: bool) -> tuple[str, str, str, str]:
-    """Return the solve-family milestone messages, checker-aware at stages 2-3."""
-    if with_checker:
-        return (
-            "Validating solve request",
-            "MiniZinc solve with solution checker is running",
-            "MiniZinc finished; parsing solve and checker streams",
-            "Solve complete",
-        )
-    return (
-        "Validating solve request",
-        "MiniZinc solve is running",
-        "MiniZinc finished; parsing solve stream",
-        "Solve complete",
-    )
-
-
 async def _status_starting(ctx: Context | None, stages: tuple[str, str, str, str]) -> None:
-    """Emit stages 1-2 immediately before the blocking MiniZinc call."""
+    """Emit stages 1-2 immediately before the blocking solver/core call."""
     await _report_status(ctx, 1, stages[0])
     await _report_status(ctx, 2, stages[1])
 
 
 async def _status_finished(ctx: Context | None, stages: tuple[str, str, str, str]) -> None:
-    """Emit stages 3-4 once the blocking MiniZinc call has returned.
+    """Emit stages 3-4 once the blocking solver/core call has returned.
 
     Runs for every structured result — including ``status="error"`` /
     ``"timeout"`` / ``"unsatisfiable"`` — so clients always see a final
@@ -366,15 +354,16 @@ async def _status_finished(ctx: Context | None, stages: tuple[str, str, str, str
 # expected '*tuple[]'". mypy passes — suppress both inspections that emit it.
 # noinspection PyArgumentList,PyTypeChecker
 async def _run_blocking[T](fn: Callable[[], T]) -> T:
-    """Run a blocking MiniZinc core call in a worker thread.
+    """Run a blocking solver/core call in a worker thread.
 
     A core call executed inline freezes the event loop for the whole solve,
     which deterministically strands the last queued status notification (the
     stdio writer task holds it but never gets scheduled) until the solve
     finishes — defeating mid-solve feedback for exactly the clients it exists
     for. Off-loop execution also keeps the server responsive to pings and
-    concurrent requests during long solves. Core functions are stateless
-    subprocess wrappers, so thread safety is not a concern.
+    concurrent requests during long solves. Core functions share no mutable
+    state across calls — the MiniZinc path shells out, the CP-SAT path builds
+    a fresh model/solver per call — so thread safety is not a concern.
     """
     return await to_thread.run_sync(fn)
 
@@ -541,7 +530,7 @@ def create_mcp_server() -> FastMCP:
         num_solutions: int | None = None,
         ctx: Context | None = None,
     ) -> Annotated[CallToolResult, SolveResult]:
-        stages = _solve_stages(checker is not None)
+        stages = status.solve_stages(checker is not None)
         await _status_starting(ctx, stages)
         result = await _run_blocking(
             functools.partial(
@@ -570,11 +559,11 @@ def create_mcp_server() -> FastMCP:
         timeout_ms: int = DEFAULT_CHECK_TIMEOUT_MS,
         ctx: Context | None = None,
     ) -> CheckResult:
-        await _status_starting(ctx, _CHECK_STAGES)
+        await _status_starting(ctx, status.CHECK_STAGES)
         result = await _run_blocking(
             functools.partial(check_model, model, solver=solver, data=data, timeout_ms=timeout_ms)
         )
-        await _status_finished(ctx, _CHECK_STAGES)
+        await _status_finished(ctx, status.CHECK_STAGES)
         return result
 
     @mcp.tool(description=INSPECT_MINIZINC_MODEL_DESCRIPTION)
@@ -586,11 +575,11 @@ def create_mcp_server() -> FastMCP:
         timeout_ms: int = DEFAULT_INSPECT_TIMEOUT_MS,
         ctx: Context | None = None,
     ) -> ModelInspectionResult:
-        await _status_starting(ctx, _INSPECT_STAGES)
+        await _status_starting(ctx, status.INSPECT_STAGES)
         result = await _run_blocking(
             functools.partial(inspect_model, model, solver=solver, data=data, timeout_ms=timeout_ms)
         )
-        await _status_finished(ctx, _INSPECT_STAGES)
+        await _status_finished(ctx, status.INSPECT_STAGES)
         return result
 
     @mcp.tool(description=FIND_UNSAT_CORE_DESCRIPTION)
@@ -601,11 +590,11 @@ def create_mcp_server() -> FastMCP:
         timeout_ms: int = DEFAULT_UNSAT_CORE_TIMEOUT_MS,
         ctx: Context | None = None,
     ) -> UnsatCoreResult:
-        await _status_starting(ctx, _UNSAT_CORE_STAGES)
+        await _status_starting(ctx, status.UNSAT_CORE_STAGES)
         result = await _run_blocking(
             functools.partial(_find_unsat_core, model, data=data, timeout_ms=timeout_ms)
         )
-        await _status_finished(ctx, _UNSAT_CORE_STAGES)
+        await _status_finished(ctx, status.UNSAT_CORE_STAGES)
         return result
 
     @mcp.tool(description=SAVE_VERIFIED_MINIZINC_MODEL_DESCRIPTION)
@@ -626,7 +615,7 @@ def create_mcp_server() -> FastMCP:
         overwrite: bool = False,
         ctx: Context | None = None,
     ) -> Annotated[CallToolResult, SaveVerifiedModelResult]:
-        await _status_starting(ctx, _SAVE_STAGES)
+        await _status_starting(ctx, status.SAVE_STAGES)
         result = await _run_blocking(
             functools.partial(
                 save_verified_model,
@@ -645,7 +634,7 @@ def create_mcp_server() -> FastMCP:
                 overwrite=overwrite,
             )
         )
-        await _status_finished(ctx, _SAVE_STAGES)
+        await _status_finished(ctx, status.SAVE_STAGES)
         return _wrap_save_result(result)
 
     @mcp.tool(description=CHECK_MINIZINC_FILES_DESCRIPTION)
@@ -657,7 +646,7 @@ def create_mcp_server() -> FastMCP:
         timeout_ms: int = DEFAULT_CHECK_TIMEOUT_MS,
         ctx: Context | None = None,
     ) -> CheckResult:
-        await _status_starting(ctx, _CHECK_STAGES)
+        await _status_starting(ctx, status.CHECK_STAGES)
         result = await _run_blocking(
             functools.partial(
                 check_model_path,
@@ -667,7 +656,7 @@ def create_mcp_server() -> FastMCP:
                 timeout_ms=timeout_ms,
             )
         )
-        await _status_finished(ctx, _CHECK_STAGES)
+        await _status_finished(ctx, status.CHECK_STAGES)
         return result
 
     @mcp.tool(description=INSPECT_MINIZINC_FILES_DESCRIPTION)
@@ -679,7 +668,7 @@ def create_mcp_server() -> FastMCP:
         timeout_ms: int = DEFAULT_INSPECT_TIMEOUT_MS,
         ctx: Context | None = None,
     ) -> ModelInspectionResult:
-        await _status_starting(ctx, _INSPECT_STAGES)
+        await _status_starting(ctx, status.INSPECT_STAGES)
         result = await _run_blocking(
             functools.partial(
                 inspect_model_path,
@@ -689,7 +678,7 @@ def create_mcp_server() -> FastMCP:
                 timeout_ms=timeout_ms,
             )
         )
-        await _status_finished(ctx, _INSPECT_STAGES)
+        await _status_finished(ctx, status.INSPECT_STAGES)
         return result
 
     @mcp.tool(description=SOLVE_MINIZINC_FILES_DESCRIPTION)
@@ -707,7 +696,7 @@ def create_mcp_server() -> FastMCP:
         num_solutions: int | None = None,
         ctx: Context | None = None,
     ) -> Annotated[CallToolResult, SolveResult]:
-        stages = _solve_stages(checker_path is not None)
+        stages = status.solve_stages(checker_path is not None)
         await _status_starting(ctx, stages)
         result = await _run_blocking(
             functools.partial(
@@ -735,7 +724,7 @@ def create_mcp_server() -> FastMCP:
         timeout_ms: int = DEFAULT_UNSAT_CORE_TIMEOUT_MS,
         ctx: Context | None = None,
     ) -> UnsatCoreResult:
-        await _status_starting(ctx, _UNSAT_CORE_STAGES)
+        await _status_starting(ctx, status.UNSAT_CORE_STAGES)
         result = await _run_blocking(
             functools.partial(
                 find_unsat_core_path,
@@ -744,7 +733,62 @@ def create_mcp_server() -> FastMCP:
                 timeout_ms=timeout_ms,
             )
         )
-        await _status_finished(ctx, _UNSAT_CORE_STAGES)
+        await _status_finished(ctx, status.UNSAT_CORE_STAGES)
+        return result
+
+    @mcp.tool(description=SOLVE_ORTOOLS_MODEL_DESCRIPTION)
+    @_as_mcp_error(ValueError)
+    async def solve_ortools_model(
+        model: ORToolsSolveRequest,
+        ctx: Context | None = None,
+    ) -> ORToolsSolveResult:
+        await _status_starting(ctx, status.ORTOOLS_SOLVE_STAGES)
+        result = await _run_blocking(functools.partial(_solve_ortools_model, model))
+        await _status_finished(ctx, status.ORTOOLS_SOLVE_STAGES)
+        return result
+
+    @mcp.tool(description=SOLVE_BUDGET_ALLOCATION_DESCRIPTION)
+    @_as_mcp_error(ValueError)
+    async def solve_budget_allocation(
+        request: SolveBudgetAllocationRequest,
+        ctx: Context | None = None,
+    ) -> SolveBudgetAllocationResponse:
+        await _status_starting(ctx, status.BUDGET_ALLOCATION_STAGES)
+        result = await _run_blocking(functools.partial(_solve_budget_allocation, request))
+        await _status_finished(ctx, status.BUDGET_ALLOCATION_STAGES)
+        return result
+
+    @mcp.tool(description=SOLVE_ASSIGNMENT_PROBLEM_DESCRIPTION)
+    @_as_mcp_error(ValueError)
+    async def solve_assignment_problem(
+        request: SolveAssignmentProblemRequest,
+        ctx: Context | None = None,
+    ) -> SolveAssignmentProblemResponse:
+        await _status_starting(ctx, status.ASSIGNMENT_STAGES)
+        result = await _run_blocking(functools.partial(_solve_assignment_problem, request))
+        await _status_finished(ctx, status.ASSIGNMENT_STAGES)
+        return result
+
+    @mcp.tool(description=SOLVE_SCHEDULING_PROBLEM_DESCRIPTION)
+    @_as_mcp_error(ValueError)
+    async def solve_scheduling_problem(
+        request: SolveSchedulingProblemRequest,
+        ctx: Context | None = None,
+    ) -> SolveSchedulingProblemResponse:
+        await _status_starting(ctx, status.SCHEDULING_STAGES)
+        result = await _run_blocking(functools.partial(_solve_scheduling_problem, request))
+        await _status_finished(ctx, status.SCHEDULING_STAGES)
+        return result
+
+    @mcp.tool(description=SOLVE_ROUTING_PROBLEM_DESCRIPTION)
+    @_as_mcp_error(ValueError)
+    async def solve_routing_problem(
+        request: SolveRoutingProblemRequest,
+        ctx: Context | None = None,
+    ) -> SolveRoutingProblemResponse:
+        await _status_starting(ctx, status.ROUTING_STAGES)
+        result = await _run_blocking(functools.partial(_solve_routing_problem, request))
+        await _status_finished(ctx, status.ROUTING_STAGES)
         return result
 
     @mcp.tool(description=SUBMIT_SOLVE_JOB_DESCRIPTION)

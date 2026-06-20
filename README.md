@@ -5,8 +5,9 @@
 A local-first [Model Context Protocol](https://modelcontextprotocol.io) server for
 constraint programming and optimization. `openconstraint-mcp` gives an MCP client a
 deterministic way to compile-check and solve [MiniZinc](https://www.minizinc.org/)
-models on a **managed** solver runtime — controlled by this project, not your system
-install — exposing open-source solvers (OR-Tools CP-SAT by default,
+models on a **managed** solver runtime, **plus** structured zero-install solving
+via Google OR-Tools CP-SAT running entirely in-process — controlled by this project,
+not your system install — exposing open-source solvers (OR-Tools CP-SAT by default,
 Chuffed as an optional verifier) over MCP stdio.
 
 Constraint problems — scheduling, rostering, assignment, routing, production
@@ -137,8 +138,9 @@ The package exposes five commands:
 ## MCP tools
 
 The stdio server exposes two runtime-introspection tools, a model-check tool, a
-model-inspection tool, an execution tool, and an unsat-core diagnostic tool —
-each of the latter four in an **inline-source** form (below) and a **path-based
+model-inspection tool, an execution tool, an unsat-core diagnostic tool, five
+**native OR-Tools CP-SAT** tools (below), and background/portfolio job tools —
+each of the MiniZinc tools in an **inline-source** form (below) and a **path-based
 file** sibling ([Path-based file tools](#path-based-file-tools)) — plus a
 verified-save tool that persists a successful inline workflow to a local
 project directory. The two solve
@@ -811,6 +813,62 @@ entry-file filter matches on **basename**, so an included file that shares the
 entry model's basename in a different directory could have its spans
 mis-attributed to the entry model — a documented limitation of the best-effort
 core (raw `stdout` stays authoritative).
+
+[License](#license) · 
+
+The server exposes **five** native OR-Tools CP-SAT tools that require **no** managed-runtime
+download — they solve in-process via the bundled `ortools` Python package:
+
+| Tool | Purpose |
+| --- | --- |
+| `solve_ortools_model` | General structured constraint / optimization model with 9 constraint kinds |
+| `solve_budget_allocation` | Knapsack / budget allocation (maximize value / count, minimize cost) |
+| `solve_assignment_problem` | Task-to-agent assignment (minimize cost, maximize assignments, balance load) |
+| `solve_scheduling_problem` | Project scheduling with makespan minimization, resources, dependencies |
+| `solve_routing_problem` | TSP routing via circuit constraints (VRP deferred) |
+
+Each domain tool accepts a high-level problem description and returns a
+domain-specific result with an explanation.  All five share the same in-process
+CP-SAT engine — no subprocess, no MiniZinc runtime, no network.
+
+### Native CP-SAT vs. MiniZinc
+
+| | Native CP-SAT (`solve_ortools_model` family) | MiniZinc (`solve_minizinc_model` family) |
+| --- | --- | --- |
+| **Install** | Zero-install — `ortools` is a core wheel dependency | Requires `install-runtime` (one-time download) |
+| **Modeling** | Structured Pydantic request (variables, constraints, objective) | Full MiniZinc language (expressions, comprehensions, predicates) |
+| **Solvers** | CP-SAT only | OR-Tools CP-SAT, Chuffed, Gecode, and others |
+| **Verification** | — | Solution checkers, unsat-core diagnostics |
+| **Use case** | Common structured problems, zero-install first run | Expressive / complex models, independent verification pass |
+
+**MiniZinc is not deprecated.** The two paths coexist: use native CP-SAT for
+structured common problems with zero install overhead; use MiniZinc when you need
+richer expressiveness (global constraints not in the 9-kind set, comprehensions,
+nested predicates) or an independent verification of a CP-SAT result.
+
+### Nine constraint kinds (`solve_ortools_model`)
+
+`linear` (sum coef·var ≤/≥/= rhs), `all_different`, `element`, `table`,
+`cumulative` (resource capacity over time), `circuit` (single directed tour),
+`no_overlap` (disjunctive scheduling), `implication` (bool var → constraint), and
+`reservoir` (inventory with level changes).  All coefficients and bounds are
+integers; domain tools scale floats (money ×100, etc.) before entering the core.
+
+### Example: knapsack
+
+```python
+# In your MCP client, call solve_budget_allocation:
+{
+  "items": [
+    {"id": "A", "cost": 4, "value": 6},
+    {"id": "B", "cost": 3, "value": 5},
+    {"id": "C", "cost": 2, "value": 3}
+  ],
+  "budgets": [{"resource": "money", "limit": 5}],
+  "objective": "maximize_value"
+}
+# → selects B + C (cost 5, value 8), status "optimal"
+```
 
 ### Progress and status notifications
 

@@ -14,6 +14,10 @@ _LOCAL_ONLY_GUARANTEE = (
     "Runs locally through the managed runtime: no network, no LLM, no telemetry."
 )
 
+_CPSAT_NATIVE = (
+    "native in-process OR-Tools CP-SAT — no MiniZinc runtime, no subprocess, no network."
+)
+
 _UNKNOWN_JOB_ID_ERROR = "An unknown `job_id` is an MCP error."
 
 _NO_ARGS_LIST_TOOL = "Takes no arguments; never downloads or runs anything."
@@ -75,9 +79,13 @@ MCP_SERVER_INSTRUCTIONS = (
     "to the proven optimum. The check/inspect/solve/unsat-core tools emit status "
     "feedback while MiniZinc runs: MCP progress notifications when the request "
     "carries `_meta.progressToken`, plus info-level log notifications — stage "
-    "markers, not a completion percentage, so never render a percent bar. All "
-    "execution must use the managed local MiniZinc runtime; never a remote "
-    "solver or a bare PATH minizinc."
+    "markers, not a completion percentage, so never render a percent bar. "
+    "MiniZinc tools use the managed local MiniZinc runtime; never a remote "
+    "solver or a bare PATH minizinc. "
+    "For structured/common problems, prefer solve_ortools_model "
+    "(native in-process Google OR-Tools CP-SAT, no MiniZinc runtime needed — "
+    "zero-install, still local and offline); for richer expressiveness or an "
+    "independent verification pass, use MiniZinc."
 )
 
 CHECK_RUNTIME_DESCRIPTION = "Report whether the managed MiniZinc runtime is installed."
@@ -477,4 +485,75 @@ SOLVE_CONSTRAINT_PROBLEM_PROMPT_DESCRIPTION = (
     "available, otherwise by walking the user through the "
     "openconstraint-mcp CLI to set up and invoke the managed runtime "
     "manually — never via a bare PATH-based minizinc)."
+)
+
+SOLVE_BUDGET_ALLOCATION_DESCRIPTION = (
+    "Solve a high-level budget allocation / knapsack problem using "
+    + _CPSAT_NATIVE
+    + " Takes a ``SolveBudgetAllocationRequest`` (``items`` with cost/value/"
+    "resource-usage/dependencies/conflicts, per-resource ``budgets``, optional "
+    "value/cost/count bounds) and an ``objective`` of ``maximize_value`` | "
+    "``maximize_count`` | ``minimize_cost``. Float costs and values are scaled to "
+    "integers internally (a power of ten preserving each input's precision) so "
+    "results stay exact. Returns the selected items, totals, per-budget "
+    "usage/slack, optimality gap, and an explanation. Use for structured "
+    "knapsack / capital-budgeting / portfolio-selection problems. "
+    + _LOCAL_ONLY_GUARANTEE.replace("managed runtime", "OR-Tools CP-SAT (in-process)")
+)
+
+SOLVE_ASSIGNMENT_PROBLEM_DESCRIPTION = (
+    "Solve a high-level task-to-agent assignment problem using "
+    + _CPSAT_NATIVE
+    + " Takes a ``SolveAssignmentProblemRequest`` (``agents`` with capacity/skills/"
+    "cost-multiplier, ``tasks`` with required-skills/duration/priority, optional "
+    "``cost_matrix`` [task_i][agent_j], ``force_assign_all``) and an ``objective`` "
+    "of ``minimize_cost`` | ``maximize_assignments`` | ``balance_load``. Skill "
+    "mismatches are forbidden, capacity caps enforced, and float costs scaled to "
+    "integers (x100). Returns assignments (task→agent, cost), unassigned tasks, "
+    "per-agent load, total cost, optimality gap, and an explanation. "
+    + _LOCAL_ONLY_GUARANTEE.replace("managed runtime", "OR-Tools CP-SAT (in-process)")
+)
+
+SOLVE_SCHEDULING_PROBLEM_DESCRIPTION = (
+    "Solve a high-level scheduling problem using "
+    + _CPSAT_NATIVE
+    + " Currently supports the ``minimize_makespan`` objective only "
+    "(``minimize_cost``/``minimize_lateness`` return a clear ``ValueError``). Takes "
+    "a ``SolveSchedulingProblemRequest`` (``tasks`` with duration/resource-usage/"
+    "dependencies/earliest-start/deadline/priority, ``resources`` with "
+    "capacity/cost, an optional ``max_makespan`` bound, ``no_overlap_tasks`` "
+    "groups). Returns the makespan, the per-task schedule (start/end), optimality "
+    "gap, and an explanation. "
+    + _LOCAL_ONLY_GUARANTEE.replace("managed runtime", "OR-Tools CP-SAT (in-process)")
+)
+
+SOLVE_ROUTING_PROBLEM_DESCRIPTION = (
+    "Solve a high-level routing problem using "
+    + _CPSAT_NATIVE
+    + " Currently supports single-vehicle TSP via circuit constraints; "
+    "multi-vehicle VRP is deferred and raises a clear ``ValueError``. Takes a "
+    "``SolveRoutingProblemRequest`` (``locations`` with optional ``coordinates`` "
+    "for Euclidean distance, service-time/time-window/demand, an optional "
+    "``distance_matrix``, optional ``vehicles``, ``force_visit_all``) and the "
+    "``minimize_distance`` objective. Returns the ordered route(s) and total "
+    "distance, optimality gap, and an explanation. "
+    + _LOCAL_ONLY_GUARANTEE.replace("managed runtime", "OR-Tools CP-SAT (in-process)")
+)
+
+SOLVE_ORTOOLS_MODEL_DESCRIPTION = (
+    "Solve a structured constraint/optimization model using "
+    + _CPSAT_NATIVE
+    + " Takes an ``ORToolsSolveRequest`` with ``mode`` (satisfy/optimize), "
+    "``variables`` (bool or integer domain), and optional ``constraints`` of nine "
+    "kinds: ``linear`` (sum coef*var sense rhs), ``all_different``, ``element``, "
+    "``table``, ``cumulative``, ``circuit``, ``no_overlap``, ``implication`` "
+    "(references a **template-only** linear constraint — enforced only under its "
+    "condition, not standalone), and ``reservoir``. For optimization pass an "
+    "``objective`` (single, or a list for lexicographic multi-objective by "
+    "``priority`` — smaller priority solved first); ``search`` exposes "
+    "``timeout_ms``, ``num_workers``, ``random_seed``, ``max_solutions``, and "
+    "``warm_start``. Returns ``solutions``, the (integer) objective value(s), "
+    "optimality gap, and solve time. PREFER this over MiniZinc for "
+    "structured/common/zero-install problems; prefer MiniZinc when you need richer "
+    "expressiveness or an independent verification pass."
 )
