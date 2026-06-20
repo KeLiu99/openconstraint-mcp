@@ -11,8 +11,13 @@ from typing import Any
 import pytest
 from mcp.types import CallToolResult
 
-from openconstraint_mcp.jobs import JobRejectedError
-from openconstraint_mcp.schemas import SolveResult
+from openconstraint_mcp.jobs import JobRegistry, JobRejectedError
+from openconstraint_mcp.schemas import (
+    SolverCapabilities,
+    SolveResult,
+    SolverInfo,
+    SolverList,
+)
 
 # Tests deliberately white-box server internals, which are private by design.
 # noinspection PyProtectedMember
@@ -32,6 +37,36 @@ from tests.minizinc.helpers import (
     solution_obj_json_only,
     stream,
 )
+
+
+def _patch_capabilities(
+    monkeypatch: pytest.MonkeyPatch, caps_by_id: dict[str, SolverCapabilities]
+) -> None:
+    """Point the capability enforcer's ``list_solvers()`` at ``caps_by_id``."""
+    solvers = [
+        SolverInfo(id=solver_id, name=solver_id, capabilities=caps)
+        for solver_id, caps in caps_by_id.items()
+    ]
+    monkeypatch.setattr(
+        "openconstraint_mcp.minizinc.core.list_solvers", lambda: SolverList(solvers=solvers)
+    )
+
+
+def _patch_full_capabilities(monkeypatch: pytest.MonkeyPatch, *solver_ids: str) -> None:
+    """Report each ``solver_ids`` entry as supporting every ``-a/-f/-p/-r`` control.
+
+    The forwards-flags tests mock ``subprocess.run`` to return a solve stream; the
+    capability enforcer's ``list_solvers()`` would otherwise try to parse that
+    stream as ``--solvers-json``. This points the enforcer at a fully-capable map
+    so the gated controls resolve and forward instead of raising.
+    """
+    full = SolverCapabilities(
+        supports_all_solutions=True,
+        supports_free_search=True,
+        supports_parallel=True,
+        supports_random_seed=True,
+    )
+    _patch_capabilities(monkeypatch, {solver_id: full for solver_id in solver_ids})
 
 
 @pytest.mark.asyncio
@@ -541,6 +576,7 @@ async def test_solve_minizinc_model_forwards_search_flags_to_runtime(
     fake_minizinc_binary: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    _patch_full_capabilities(monkeypatch, "cp-sat")
     calls = _record_run_capturing_cwd(
         monkeypatch,
         FakeCompletedProcess(
@@ -582,6 +618,53 @@ async def test_solve_minizinc_model_invalid_parallel_surfaces_actionable_error(
             {"model": "solve satisfy;", "parallel": 0},
         )
     assert "parallel" in str(exc_info.value)
+
+
+@pytest.mark.asyncio
+async def test_solve_minizinc_model_unsupported_control_surfaces_mcp_error(
+    fake_minizinc_binary: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # An unsupported gated control surfaces as an MCP error carrying the core
+    # message (solver, control, flag); the solve subprocess never runs.
+    _patch_capabilities(monkeypatch, {"cp-sat": SolverCapabilities()})
+
+    def _fail_if_called(*args: object, **kwargs: object) -> None:
+        raise AssertionError("solve subprocess must not run for an unsupported control")
+
+    monkeypatch.setattr("openconstraint_mcp.minizinc.core.subprocess.run", _fail_if_called)
+
+    mcp = create_mcp_server()
+    with pytest.raises(Exception) as exc_info:
+        await mcp.call_tool(
+            "solve_minizinc_model",
+            {"model": "solve satisfy;", "free_search": True},
+        )
+    message = str(exc_info.value)
+    assert "free_search" in message
+    assert "cp-sat" in message
+    assert "-f" in message
+
+
+@pytest.mark.asyncio
+async def test_submit_solve_job_rejects_unsupported_control(
+    fake_minizinc_binary: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # submit_solve_job rejects an unsupported control at admission, surfaced as an
+    # MCP error, and no job is created.
+    _patch_capabilities(monkeypatch, {"cp-sat": SolverCapabilities()})
+
+    mcp = create_mcp_server()
+    with pytest.raises(Exception) as exc_info:
+        await mcp.call_tool(
+            "submit_solve_job",
+            {"model": "solve satisfy;", "free_search": True},
+        )
+    assert "free_search" in str(exc_info.value)
+
+    listed = await mcp.call_tool("list_solve_jobs", {})
+    assert _structured(listed)["result"] == []
 
 
 @pytest.mark.asyncio
@@ -1078,6 +1161,7 @@ async def test_solve_minizinc_files_forwards_search_flags_to_runtime(
 ) -> None:
     model_path = tmp_path / "model.mzn"
     model_path.write_text(_FILE_MODEL_SRC)
+    _patch_full_capabilities(monkeypatch, "cp-sat")
     calls = _record_run_capturing_cwd(
         monkeypatch,
         FakeCompletedProcess(
@@ -1146,6 +1230,33 @@ async def test_solve_minizinc_files_num_solutions_rejected_for_default_solver(
     assert "num_solutions" in message
     assert "org.chuffed.chuffed" in message
     assert "org.gecode.gecode" in message
+
+
+@pytest.mark.asyncio
+async def test_solve_minizinc_files_unsupported_control_surfaces_mcp_error(
+    tmp_path: Path,
+    fake_minizinc_binary: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # The path solve tool surfaces the same capability rejection as the inline one.
+    model_path = tmp_path / "model.mzn"
+    model_path.write_text(_FILE_MODEL_SRC)
+    _patch_capabilities(monkeypatch, {"cp-sat": SolverCapabilities()})
+
+    def _fail_if_called(*args: object, **kwargs: object) -> None:
+        raise AssertionError("solve subprocess must not run for an unsupported control")
+
+    monkeypatch.setattr("openconstraint_mcp.minizinc.core.subprocess.run", _fail_if_called)
+
+    mcp = create_mcp_server()
+    with pytest.raises(Exception) as exc_info:
+        await mcp.call_tool(
+            "solve_minizinc_files",
+            {"model_path": str(model_path), "parallel": 2},
+        )
+    message = str(exc_info.value)
+    assert "parallel" in message
+    assert "-p" in message
 
 
 @pytest.mark.asyncio
@@ -1652,7 +1763,7 @@ async def test_solve_minizinc_model_with_checker_reports_checker_stage_messages(
 
     await _tool_fn(mcp, "solve_minizinc_model")(
         model="var 1..5: x;\nconstraint x > 2;\nsolve satisfy;",
-        checker="output [\"ok\"];",
+        checker='output ["ok"];',
         ctx=ctx,
     )
 
@@ -1747,9 +1858,7 @@ async def test_check_minizinc_files_missing_path_still_raises_after_early_stages
     ctx = _FakeStatusContext()
 
     with pytest.raises(RuntimeError) as exc_info:
-        await _tool_fn(mcp, "check_minizinc_files")(
-            model_path=str(tmp_path / "nope.mzn"), ctx=ctx
-        )
+        await _tool_fn(mcp, "check_minizinc_files")(model_path=str(tmp_path / "nope.mzn"), ctx=ctx)
 
     assert "does not exist" in str(exc_info.value)
     assert [call[0] for call in ctx.progress_calls] == [1, 2]
@@ -2048,9 +2157,9 @@ async def test_cancel_solve_job_terminates_running_job(monkeypatch: pytest.Monke
 
     mcp = create_mcp_server()
     try:
-        job_id = _structured(
-            await mcp.call_tool("submit_solve_job", {"model": "solve satisfy;"})
-        )["job_id"]
+        job_id = _structured(await mcp.call_tool("submit_solve_job", {"model": "solve satisfy;"}))[
+            "job_id"
+        ]
         assert started.wait(timeout=3)
         await mcp.call_tool("cancel_solve_job", {"job_id": job_id})
 
@@ -2116,11 +2225,286 @@ async def test_list_solve_jobs_returns_one_entry_per_submitted_job(
     mcp = create_mcp_server()
     ids: set[str] = set()
     for _ in range(2):
-        job_id = _structured(
-            await mcp.call_tool("submit_solve_job", {"model": "solve satisfy;"})
-        )["job_id"]
+        job_id = _structured(await mcp.call_tool("submit_solve_job", {"model": "solve satisfy;"}))[
+            "job_id"
+        ]
         ids.add(job_id)
         await _poll_job_status(mcp, job_id)
 
     listed = _structured(await mcp.call_tool("list_solve_jobs", {}))["result"]
     assert {entry["job_id"] for entry in listed} == ids
+
+
+# --- portfolio tool test helpers -------------------------------------------
+
+
+class _PortfolioFakeProc:
+    def poll(self) -> int:
+        return 0
+
+
+def _portfolio_solve_result(status: str, solver: str) -> SolveResult:
+    return SolveResult(
+        status=status,  # type: ignore[arg-type]
+        solver=solver,
+        return_code=0,
+        timed_out=False,
+        stdout=f"{solver} result\n",
+        stderr="",
+        elapsed_ms=2,
+        solution={"x": 1},
+        solutions=[{"x": 1}],
+        objective=22 if status == "optimal" else None,
+    )
+
+
+# --- registry bounds via env vars ------------------------------------------
+
+
+_REGISTRY_BOUND_ENV_VARS = (
+    "OPENCONSTRAINT_MCP_MAX_RUNNING_JOBS",
+    "OPENCONSTRAINT_MCP_MAX_QUEUED_JOBS",
+    "OPENCONSTRAINT_MCP_MAX_RETAINED_TERMINAL",
+)
+
+
+def _spy_registry_kwargs(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
+    """Capture the kwargs ``create_mcp_server`` passes to ``JobRegistry``."""
+    captured: dict[str, Any] = {}
+    real_init = JobRegistry.__init__
+
+    def _spy(self: JobRegistry, **kwargs: Any) -> None:
+        captured.update(kwargs)
+        real_init(self, **kwargs)
+
+    monkeypatch.setattr("openconstraint_mcp.server.JobRegistry.__init__", _spy)
+    return captured
+
+
+def test_registry_bounds_default_when_env_unset(monkeypatch: pytest.MonkeyPatch) -> None:
+    for name in _REGISTRY_BOUND_ENV_VARS:
+        monkeypatch.delenv(name, raising=False)
+    captured = _spy_registry_kwargs(monkeypatch)
+    create_mcp_server()
+    assert captured == {
+        "max_running_jobs": 4,
+        "max_queued_jobs": 16,
+        "max_retained_terminal": 64,
+    }
+
+
+def test_registry_bounds_read_from_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("OPENCONSTRAINT_MCP_MAX_RUNNING_JOBS", "8")
+    monkeypatch.setenv("OPENCONSTRAINT_MCP_MAX_QUEUED_JOBS", "2")
+    monkeypatch.setenv("OPENCONSTRAINT_MCP_MAX_RETAINED_TERMINAL", "10")
+    captured = _spy_registry_kwargs(monkeypatch)
+    create_mcp_server()
+    assert captured == {
+        "max_running_jobs": 8,
+        "max_queued_jobs": 2,
+        "max_retained_terminal": 10,
+    }
+
+
+def test_registry_bounds_reject_non_integer(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("OPENCONSTRAINT_MCP_MAX_RUNNING_JOBS", "eight")
+    with pytest.raises(ValueError, match="OPENCONSTRAINT_MCP_MAX_RUNNING_JOBS must be an integer"):
+        create_mcp_server()
+
+
+def test_registry_bounds_reject_below_minimum(monkeypatch: pytest.MonkeyPatch) -> None:
+    # Names the env var, NOT the bare constructor "max_running_jobs must be >= 1".
+    monkeypatch.setenv("OPENCONSTRAINT_MCP_MAX_RUNNING_JOBS", "0")
+    with pytest.raises(ValueError, match=r"OPENCONSTRAINT_MCP_MAX_RUNNING_JOBS must be >= 1"):
+        create_mcp_server()
+
+
+# --- background portfolio jobs (submit/get/cancel/list) --------------------
+
+
+async def _poll_portfolio_status(mcp: Any, job_id: str, timeout: float = 5.0) -> dict[str, Any]:
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        status = _structured(await mcp.call_tool("get_portfolio_job", {"job_id": job_id}))
+        if status["state"] in {"succeeded", "cancelled"}:
+            return status
+        await asyncio.sleep(0.01)
+    raise AssertionError(f"portfolio job {job_id} did not finish within {timeout}s")
+
+
+@pytest.mark.asyncio
+async def test_portfolio_job_tools_are_listed_with_expected_properties() -> None:
+    mcp = create_mcp_server()
+    by_name = {tool.name: tool for tool in await mcp.list_tools()}
+
+    for name in (
+        "submit_portfolio_job",
+        "get_portfolio_job",
+        "cancel_portfolio_job",
+        "list_portfolio_jobs",
+    ):
+        assert name in by_name
+
+    submit_props = by_name["submit_portfolio_job"].inputSchema.get("properties", {})
+    assert {
+        "models",
+        "solvers",
+        "data",
+        "checker",
+        "seed_count",
+        "seeds",
+        "per_attempt_timeout_ms",
+        "free_search",
+        "parallel",
+        "all_solutions",
+        "num_solutions",
+    } <= set(submit_props)
+
+    for name in ("get_portfolio_job", "cancel_portfolio_job"):
+        assert "job_id" in by_name[name].inputSchema.get("properties", {})
+    assert by_name["list_portfolio_jobs"].inputSchema.get("properties", {}) == {}
+
+
+@pytest.mark.asyncio
+async def test_submit_portfolio_job_returns_running_then_get_reaches_succeeded(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def _fake_solve(model: str, *, solver: str, on_start: Any, **kw: Any) -> SolveResult:
+        on_start(_PortfolioFakeProc())
+        return _portfolio_solve_result("optimal", solver)
+
+    monkeypatch.setattr("openconstraint_mcp.jobs.solve_model_cancellable", _fake_solve)
+
+    mcp = create_mcp_server()
+    submitted = _structured(
+        await mcp.call_tool(
+            "submit_portfolio_job",
+            {"models": ["solve satisfy;"], "solvers": ["cp-sat", "org.gecode.gecode"]},
+        )
+    )
+    # The first poll inside submit may already have selected a winner on a fast solve.
+    assert submitted["state"] in {"running", "succeeded"}
+    job_id = submitted["job_id"]
+
+    final = await _poll_portfolio_status(mcp, job_id)
+    assert final["state"] == "succeeded"
+    assert final["result"]["status"] == "winner"
+    assert final["result"]["winner"]["status"] == "optimal"
+
+
+@pytest.mark.asyncio
+async def test_submit_portfolio_job_unsupported_control_surfaces_mcp_error(
+    fake_minizinc_binary: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _patch_capabilities(monkeypatch, {"cp-sat": SolverCapabilities()})
+
+    def _fail(model: str, *, on_start: Any, **kw: Any) -> SolveResult:
+        raise AssertionError("no solve should run for an unsupported control")
+
+    monkeypatch.setattr("openconstraint_mcp.jobs.solve_model_cancellable", _fail)
+
+    mcp = create_mcp_server()
+    with pytest.raises(Exception) as exc_info:
+        await mcp.call_tool(
+            "submit_portfolio_job",
+            {"models": ["solve satisfy;"], "solvers": ["cp-sat"], "free_search": True},
+        )
+    assert "free_search" in str(exc_info.value)
+    # No portfolio job and no attempt job were created (admission rejected).
+    assert _structured(await mcp.call_tool("list_portfolio_jobs", {}))["result"] == []
+    assert _structured(await mcp.call_tool("list_solve_jobs", {}))["result"] == []
+
+
+@pytest.mark.asyncio
+async def test_submit_portfolio_job_rejects_plan_exceeding_capacity(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("OPENCONSTRAINT_MCP_MAX_RUNNING_JOBS", "1")
+    monkeypatch.setenv("OPENCONSTRAINT_MCP_MAX_QUEUED_JOBS", "0")
+
+    def _fail(model: str, *, on_start: Any, **kw: Any) -> SolveResult:
+        raise AssertionError("no solve should run when the batch exceeds capacity")
+
+    monkeypatch.setattr("openconstraint_mcp.jobs.solve_model_cancellable", _fail)
+
+    mcp = create_mcp_server()
+    with pytest.raises(Exception) as exc_info:
+        await mcp.call_tool(
+            "submit_portfolio_job",
+            {"models": ["solve satisfy;"], "solvers": ["cp-sat", "org.gecode.gecode"]},
+        )
+    assert "capacity" in str(exc_info.value)
+    assert _structured(await mcp.call_tool("list_portfolio_jobs", {}))["result"] == []
+
+
+@pytest.mark.asyncio
+async def test_cancel_portfolio_job_stops_running_race(monkeypatch: pytest.MonkeyPatch) -> None:
+    started = threading.Event()
+    release = threading.Event()
+    terminated: list[Any] = []
+
+    def _blocking_solve(model: str, *, solver: str, on_start: Any, **kw: Any) -> SolveResult:
+        on_start(_PortfolioFakeProc())
+        started.set()
+        release.wait(timeout=5)
+        return _portfolio_solve_result("satisfied", solver)
+
+    def _fake_terminate(proc: Any, **kwargs: Any) -> None:
+        terminated.append(proc)
+        release.set()
+
+    monkeypatch.setattr("openconstraint_mcp.jobs.solve_model_cancellable", _blocking_solve)
+    monkeypatch.setattr("openconstraint_mcp.jobs._terminate_process_tree", _fake_terminate)
+
+    mcp = create_mcp_server()
+    try:
+        job_id = _structured(
+            await mcp.call_tool(
+                "submit_portfolio_job",
+                {"models": ["solve satisfy;"], "solvers": ["cp-sat"]},
+            )
+        )["job_id"]
+        assert started.wait(timeout=3)
+        await mcp.call_tool("cancel_portfolio_job", {"job_id": job_id})
+
+        final = await _poll_portfolio_status(mcp, job_id)
+        assert final["state"] == "cancelled"
+        assert final["result"] is None
+        assert terminated  # the attempt's process tree was signalled
+    finally:
+        release.set()
+
+
+@pytest.mark.asyncio
+async def test_list_portfolio_jobs_returns_one_entry_per_submitted_job(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def _fake_solve(model: str, *, solver: str, on_start: Any, **kw: Any) -> SolveResult:
+        on_start(_PortfolioFakeProc())
+        return _portfolio_solve_result("optimal", solver)
+
+    monkeypatch.setattr("openconstraint_mcp.jobs.solve_model_cancellable", _fake_solve)
+
+    mcp = create_mcp_server()
+    ids: set[str] = set()
+    for _ in range(2):
+        job_id = _structured(
+            await mcp.call_tool(
+                "submit_portfolio_job",
+                {"models": ["solve satisfy;"], "solvers": ["cp-sat"]},
+            )
+        )["job_id"]
+        ids.add(job_id)
+        await _poll_portfolio_status(mcp, job_id)
+
+    listed = _structured(await mcp.call_tool("list_portfolio_jobs", {}))["result"]
+    assert {entry["job_id"] for entry in listed} == ids
+
+
+@pytest.mark.asyncio
+async def test_get_portfolio_job_unknown_id_surfaces_actionable_error() -> None:
+    mcp = create_mcp_server()
+    with pytest.raises(Exception) as exc_info:
+        await mcp.call_tool("get_portfolio_job", {"job_id": "does-not-exist"})
+    assert "unknown" in str(exc_info.value)

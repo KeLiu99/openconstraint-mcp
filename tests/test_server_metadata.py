@@ -15,6 +15,12 @@ from openconstraint_mcp.server import (
     create_mcp_server,
 )
 
+
+def _boot_lifespan() -> object:
+    """A wired lifespan over a fresh server-owned solve registry (boot tests)."""
+    return _make_lifespan(JobRegistry())
+
+
 # --- website_url metadata --------------------------------------------------
 
 
@@ -72,7 +78,7 @@ async def test_boot_diagnostic_warns_when_runtime_missing(
     fake_runtime_dir: Path,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    async with _make_lifespan(JobRegistry())(create_mcp_server()):
+    async with _boot_lifespan()(create_mcp_server()):
         pass
 
     err = capsys.readouterr().err
@@ -87,7 +93,7 @@ async def test_boot_diagnostic_reports_installed_runtime(
     fake_minizinc_binary: Path,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    async with _make_lifespan(JobRegistry())(create_mcp_server()):
+    async with _boot_lifespan()(create_mcp_server()):
         pass
 
     err = capsys.readouterr().err
@@ -102,7 +108,7 @@ async def test_boot_diagnostic_writes_nothing_to_stdout(
 ) -> None:
     # Over stdio, stdout is the JSON-RPC channel; the banner must never land
     # there or it corrupts the protocol.
-    async with _make_lifespan(JobRegistry())(create_mcp_server()):
+    async with _boot_lifespan()(create_mcp_server()):
         pass
 
     assert capsys.readouterr().out == ""

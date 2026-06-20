@@ -42,3 +42,11 @@ docs/*
 # macOS
 .DS_Store
 ._*
+/examples/social_golfers/data_21.dzn
+/examples/social_golfers/data_24.dzn
+/examples/social_golfers/model_set.mzn
+/examples/social_golfers/model_table.mzn
+/examples/social_golfers/model_table_improved.mzn
+/examples/social_golfers/model_table_streamlined.mzn
+/examples/social_golfers/data_15.dzn
+/examples/social_golfers/data_18.dzn

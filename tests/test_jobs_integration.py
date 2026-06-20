@@ -114,9 +114,7 @@ def test_submitted_job_result_includes_solve_statistics() -> None:
     assert direct.statistics.keys() & status.result.statistics.keys()
 
 
-def _wait_for_running_child(
-    registry: JobRegistry, job_id: str, timeout: float = 30.0
-) -> int:
+def _wait_for_running_child(registry: JobRegistry, job_id: str, timeout: float = 30.0) -> int:
     """Return the pgid of the live solve child once the worker has launched it.
 
     Reaches into registry internals (the live ``Popen`` handle) — the only seam

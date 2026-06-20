@@ -1,0 +1,343 @@
+"""Solver-portfolio admission and winner-selection over the server-owned ``JobRegistry``.
+
+A portfolio expands a set of model formulations, solvers, and optional seeds into
+independent solve attempts, admits them atomically through the *existing* registry
+(no new pool, scheduler, or subprocess runner), and selects a winner from the
+attempts' statuses. The background portfolio path (``portfolio_jobs``) drives this:
+``_admit_portfolio`` admits the plan synchronously (fail-fast on a bad plan or a
+full queue) and ``_select_portfolio_outcome`` runs one non-blocking selection pass
+per poll, returning the winning ``SolveResult`` plus metadata explaining what
+happened to every attempt.
+
+Local-first invariants are inherited from the layers below: every attempt runs on
+the managed MiniZinc runtime via the registry's cancellable solve, capabilities are
+resolved once for the whole plan through the runtime's own ``--solvers-json``, and
+nothing leaves the machine. This module orchestrates; it never spawns its own
+processes.
+
+Layering: a server-side module that imports ``jobs``, ``minizinc.core`` helpers,
+and ``schemas``; it never imports ``server``.
+"""
+
+from __future__ import annotations
+
+import time
+from collections.abc import Sequence
+
+# portfolio consumes the registry (provider) and reuses its terminal-state set
+# (one definition, two call sites) plus core's capability resolver/validator. These
+# package-internal helpers keep plan-time enforcement identical to the single solve.
+# noinspection PyProtectedMember
+from .jobs import _TERMINAL_STATES, JobRegistry, SolveRequest
+
+# noinspection PyProtectedMember
+from .minizinc.core import (
+    _resolve_capability_map,
+    _validate_solver_capabilities,
+)
+from .schemas import (
+    JobState,
+    PortfolioAttempt,
+    PortfolioAttemptState,
+    PortfolioSolveResult,
+    PortfolioStatus,
+    SolveJobStatus,
+    SolveResult,
+)
+
+# The solve verdicts that end the race immediately (a proof or a satisfaction
+# solution). The first attempt to reach one of these wins; the rest are cancelled.
+_DECISIVE_STATUSES: frozenset[str] = frozenset(
+    {"optimal", "satisfied", "unsatisfiable", "unbounded", "unsat_or_unbounded"}
+)
+# How a winner is chosen, surfaced verbatim on the result so a client can record it.
+_SELECTION_POLICY: str = "first-decisive-result"
+# Poll cadence while awaiting cancelled/settling attempts (``_await_all_terminal``).
+_POLL_INTERVAL_SECONDS: float = 0.05
+# Bounded grace for cancelled/poll-expired attempts to reach a terminal state
+# before the final snapshot, so loser fates are reported accurately.
+_CANCEL_SETTLE_SECONDS: float = 5.0
+
+_JOB_TO_ATTEMPT_STATE: dict[JobState, PortfolioAttemptState] = {
+    "queued": "submitted",
+    "running": "running",
+    "succeeded": "succeeded",
+    "timeout": "timeout",
+    "failed": "failed",
+    "cancelled": "cancelled",
+}
+
+
+def _admit_portfolio(
+    registry: JobRegistry,
+    *,
+    models: Sequence[str],
+    solvers: Sequence[str],
+    data: str | None,
+    checker: str | None,
+    seed_count: int,
+    per_attempt_timeout_ms: int,
+    free_search: bool,
+    parallel: int | None,
+    all_solutions: bool,
+    num_solutions: int | None,
+    seeds: list[int] | None = None,
+    pin_attempts: bool = False,
+) -> tuple[float, list[str], list[tuple[int, str, int | None]]]:
+    """Validate the plan and admit its attempts atomically; return ``(start, job_ids, plan)``.
+
+    The synchronous, fail-fast half of a portfolio: every ``ValueError`` (empty
+    ``models``/``solvers``, bad control), capability rejection, and the
+    ``JobRejectedError`` for an over-capacity batch is raised HERE, before any
+    attempt runs — so ``PortfolioJobRegistry.submit`` fails fast on a bad plan or a
+    full queue instead of recording a background job that instantly fails. On return
+    the attempts are already admitted to ``registry`` (running or queued);
+    ``_select_portfolio_outcome`` polls them to a winner.
+    """
+    start = time.monotonic()
+    if not models:
+        raise ValueError("models must not be empty")
+    if not solvers:
+        raise ValueError("solvers must not be empty")
+    if per_attempt_timeout_ms <= 0:
+        raise ValueError("per_attempt_timeout_ms must be positive")
+
+    plan_seeds, seed_used = _resolve_plan_seeds(seed_count=seed_count, seeds=seeds)
+    # Model index varies fastest so the first attempts span distinct formulations
+    # before any one is repeated: with the cap gone, a plan wider than the running
+    # limit should still race the formulations first, not stack extra seeds/solvers
+    # onto model 0 while the other models wait in the queue.
+    plan: list[tuple[int, str, int | None]] = [
+        (m_idx, solver, seed)
+        for solver in solvers
+        for seed in plan_seeds
+        for m_idx in range(len(models))
+    ]
+
+    _validate_plan_capabilities(
+        solvers=solvers,
+        seed_used=seed_used,
+        free_search=free_search,
+        parallel=parallel,
+        all_solutions=all_solutions,
+    )
+
+    requests = [
+        SolveRequest(
+            model=models[m_idx],
+            solver=solver,
+            data=data,
+            checker=checker,
+            timeout_ms=per_attempt_timeout_ms,
+            free_search=free_search,
+            parallel=parallel,
+            random_seed=seed,
+            all_solutions=all_solutions,
+            num_solutions=num_solutions,
+        )
+        for m_idx, solver, seed in plan
+    ]
+    job_ids = registry.submit_many(requests, pin=pin_attempts)
+    return start, job_ids, plan
+
+
+def _resolve_plan_seeds(
+    *, seed_count: int, seeds: list[int] | None
+) -> tuple[list[int | None], bool]:
+    """Return the attempt seed list and whether the plan uses MiniZinc ``-r``."""
+    if seeds is None:
+        if seed_count < 1:
+            raise ValueError("seed_count must be >= 1")
+        if seed_count == 1:
+            return [None], False
+        return list(range(1, seed_count + 1)), True
+
+    if seed_count != 1:
+        raise ValueError("seeds cannot be combined with seed_count != 1")
+    if not seeds:
+        raise ValueError("seeds must not be empty")
+    if len(set(seeds)) != len(seeds):
+        raise ValueError("seeds must not contain duplicates")
+    return list(seeds), True
+
+
+def _select_portfolio_outcome(
+    registry: JobRegistry,
+    job_ids: Sequence[str],
+    plan: Sequence[tuple[int, str, int | None]],
+    start: float,
+) -> PortfolioSolveResult | None:
+    """One non-blocking selection pass over the admitted attempts (collect-on-poll).
+
+    Reads each attempt's current status ONCE (no loop). Returns ``None`` while the
+    race is undecided — no attempt has a decisive verdict and at least one is still
+    non-terminal. Once an attempt is decisive, cancels the still-running losers,
+    settles to a terminal snapshot, and returns the winner's ``PortfolioSolveResult``;
+    if every attempt is terminal without a decisive verdict, returns the
+    best-available (or ``no_winner``) result. This is the background portfolio job's
+    whole engine — driven by client polling, it needs no worker thread of its own.
+    """
+    statuses = [registry.get(job_id) for job_id in job_ids]
+    winner_index = _first_decisive_index(statuses)
+    if winner_index is None and not all(s.state in _TERMINAL_STATES for s in statuses):
+        return None
+    if winner_index is not None:
+        for job_id, status in zip(job_ids, statuses, strict=True):
+            if status.state not in _TERMINAL_STATES:
+                registry.cancel(job_id)
+        statuses = _await_all_terminal(registry, job_ids)
+    return _build_portfolio_result(plan, statuses, winner_index, start)
+
+
+def _build_portfolio_result(
+    plan: Sequence[tuple[int, str, int | None]],
+    statuses: Sequence[SolveJobStatus],
+    winner_index: int | None,
+    start: float,
+) -> PortfolioSolveResult:
+    """Build the winner-led ``PortfolioSolveResult`` from a terminal attempt snapshot.
+
+    Called by ``_select_portfolio_outcome`` once the race is decided. With no
+    decisive ``winner_index``, falls back to the best available terminal attempt (or
+    ``no_winner`` when none produced a usable result); the model enforces
+    ``winner present ⇔ status=="winner"``.
+    """
+    if winner_index is None:
+        winner_index = _best_available_index(statuses)
+    attempts = [_to_attempt(index, plan[index], statuses[index]) for index in range(len(statuses))]
+    status_value: PortfolioStatus
+    if winner_index is None:
+        status_value = "no_winner"
+        winner_result: SolveResult | None = None
+    else:
+        status_value = "winner"
+        winner_result = statuses[winner_index].result
+
+    return PortfolioSolveResult(
+        status=status_value,
+        winner_index=winner_index,
+        winner=winner_result,
+        attempts=attempts,
+        elapsed_ms=max(int((time.monotonic() - start) * 1000), 0),
+        selection_policy=_SELECTION_POLICY,
+    )
+
+
+def _validate_plan_capabilities(
+    *,
+    solvers: Sequence[str],
+    seed_used: bool,
+    free_search: bool,
+    parallel: int | None,
+    all_solutions: bool,
+) -> None:
+    """Reject the plan if any solver omits a requested control (one resolve, D4).
+
+    Lazy like the single-solve gate: no ``--solvers-json`` when no gated control is
+    requested. Seeds drive ``random_seed`` per attempt, so ``seed_count > 1`` or an
+    explicit ``seeds`` list means every solver must support ``-r``. An unresolved
+    solver string (a short alias) passes through (D4 case c) — MiniZinc resolves it
+    at solve time.
+    """
+    if not (free_search or all_solutions or parallel is not None or seed_used):
+        return
+    capability_map = _resolve_capability_map()
+    for solver in solvers:
+        capabilities = capability_map.get(solver)
+        if capabilities is None:
+            continue
+        _validate_solver_capabilities(
+            solver=solver,
+            capabilities=capabilities,
+            free_search=free_search,
+            parallel=parallel,
+            random_seed=1 if seed_used else None,
+            all_solutions=all_solutions,
+        )
+
+
+def _await_all_terminal(registry: JobRegistry, job_ids: Sequence[str]) -> list[SolveJobStatus]:
+    """Snapshot every attempt once all are terminal (bounded by the settle grace)."""
+    deadline = time.monotonic() + _CANCEL_SETTLE_SECONDS
+    while True:
+        statuses = [registry.get(job_id) for job_id in job_ids]
+        if all(status.state in _TERMINAL_STATES for status in statuses):
+            return statuses
+        if time.monotonic() >= deadline:
+            return statuses
+        time.sleep(_POLL_INTERVAL_SECONDS)
+
+
+def _first_decisive_index(statuses: Sequence[SolveJobStatus]) -> int | None:
+    """Index of the attempt that reached a decisive verdict *first*, by finish order.
+
+    Follows the documented ``first-decisive-result`` policy: among the attempts that
+    are decisive in this snapshot, the smallest ``finished_at_ms`` wins, with the
+    plan-order index breaking a same-millisecond tie. A single collect-on-poll
+    snapshot can reveal several decisive attempts at once (multiple finished within
+    one client poll), so taking the lowest index would misreport a later finisher as
+    the winner. ``finished_at_ms`` is stamped on every result-bearing terminal
+    attempt, so it is non-None for any decisive candidate (the sentinel is defensive
+    only, never the deciding value).
+    """
+    decisive = [
+        (status.finished_at_ms, index)
+        for index, status in enumerate(statuses)
+        if status.result is not None and status.result.status in _DECISIVE_STATUSES
+    ]
+    if not decisive:
+        return None
+    return min(decisive, key=lambda item: (item[0] if item[0] is not None else 2**63, item[1]))[1]
+
+
+def _best_available_rank(result: SolveResult) -> int:
+    """Rank a non-decisive but result-bearing attempt; lower is better (D6).
+
+    Order: a timeout/error that still carried a solution, then ``unknown``, then a
+    timeout with no solution, then a bare error.
+    """
+    has_solution = result.solution is not None or bool(result.solutions)
+    if result.status in ("timeout", "error") and has_solution:
+        return 0
+    if result.status == "unknown":
+        return 1
+    if result.status == "timeout":
+        return 2
+    return 3
+
+
+def _best_available_index(statuses: Sequence[SolveJobStatus]) -> int | None:
+    """Pick the best result-bearing attempt by rank then index, or ``None``.
+
+    ``None`` when no attempt produced a usable ``SolveResult`` (all failed or were
+    cancelled before producing one).
+    """
+    ranked = [
+        (_best_available_rank(status.result), index)
+        for index, status in enumerate(statuses)
+        if status.result is not None
+    ]
+    if not ranked:
+        return None
+    return min(ranked)[1]
+
+
+def _to_attempt(
+    index: int, plan_entry: tuple[int, str, int | None], status: SolveJobStatus
+) -> PortfolioAttempt:
+    model_index, solver, seed = plan_entry
+    result = status.result
+    return PortfolioAttempt(
+        index=index,
+        model_index=model_index,
+        solver=solver,
+        seed=seed,
+        timeout_ms=status.timeout_ms,
+        state=_JOB_TO_ATTEMPT_STATE[status.state],
+        job_id=status.job_id,
+        job_state=status.state,
+        result_status=result.status if result is not None else None,
+        objective=result.objective if result is not None else None,
+        elapsed_ms=status.elapsed_ms,
+        message=status.message,
+    )

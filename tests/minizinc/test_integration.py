@@ -289,6 +289,42 @@ def test_list_solvers_reports_cpsat_without_num_solutions_capability() -> None:
     assert caps.supports_num_solutions is False
 
 
+# --- capability enforcement (-a/-f/-p/-r, runtime-local) -------------------
+#
+# These prove what mocked-capability unit tests cannot: the gate runs against the
+# REAL --solvers-json output, so a control the bundled solver genuinely omits is
+# rejected before the solve, and one it genuinely declares still solves.
+
+
+def test_solve_model_rejects_control_the_solver_does_not_declare() -> None:
+    # The managed chuffed declares no `-p` (verified against the 2.9.7 config), so
+    # a parallel request is rejected before any solve. Defensive skip if a
+    # user-pointed runtime's chuffed does declare it.
+    _skip_if_solver_absent("org.chuffed.chuffed")
+    caps = {s.id: s for s in list_solvers().solvers}["org.chuffed.chuffed"].capabilities
+    if caps.supports_parallel:
+        pytest.skip("this runtime's chuffed declares -p; candidate no longer applies")
+
+    with pytest.raises(ValueError, match="parallel") as exc_info:
+        solve_model(_ALL_SOLUTIONS_MODEL, solver="org.chuffed.chuffed", parallel=2)
+    message = str(exc_info.value)
+    assert "org.chuffed.chuffed" in message
+    assert "-p" in message
+
+
+def test_solve_model_accepts_control_the_solver_declares() -> None:
+    # The inverse of the rejection: chuffed declares `-f`, so a free_search request
+    # passes the gate and the real solve runs — guarding against over-rejection.
+    _skip_if_solver_absent("org.chuffed.chuffed")
+    caps = {s.id: s for s in list_solvers().solvers}["org.chuffed.chuffed"].capabilities
+    if not caps.supports_free_search:
+        pytest.skip("this runtime's chuffed does not declare -f")
+
+    result = solve_model(_ALL_SOLUTIONS_MODEL, solver="org.chuffed.chuffed", free_search=True)
+
+    assert result.status == "satisfied"
+
+
 def test_check_model_honors_inline_data() -> None:
     # Without data, `var 1..n` has an unbound domain and the model cannot
     # flatten — a clean `ok` proves the data file was read.
@@ -539,9 +575,7 @@ _BROKEN_CHECKER = 'int: x;\nint: y;\nconstraint x = zzz;\noutput ["bad\\n"];\n'
 # Evaluation-error checker: compiles with an unassigned `x` parameter, then
 # fails only when MiniZinc evaluates the checker against the pinned solution.
 _EVALUATION_ERROR_CHECKER = (
-    "int: x;\n"
-    "array[1..1] of int: witness = [10];\n"
-    'output ["value=\\(witness[x])\\n"];\n'
+    'int: x;\narray[1..1] of int: witness = [10];\noutput ["value=\\(witness[x])\\n"];\n'
 )
 
 

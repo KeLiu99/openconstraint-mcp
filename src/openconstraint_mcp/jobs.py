@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import threading
 import time
+from collections.abc import Sequence
 from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass
 from subprocess import Popen
@@ -34,6 +35,7 @@ from uuid import uuid4
 from .minizinc.core import (
     DEFAULT_SOLVE_TIMEOUT_MS,
     DEFAULT_SOLVER,
+    _enforce_solver_capabilities,
     _solve_extra_args,
     _terminate_process_tree,
     _validate_model_and_timeout,
@@ -68,7 +70,7 @@ def _now_ms() -> int:
 
 
 @dataclass(frozen=True)
-class _SolveRequest:
+class SolveRequest:
     """The immutable solve parameters for one job (mirrors ``solve_model``)."""
 
     model: str
@@ -88,7 +90,7 @@ class _JobRecord:
     """Mutable per-job state, guarded by the registry lock."""
 
     job_id: str
-    request: _SolveRequest
+    request: SolveRequest
     submitted_at_ms: int
     state: JobState
     started_at_ms: int | None = None
@@ -131,6 +133,7 @@ class JobRegistry:
         self._lock = threading.Lock()
         self._records: dict[str, _JobRecord] = {}
         self._terminal_order: list[str] = []
+        self._pin_counts: dict[str, int] = {}
         self._in_flight = 0
         self._executor = ThreadPoolExecutor(
             max_workers=max_running_jobs, thread_name_prefix="solve-job"
@@ -170,7 +173,17 @@ class JobRegistry:
             all_solutions=all_solutions,
             num_solutions=num_solutions,
         )
-        request = _SolveRequest(
+        # Reject an unsupported -a/-f/-p/-r control at admission (one --solvers-json
+        # at most, only when a gated control is set); the worker trusts this and
+        # never re-resolves (D1/D2).
+        _enforce_solver_capabilities(
+            solver=solver,
+            free_search=free_search,
+            parallel=parallel,
+            random_seed=random_seed,
+            all_solutions=all_solutions,
+        )
+        request = SolveRequest(
             model=model,
             solver=solver,
             data=data,
@@ -184,24 +197,44 @@ class JobRegistry:
         )
         with self._lock:
             if self._in_flight >= self._max_running + self._max_queued:
-                raise JobRejectedError(
-                    f"Job queue is full ({self._max_running} running + "
-                    f"{self._max_queued} queued). Retry once a running job finishes."
-                )
-            job_id = uuid4().hex
-            now = _now_ms()
-            runs_now = self._in_flight < self._max_running
-            record = _JobRecord(
-                job_id=job_id,
-                request=request,
-                submitted_at_ms=now,
-                state="running" if runs_now else "queued",
-                started_at_ms=now if runs_now else None,
+                raise JobRejectedError(self._queue_full_message())
+            return self._admit_locked(request)
+
+    def submit_many(self, requests: Sequence[SolveRequest], *, pin: bool = False) -> list[str]:
+        """Admit a batch of solves atomically — all or none (D8) — in request order.
+
+        Validates every request up front (model/timeout + control ranges/`-n` gate)
+        with the exact ``solve_model`` rules, then under a SINGLE lock acquisition
+        either admits the whole batch (so a concurrent ``submit`` cannot take a slot
+        mid-sequence) or, when the batch would exceed the bounded running+queued
+        capacity, admits NONE and raises ``JobRejectedError`` — never a partial
+        batch. Capability (`-a/-f/-p/-r`) enforcement is the caller's job: a
+        portfolio validates the whole plan once before calling this, so this
+        primitive runs no ``--solvers-json`` itself. Returns the ``job_id`` list in
+        request order.
+
+        When ``pin`` is true, the admitted records are retained until their caller
+        releases the pin. Portfolio jobs use this so their child attempt records
+        cannot be evicted before the portfolio is polled to completion.
+        """
+        for request in requests:
+            _validate_model_and_timeout(request.model, request.timeout_ms)
+            _solve_extra_args(
+                solver=request.solver,
+                free_search=request.free_search,
+                parallel=request.parallel,
+                random_seed=request.random_seed,
+                all_solutions=request.all_solutions,
+                num_solutions=request.num_solutions,
             )
-            self._records[job_id] = record
-            self._in_flight += 1
-            record.future = self._executor.submit(self._run_job, job_id)
-        return job_id
+        with self._lock:
+            if self._in_flight + len(requests) > self._max_running + self._max_queued:
+                raise JobRejectedError(self._queue_full_message(batch=len(requests)))
+            job_ids = [self._admit_locked(request) for request in requests]
+            if pin:
+                for job_id in job_ids:
+                    self._pin_counts[job_id] = self._pin_counts.get(job_id, 0) + 1
+            return job_ids
 
     def get(self, job_id: str) -> SolveJobStatus:
         with self._lock:
@@ -236,6 +269,24 @@ class JobRegistry:
             _terminate_process_tree(handle)
         with self._lock:
             return self._to_status(record)
+
+    def release_pins(self, job_ids: Sequence[str]) -> None:
+        """Release retention pins and retry terminal-record eviction.
+
+        Pins are refcounted because a caller may have overlapping ownership of a
+        record. Releasing a missing pin is a no-op; callers still own exactly-once
+        release semantics for their own records.
+        """
+        with self._lock:
+            for job_id in job_ids:
+                count = self._pin_counts.get(job_id)
+                if count is None:
+                    continue
+                if count <= 1:
+                    del self._pin_counts[job_id]
+                else:
+                    self._pin_counts[job_id] = count - 1
+            self._evict_terminal_overflow()
 
     def shutdown(self) -> None:
         """Terminate running children and tear down the worker pool (lifespan exit).
@@ -275,6 +326,34 @@ class JobRegistry:
         self._executor.shutdown(wait=True, cancel_futures=True)
 
     # --- internals (assume the caller holds the lock unless noted) -------------
+
+    def _queue_full_message(self, *, batch: int | None = None) -> str:
+        capacity = f"{self._max_running} running + {self._max_queued} queued"
+        if batch is None:
+            return f"Job queue is full ({capacity}). Retry once a running job finishes."
+        return (
+            f"Batch of {batch} job(s) exceeds the bounded capacity ({capacity}) given "
+            f"{self._in_flight} already in flight. Retry once running jobs finish."
+        )
+
+    def _admit_locked(self, request: SolveRequest) -> str:
+        # Caller holds the lock AND has already checked capacity. Creates the record,
+        # bumps in_flight, and launches the worker future — the single admission
+        # primitive shared by submit (one) and submit_many (a batch under one lock).
+        job_id = uuid4().hex
+        now = _now_ms()
+        runs_now = self._in_flight < self._max_running
+        record = _JobRecord(
+            job_id=job_id,
+            request=request,
+            submitted_at_ms=now,
+            state="running" if runs_now else "queued",
+            started_at_ms=now if runs_now else None,
+        )
+        self._records[job_id] = record
+        self._in_flight += 1
+        record.future = self._executor.submit(self._run_job, job_id)
+        return job_id
 
     def _require_record(self, job_id: str) -> _JobRecord:
         record = self._records.get(job_id)
@@ -333,9 +412,23 @@ class JobRegistry:
     def _evict_terminal_overflow(self) -> None:
         # Caller holds the lock. FIFO eviction of the oldest terminal jobs beyond
         # the retention cap, so a long-lived server cannot grow unbounded (D1.5).
+        # Pinned records are still needed by their owner (currently a running
+        # portfolio job), so evict the oldest unpinned terminal record and leave
+        # overflow in place only when every retained terminal record is pinned.
         while len(self._terminal_order) > self._max_retained_terminal:
-            oldest = self._terminal_order.pop(0)
+            evict_index = next(
+                (
+                    index
+                    for index, job_id in enumerate(self._terminal_order)
+                    if self._pin_counts.get(job_id, 0) == 0
+                ),
+                None,
+            )
+            if evict_index is None:
+                return
+            oldest = self._terminal_order.pop(evict_index)
             self._records.pop(oldest, None)
+            self._pin_counts.pop(oldest, None)
 
     def _on_start(self, job_id: str, proc: Popen[str]) -> None:
         # Called by the runner the instant the child is launched. Record the handle

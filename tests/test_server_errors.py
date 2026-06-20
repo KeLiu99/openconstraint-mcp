@@ -322,3 +322,27 @@ def test_submit_solve_job_translates_value_error_with_cause(
     assert type(exc_info.value) is RuntimeError
     assert "empty" in str(exc_info.value)
     assert isinstance(exc_info.value.__cause__, ValueError)
+
+
+def test_submit_solve_job_translates_capability_gate_runtime_error_with_cause(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # A gated control (free_search) makes admission resolve solver capabilities,
+    # which runs list_solvers() — so an uninstalled/corrupt runtime raises
+    # RuntimeMissingError at submit, BEFORE any job exists. The wrapper must
+    # translate it like every other actionable runtime error (pin the exact
+    # RuntimeError type to prove translation, not subclass passthrough).
+    boom = RuntimeMissingError("runtime missing; run install-runtime")
+
+    def _raise() -> object:
+        raise boom
+
+    monkeypatch.setattr("openconstraint_mcp.minizinc.core.list_solvers", _raise)
+    fn = _tool_fn("submit_solve_job")
+
+    with pytest.raises(RuntimeError) as exc_info:
+        fn(model="solve satisfy;", free_search=True)
+
+    assert type(exc_info.value) is RuntimeError
+    assert "install-runtime" in str(exc_info.value)
+    assert exc_info.value.__cause__ is boom

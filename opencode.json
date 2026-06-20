@@ -4,7 +4,11 @@
     "openconstraint": {
       "type": "local",
       "command": ["uv", "run", "openconstraint-mcp", "stdio"],
-      "enabled": true
+      "enabled": true,
+      "environment": {
+        "OPENCONSTRAINT_MCP_MAX_RUNNING_JOBS": "8",
+        "OPENCONSTRAINT_MCP_MAX_QUEUED_JOBS": "32"
+      }
     }
   }
 }

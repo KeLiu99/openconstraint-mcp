@@ -156,7 +156,14 @@ produced solution against a checker model without changing result shape:
   facts read from the managed runtime's `--solvers-json` config for client-side
   solver routing. `supports_num_solutions` is the conservative gate
   (`org.gecode.gecode` / `org.chuffed.chuffed` only, matching the `num_solutions`
-  solve control); `std_flags` is advisory — it reports the standard flags the
+  solve control). The four `-a/-f/-p/-r` facts are **enforced** for the named
+  controls they correspond to: a requested `all_solutions` / `free_search` /
+  `parallel` / `random_seed` is rejected before solving when the selected solver's
+  `stdFlags` omit the matching flag. Enforcement is by exact canonical solver `id`
+  (the same stance as the `num_solutions` gate), so select non-default solvers by
+  canonical id to get the upfront rejection — a short alias (e.g. `gecode`) or an
+  unknown solver does not resolve and passes through to MiniZinc unchanged.
+  `std_flags` stays advisory — it reports the standard flags the
   solver configuration declares and is **not** a passthrough, so clients cannot
   send those flags back into `solve_minizinc_model` / `solve_minizinc_files`.
   Alongside the structured `SolverList`, the tool returns model-visible text
@@ -321,6 +328,12 @@ produced solution against a checker model without changing result shape:
   - `all_solutions: bool = False` — when true, passes `-a`: enumerate every
     solution (satisfaction) or the optimization improving-sequence, all
     captured in order in `solutions`.
+  - These four `-a/-f/-p/-r` controls are **capability-gated**: if the selected
+    solver's runtime-local `stdFlags` (see `list_available_solvers`) do not
+    declare the matching flag, the request is rejected **before solving** with an
+    actionable error naming the solver, the control, and the flag. The check
+    matches the solver by exact canonical `id`; a short alias (e.g. `gecode`) or
+    an unknown solver does not resolve and passes through to MiniZinc unchanged.
   - `num_solutions: int | None = None` — when set, passes `-n <n>` to cap the
     number of solutions for a **satisfaction** problem. Must be `>= 1`. It is
     **solver-gated**: only `org.gecode.gecode` and `org.chuffed.chuffed`
@@ -603,6 +616,127 @@ no LLM, no telemetry).
 These four tools return at once, so — unlike the blocking solve/check/inspect
 tools — they emit no progress/log status notifications; watch a job's `state`
 via `get_solve_job` instead. An unknown `job_id` is an MCP error.
+
+### Solver portfolios
+
+Race several **model formulations**, solvers, and seeds against **one** instance
+and return the single winner. This is a **local race** over the same
+managed-runtime background-solve machinery — there is no remote/distributed
+solving, upload, or telemetry; every attempt runs on this machine. Reach for it on
+a hard instance where the best formulation or solver is unknown; an ordinary
+single-solver `solve_minizinc_model` is still the right first attempt.
+
+Because a hard race can run past a client's synchronous request timeout, a
+portfolio runs as a **background job**: submit it with
+[`submit_portfolio_job`](#background-portfolio-jobs) and poll
+[`get_portfolio_job`](#background-portfolio-jobs) for the winner. It takes the same
+inline surface as `solve_minizinc_model` — optional shared `data`/`checker`, and
+the non-seed controls `free_search` / `parallel` / `all_solutions` /
+`num_solutions`, applied identically to every attempt — but takes a non-empty
+**`models`** list (alternative encodings of the same instance, sharing the one
+`data`/`checker`; **not** a batch solve of different problems) and a non-empty
+`solvers` list instead of one `model`/`solver`, and **does not** take
+`random_seed`. The portfolio API still exposes named controls only: there is no
+generic `solver_options`, `extra_args`, or raw MiniZinc flag passthrough.
+
+- **Seeds.** `seed_count` (default `1`) generates seeds deterministically: with
+  `seed_count == 1` each `(model, solver)` runs once **unseeded**; with
+  `seed_count > 1` each runs with seeds `1..seed_count`, so every selected solver
+  must support `-r`. Use `seeds` for exact user-controlled values instead:
+  `seeds=[42, 123, 999]` runs exactly those seeds, in that order, with no extra
+  unseeded attempt. An explicit `seeds` list must be non-empty, must not contain
+  duplicates, requires `seed_count` to stay at its default `1`, and still requires
+  every selected solver to support `-r`.
+- **Cross-product, no cap.** The plan is the full cross-product
+  `len(models) * len(solvers) * seed_count` when using the shorthand, or
+  `len(models) * len(solvers) * len(seeds)` when `seeds` is supplied, with the
+  **model index varying fastest** so the first attempts span distinct formulations.
+  There is **no portfolio-side cap**: every attempt is admitted; up to `max_running_jobs`
+  (default `4`) race simultaneously and the rest **queue**, starting as running
+  slots free, and a decisive running winner cancels the still-queued attempts
+  before they start. The only breadth bound is the registry's running+queued
+  capacity — a plan past it is rejected by the job registry (raise capacity via
+  the [registry-bound env vars](#configuring-registry-bounds)). Unsupported
+  `-a/-f/-p/-r` controls are rejected up front too (canonical-id match, like the
+  single-solve gate). Mind plan size: the cross-product grows fast.
+- **Winner policy.** The first attempt to reach a decisive verdict
+  (`optimal`/`satisfied`/`unsatisfiable`/`unbounded`/`unsat_or_unbounded`) wins
+  and the remaining attempts are **cancelled**; if none is decisive, the best
+  available terminal attempt is returned (a timeout/error *with* a solution,
+  then `unknown`, then a timeout without a solution, then an error).
+- **Result.** A `PortfolioSolveResult`: `status` (`"winner"`/`"no_winner"`),
+  `winner_index`, the winning `SolveResult` in `winner` (its own `status` tells
+  you whether the win was decisive), `attempts` (every attempt's `model_index`,
+  solver, seed, final state, result status, objective, and message — including
+  the cancelled losers, so you need not poll child jobs), `elapsed_ms`, and
+  `selection_policy`. The winning formulation is
+  `models[attempts[winner_index].model_index]`. Present it like a single
+  `solve_minizinc_model`: lead with the winner's model/solver/seed/status and then
+  the winning solve.
+
+### Background portfolio jobs
+
+Portfolios run as background jobs — the portfolio analogue of
+`submit_solve_job`/`get_solve_job`: submit the race and return immediately, then
+poll for the winner, so a hard race never blocks past a client's synchronous
+request timeout.
+
+The design is **collect-on-poll**: there is no extra worker pool. The attempts
+are admitted as ordinary jobs on the **same** solve registry as
+`submit_solve_job` (so they count against its capacity and also show up in
+`list_solve_jobs`), and winner-selection — the pure function of the attempts'
+statuses — runs **when you call `get_portfolio_job`**. That keeps submit
+non-blocking without cloning the job machinery.
+
+- **`submit_portfolio_job`** — admit a portfolio race as a background job. Takes
+  `models`, `solvers`, optional shared `data`/`checker`, `seed_count`, `seeds`,
+  `per_attempt_timeout_ms`, and the non-seed controls (see
+  [Solver portfolios](#solver-portfolios) above). Validation, capability
+  enforcement, and admission run
+  **synchronously**: an empty `models`/`solvers`, a bad control, an unsupported
+  `-a/-f/-p/-r` flag, or a plan past the registry's running+queued capacity is
+  reported at once as an MCP error, **before any job exists**. Returns a
+  `PortfolioJobStatus` with an opaque `job_id` and `state` `"running"`.
+- **`get_portfolio_job`** — poll a portfolio job by `job_id`. **Each poll drives
+  the race**: once an attempt reaches a decisive verdict it selects the winner
+  and cancels the still-running losers, so poll until terminal rather than
+  submitting and walking away. Returns a `PortfolioJobStatus`: `state`
+  (`"running"`, `"succeeded"`, `"cancelled"`), `per_attempt_timeout_ms`, timing
+  fields, an optional `result` (the full `PortfolioSolveResult`), and an optional
+  `message`. **State contract:** `result` is present exactly when `state` is
+  `"succeeded"`. A race with no decisive winner is still `"succeeded"` (carrying a
+  `"no_winner"` `PortfolioSolveResult`); a per-attempt failure is recorded in that
+  result's attempts table, not as a failed job. Pace polling against
+  `per_attempt_timeout_ms` rather than a fixed `sleep`.
+- **`cancel_portfolio_job`** — stop a running race and **every** still-running
+  attempt (each attempt's managed process tree is terminated). Best-effort and
+  idempotent; the job reaches `"cancelled"` (with `result is None`).
+- **`list_portfolio_jobs`** — list the retained portfolio jobs, one
+  `PortfolioJobStatus` each. Finished jobs are retained only up to a cap.
+
+Loser attempts are cancelled at the next poll (not the instant a winner appears),
+bounded by each attempt's own `per_attempt_timeout_ms` — negligible for a polling
+client, and the trade for not running a second worker pool. Like the other job
+tools these return at once and emit no progress notifications; watch `state` via
+`get_portfolio_job`. An unknown `job_id` is an MCP error.
+
+### Configuring registry bounds
+
+Background solve jobs (`submit_solve_job`) and a background portfolio job's
+attempts share one in-process **job registry** with three bounds. They default to the values below and are overridable via environment
+variables read **once at server start**:
+
+| Env var | Meaning | Default | Minimum |
+| --- | --- | --- | --- |
+| `OPENCONSTRAINT_MCP_MAX_RUNNING_JOBS` | Solves running concurrently | `4` | `1` |
+| `OPENCONSTRAINT_MCP_MAX_QUEUED_JOBS` | Submissions queued past the running cap | `16` | `0` |
+| `OPENCONSTRAINT_MCP_MAX_RETAINED_TERMINAL` | Finished jobs kept for status polling | `64` | `1` |
+
+A submission (or portfolio batch) beyond the `running + queued` capacity is
+rejected with a clear error. An **invalid** value — non-integer or below the
+variable's minimum — **fails fast at server start, naming the offending variable**
+(no silent fallback to the default). Raise `OPENCONSTRAINT_MCP_MAX_RUNNING_JOBS` /
+`OPENCONSTRAINT_MCP_MAX_QUEUED_JOBS` to admit wider portfolios.
 
 ### Path-based file tools
 
