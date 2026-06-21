@@ -54,10 +54,12 @@ Plans must preserve explicit user requirements. If a plan intentionally deviates
 
 ```
 cli  ──►  server  ──►  minizinc  ──►  runtime  ──►  schemas
+ │                 │
+ │                 └──►  cpsat   (in-process ortools; imports no internal modules beyond cpsat.*)
  └─────►  runtime_install   (install-time only; imports no internal modules)
 ```
 
-A module may import any module to its right. Imports never flow leftward or between same-layer modules. `runtime_install` is a leaf used only by `cli` (lazily, so its `httpx`/`rich.progress` deps stay off the cold paths); it imports no internal modules, so it sits outside the left-to-right chain.
+A module may import any module to its right. Imports never flow leftward or between same-layer modules. The `cpsat` subtree is a parallel path from `server`: it imports third-party `ortools` and its own submodules, never `minizinc` or `runtime`. `runtime_install` is a leaf used only by `cli` (lazily, so its `httpx`/`rich.progress` deps stay off the cold paths); it imports no internal modules, so it sits outside the left-to-right chain.
 
 ## Before You Run Commands
 
@@ -95,14 +97,14 @@ If `just` is unavailable in your environment, fall back to the underlying `uv ru
 The v0 introspection-only restriction is lifted. Solving features — `solve`, `optimize`, model validation, dry-run compilation, solution checking, global-constraint lookup, and similar — may be added incrementally as long as the following invariants hold:
 
 - **Local-first.** All solving runs on the user's machine. No remote solving backends, no upload of models or data, no telemetry on solver runs.
-- **Managed runtime.** Solver execution must use the managed/local MiniZinc runtime resolved through the runtime layer (`OPENCONSTRAINT_MCP_RUNTIME_DIR` or the install config), never an arbitrary `$PATH` lookup.
+- **Managed runtime (MiniZinc path).** MiniZinc solver execution must use the managed/local runtime resolved through the runtime layer (`OPENCONSTRAINT_MCP_RUNTIME_DIR` or the install config), never an arbitrary `$PATH` lookup. A second backend — native CP-SAT via the bundled `ortools` Python package — may solve **in-process**, bound to the same invariants: local-first, fully offline, no telemetry, no new global mutable state; it never shells out and never resolves the managed runtime.
 - **No server-side LLM calls.** The MCP server must never own LLM credentials or invoke a generative model. This includes MCP sampling — the server may not request the client's LLM either.
 - **No LangChain / LangGraph in the core server.** Do not pull these dependencies into the server package. They imply agent loops and LLM coupling that conflict with the deterministic, local-first posture.
 - **No hidden network calls.** Solving, validation, model lookup, and result inspection must all be offline. The only sanctioned network call remains the user-invoked `install-runtime` download.
 
 LLM-assisted modeling — natural-language → MiniZinc, model critique, repair suggestions, explanation — belongs in the **MCP client**. The server's job is to expose deterministic, verifiable MCP tools and prompts the client's LLM can call: model validation, dry-run compilation, solving, solution checking, global-constraint lookup, example retrieval, etc. The division of labor is **LLM proposes, server verifies.**
 
-The current scope is MiniZinc-compatible discrete optimization through the managed runtime.
+The current scope is discrete optimization through two paths: MiniZinc (expressive models, verification, rich constraint library — via the managed runtime) and native OR-Tools CP-SAT (zero-install structured solving, high-level problem tools — in-process via the bundled `ortools` package).
 
 ## v0 Scope Guards
 

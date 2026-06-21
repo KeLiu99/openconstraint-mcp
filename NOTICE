@@ -1,0 +1,7 @@
+openconstraint-mcp
+
+Copyright 2025-2026 openconstraint-mcp contributors
+
+Portions of the constraint builder logic (cpsat/constraints.py) and domain
+converter logic (cpsat/domains/allocation.py, assignment.py, scheduling.py,
+routing.py) are adapted from chuk-mcp-solver (Apache-2.0).
