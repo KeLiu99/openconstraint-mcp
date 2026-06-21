@@ -197,17 +197,11 @@ def convert_routing_to_cpsat(
 
     for loc in request.locations:
         if loc.service_time != 0:
-            raise ValueError(
-                f"Location '{loc.id}': service_time is not yet supported"
-            )
+            raise ValueError(f"Location '{loc.id}': service_time is not yet supported")
         if loc.time_window is not None:
-            raise ValueError(
-                f"Location '{loc.id}': time_window is not yet supported"
-            )
+            raise ValueError(f"Location '{loc.id}': time_window is not yet supported")
         if loc.demand != 0:
-            raise ValueError(
-                f"Location '{loc.id}': demand is not yet supported"
-            )
+            raise ValueError(f"Location '{loc.id}': demand is not yet supported")
 
     locations = request.locations
     n = len(locations)

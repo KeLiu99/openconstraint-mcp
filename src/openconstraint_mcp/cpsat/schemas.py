@@ -347,9 +347,7 @@ class ORToolsSolveRequest(BaseModel):
         for c in self.constraints:
             for var_id in _constraint_var_refs(c):
                 if var_id not in defined:
-                    raise ValueError(
-                        f"Constraint '{c.id}': variable '{var_id}' is not declared"
-                    )
+                    raise ValueError(f"Constraint '{c.id}': variable '{var_id}' is not declared")
         obj_list: list[ORToolsObjective] = (
             self.objective
             if isinstance(self.objective, list)
