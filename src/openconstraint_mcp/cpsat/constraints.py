@@ -3,6 +3,8 @@
 Portions adapted from chuk-mcp-solver (Apache-2.0).
 """
 
+from __future__ import annotations
+
 from typing import TYPE_CHECKING
 
 from openconstraint_mcp.cpsat.schemas import (
