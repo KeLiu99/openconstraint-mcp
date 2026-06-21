@@ -8,7 +8,7 @@ from __future__ import annotations
 from enum import StrEnum
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 from openconstraint_mcp.cpsat.core import solve_model
 from openconstraint_mcp.cpsat.schemas import (
@@ -66,6 +66,26 @@ class SolveAssignmentProblemRequest(BaseModel):
     force_assign_all: bool = True
     timeout_ms: int = Field(default=60_000, ge=1)
     metadata: dict[str, Any] = Field(default_factory=dict)
+
+    @model_validator(mode="after")
+    def _check_cost_matrix_shape(self) -> SolveAssignmentProblemRequest:
+        if self.cost_matrix is None:
+            return self
+        n_tasks = len(self.tasks)
+        n_agents = len(self.agents)
+        if len(self.cost_matrix) != n_tasks:
+            raise ValueError(
+                f"cost_matrix has {len(self.cost_matrix)} rows but there are {n_tasks} tasks; "
+                f"expected shape {n_tasks} x {n_agents}"
+            )
+        for i, row in enumerate(self.cost_matrix):
+            if len(row) != n_agents:
+                raise ValueError(
+                    f"cost_matrix row {i} has {len(row)} columns "
+                    f"but there are {n_agents} agents; "
+                    f"expected shape {n_tasks} x {n_agents}"
+                )
+        return self
 
 
 class Assignment(BaseModel):

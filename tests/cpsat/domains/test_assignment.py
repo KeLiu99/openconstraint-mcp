@@ -1,5 +1,8 @@
 """Tests for the assignment domain tool."""
 
+import pytest
+from pydantic import ValidationError
+
 from openconstraint_mcp.cpsat.domains.assignment import (
     Agent,
     AssignmentObjective,
@@ -183,3 +186,29 @@ def test_cost_matrix_provided():
     # Should pick agent B (cost 3)
     assert response.assignments[0].agent_id == "B"
     assert response.assignments[0].cost == 3.0
+
+
+def test_cost_matrix_wrong_row_count_rejected():
+    """cost_matrix with fewer rows than tasks is rejected at construction."""
+    agents = [Agent(id="A"), Agent(id="B")]
+    tasks = [AssignmentTask(id="T1"), AssignmentTask(id="T2")]
+
+    with pytest.raises(ValidationError, match="cost_matrix has 1 rows but there are 2 tasks"):
+        SolveAssignmentProblemRequest(
+            agents=agents,
+            tasks=tasks,
+            cost_matrix=[[1.0, 2.0]],  # only 1 row, need 2
+        )
+
+
+def test_cost_matrix_ragged_row_rejected():
+    """cost_matrix with a short row is rejected at construction."""
+    agents = [Agent(id="A"), Agent(id="B")]
+    tasks = [AssignmentTask(id="T1"), AssignmentTask(id="T2")]
+
+    with pytest.raises(ValidationError, match="row 1 has 1 columns"):
+        SolveAssignmentProblemRequest(
+            agents=agents,
+            tasks=tasks,
+            cost_matrix=[[1.0, 2.0], [3.0]],  # row 1 missing agent B
+        )

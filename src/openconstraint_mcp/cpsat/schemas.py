@@ -251,6 +251,35 @@ class ORToolsSearchConfig(BaseModel):
 # ---------------------------------------------------------------------------
 
 
+def _constraint_var_refs(constraint: ORToolsConstraint) -> list[str]:
+    """Extract all variable IDs referenced by ``constraint``'s params."""
+    p = constraint.params
+    if isinstance(p, ORToolsLinearParams):
+        return [t.var for t in p.terms]
+    if isinstance(p, ORToolsAllDifferentParams):
+        return list(p.vars)
+    if isinstance(p, ORToolsElementParams):
+        return [p.index_var, p.target_var]
+    if isinstance(p, ORToolsTableParams):
+        return list(p.vars)
+    if isinstance(p, ORToolsCumulativeParams):
+        refs = list(p.start_vars)
+        refs += [v for v in p.duration_vars if isinstance(v, str)]
+        refs += [v for v in p.demand_vars if isinstance(v, str)]
+        return refs
+    if isinstance(p, ORToolsCircuitParams):
+        return [arc[2] for arc in p.arcs]
+    if isinstance(p, ORToolsNoOverlapParams):
+        refs = list(p.start_vars)
+        refs += [v for v in p.duration_vars if isinstance(v, str)]
+        return refs
+    if isinstance(p, ORToolsImplicationParams):
+        return [p.if_var]
+    if isinstance(p, ORToolsReservoirParams):
+        return list(p.time_vars)
+    return []
+
+
 class ORToolsSolveRequest(BaseModel):
     """The complete structured CP-SAT solve input."""
 
@@ -309,6 +338,29 @@ class ORToolsSolveRequest(BaseModel):
                     f"use hand-signed coefficients or separate priorities"
                 )
             by_prio[obj.priority] = obj.sense
+        return self
+
+    @model_validator(mode="after")
+    def _check_variable_references(self) -> ORToolsSolveRequest:
+        """All variable ids in constraints and objective must name a declared variable."""
+        defined = {v.id for v in self.variables}
+        for c in self.constraints:
+            for var_id in _constraint_var_refs(c):
+                if var_id not in defined:
+                    raise ValueError(
+                        f"Constraint '{c.id}': variable '{var_id}' is not declared"
+                    )
+        obj_list: list[ORToolsObjective] = (
+            self.objective
+            if isinstance(self.objective, list)
+            else [self.objective]
+            if self.objective is not None
+            else []
+        )
+        for obj in obj_list:
+            for t in obj.terms:
+                if t.var not in defined:
+                    raise ValueError(f"Objective: variable '{t.var}' is not declared")
         return self
 
 

@@ -104,6 +104,7 @@ def solve_model(request: ORToolsSolveRequest) -> ORToolsSolveResult:
         set_objective(model, obj_spec, var_map)  # type: ignore[arg-type]
         status_code = solver.Solve(model)
     else:
+        assert isinstance(obj_spec, list)
         status_code, lex_values = _run_lexicographic(
             cp,
             solver,

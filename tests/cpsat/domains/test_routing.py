@@ -239,3 +239,50 @@ def test_route_sequence_starts_at_start_location():
 
     assert response.status == "optimal"
     assert response.routes[0].sequence[0] == "B"
+
+
+def test_location_service_time_raises():
+    """A location with non-zero service_time raises ValueError."""
+    locations = [
+        Location(id="A", coordinates=(0.0, 0.0), service_time=5),
+        Location(id="B", coordinates=(1.0, 0.0)),
+    ]
+    request = SolveRoutingProblemRequest(locations=locations)
+    with pytest.raises(ValueError, match="service_time"):
+        convert_routing_to_cpsat(request)
+
+
+def test_location_time_window_raises():
+    """A location with a time_window raises ValueError."""
+    locations = [
+        Location(id="A", coordinates=(0.0, 0.0), time_window=(0, 10)),
+        Location(id="B", coordinates=(1.0, 0.0)),
+    ]
+    request = SolveRoutingProblemRequest(locations=locations)
+    with pytest.raises(ValueError, match="time_window"):
+        convert_routing_to_cpsat(request)
+
+
+def test_location_demand_raises():
+    """A location with non-zero demand raises ValueError."""
+    locations = [
+        Location(id="A", coordinates=(0.0, 0.0), demand=3),
+        Location(id="B", coordinates=(1.0, 0.0)),
+    ]
+    request = SolveRoutingProblemRequest(locations=locations)
+    with pytest.raises(ValueError, match="demand"):
+        convert_routing_to_cpsat(request)
+
+
+def test_vehicle_capacity_raises():
+    """A vehicle with non-default capacity raises ValueError."""
+    locations = [
+        Location(id="A", coordinates=(0.0, 0.0)),
+        Location(id="B", coordinates=(1.0, 0.0)),
+    ]
+    request = SolveRoutingProblemRequest(
+        locations=locations,
+        vehicles=[Vehicle(id="V1", start_location="A", capacity=50)],
+    )
+    with pytest.raises(ValueError, match="capacity"):
+        convert_routing_to_cpsat(request)

@@ -179,6 +179,8 @@ def convert_routing_to_cpsat(
             raise ValueError("vehicle.max_distance is not yet supported")
         if vehicle.max_time is not None:
             raise ValueError("vehicle.max_time is not yet supported")
+        if vehicle.capacity != Vehicle.model_fields["capacity"].default:
+            raise ValueError("vehicle.capacity constraints are not yet supported")
         loc_ids = {loc.id for loc in request.locations}
         start_id = vehicle.start_location
         if start_id not in loc_ids:
@@ -191,6 +193,20 @@ def convert_routing_to_cpsat(
                 f"Different start/end locations ({start_id!r} -> "
                 f"{vehicle.end_location!r}) are not yet supported; "
                 f"only closed tours (start = end) are available"
+            )
+
+    for loc in request.locations:
+        if loc.service_time != 0:
+            raise ValueError(
+                f"Location '{loc.id}': service_time is not yet supported"
+            )
+        if loc.time_window is not None:
+            raise ValueError(
+                f"Location '{loc.id}': time_window is not yet supported"
+            )
+        if loc.demand != 0:
+            raise ValueError(
+                f"Location '{loc.id}': demand is not yet supported"
             )
 
     locations = request.locations

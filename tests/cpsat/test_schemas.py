@@ -200,3 +200,47 @@ def test_solve_result_defaults() -> None:
     assert result.objective_value is None
     assert result.solutions == []
     assert result.objective_values == []
+
+
+def test_constraint_references_undeclared_variable_rejected() -> None:
+    """A linear constraint naming an undeclared variable is rejected."""
+    with pytest.raises(ValidationError, match="variable 'z' is not declared"):
+        ORToolsSolveRequest(
+            mode="satisfy",
+            variables=[ORToolsVariable(id="x", domain="integer", lower=0, upper=10)],
+            constraints=[
+                ORToolsConstraint(
+                    id="c1",
+                    kind="linear",
+                    params={"terms": [{"var": "z", "coef": 1}], "sense": "<=", "rhs": 5},
+                )
+            ],
+        )
+
+
+def test_objective_references_undeclared_variable_rejected() -> None:
+    """An objective naming an undeclared variable is rejected."""
+    with pytest.raises(ValidationError, match="variable 'missing' is not declared"):
+        ORToolsSolveRequest(
+            mode="optimize",
+            variables=[ORToolsVariable(id="x", domain="integer", lower=0, upper=10)],
+            objective=ORToolsObjective(
+                sense="min", terms=[ORToolsLinearTerm(var="missing", coef=1)]
+            ),
+        )
+
+
+def test_all_different_references_undeclared_variable_rejected() -> None:
+    """An all_different constraint naming an undeclared variable is rejected."""
+    with pytest.raises(ValidationError, match="variable 'y' is not declared"):
+        ORToolsSolveRequest(
+            mode="satisfy",
+            variables=[ORToolsVariable(id="x", domain="integer", lower=0, upper=5)],
+            constraints=[
+                ORToolsConstraint(
+                    id="c1",
+                    kind="all_different",
+                    params={"vars": ["x", "y"]},
+                )
+            ],
+        )
