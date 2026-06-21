@@ -84,9 +84,7 @@ def test_minimize_x_ge_3() -> None:
     result = _solve(
         _make_request(
             "optimize",
-            objective=ORToolsObjective(
-                sense="min", terms=[ORToolsLinearTerm(var="x", coef=1)]
-            ),
+            objective=ORToolsObjective(sense="min", terms=[ORToolsLinearTerm(var="x", coef=1)]),
             constraints=[
                 ORToolsConstraint(
                     id="c",
@@ -108,9 +106,7 @@ def test_maximize_x_le_7() -> None:
     result = _solve(
         _make_request(
             "optimize",
-            objective=ORToolsObjective(
-                sense="max", terms=[ORToolsLinearTerm(var="x", coef=1)]
-            ),
+            objective=ORToolsObjective(sense="max", terms=[ORToolsLinearTerm(var="x", coef=1)]),
             constraints=[
                 ORToolsConstraint(
                     id="c",
@@ -190,10 +186,7 @@ def test_same_seed_same_solution() -> None:
     )
     r1 = solve_model(req)
     r2 = solve_model(req)
-    assert (
-        r1.solutions[0].variables[0].value
-        == r2.solutions[0].variables[0].value
-    )
+    assert r1.solutions[0].variables[0].value == r2.solutions[0].variables[0].value
 
 
 def test_max_solutions_enumerate() -> None:

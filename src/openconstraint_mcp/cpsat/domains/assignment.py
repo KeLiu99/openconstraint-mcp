@@ -182,8 +182,7 @@ def convert_assignment_to_cpsat(
                 ),
                 metadata={
                     "description": (
-                        f"Task {task_id} incompatible with "
-                        f"agent {agent_id} (missing skills)"
+                        f"Task {task_id} incompatible with agent {agent_id} (missing skills)"
                     )
                 },
             )
@@ -217,10 +216,7 @@ def convert_assignment_to_cpsat(
                 kind="linear",
                 params=ORToolsLinearParams(terms=terms, sense="<=", rhs=agent.capacity),
                 metadata={
-                    "description": (
-                        f"Agent {agent.id} can handle at most "
-                        f"{agent.capacity} tasks"
-                    )
+                    "description": (f"Agent {agent.id} can handle at most {agent.capacity} tasks")
                 },
             )
         )
@@ -245,9 +241,7 @@ def convert_assignment_to_cpsat(
         # When every pair is incompatible, use a dummy term so the
         # objective is syntactically valid (the model is infeasible anyway).
         if not cost_terms:
-            cost_terms.append(
-                ORToolsLinearTerm(var="assign_t0_a0", coef=0)
-            )
+            cost_terms.append(ORToolsLinearTerm(var="assign_t0_a0", coef=0))
         objective = ORToolsObjective(sense="min", terms=cost_terms)
 
     elif request.objective == AssignmentObjective.MAXIMIZE_ASSIGNMENTS:
@@ -270,9 +264,7 @@ def convert_assignment_to_cpsat(
         )
         for agent_idx, agent in enumerate(request.agents):
             load_terms = [
-                ORToolsLinearTerm(
-                    var=f"assign_t{task_idx}_a{agent_idx}", coef=1
-                )
+                ORToolsLinearTerm(var=f"assign_t{task_idx}_a{agent_idx}", coef=1)
                 for task_idx in range(n_tasks)
             ]
             load_terms.append(ORToolsLinearTerm(var="max_load", coef=-1))
@@ -280,17 +272,11 @@ def convert_assignment_to_cpsat(
                 ORToolsConstraint(
                     id=f"balance_agent_{agent.id}",
                     kind="linear",
-                    params=ORToolsLinearParams(
-                        terms=load_terms, sense="<=", rhs=0
-                    ),
-                    metadata={
-                        "description": f"Agent {agent.id} load <= max_load"
-                    },
+                    params=ORToolsLinearParams(terms=load_terms, sense="<=", rhs=0),
+                    metadata={"description": f"Agent {agent.id} load <= max_load"},
                 )
             )
-        objective = ORToolsObjective(
-            sense="min", terms=[ORToolsLinearTerm(var="max_load", coef=1)]
-        )
+        objective = ORToolsObjective(sense="min", terms=[ORToolsLinearTerm(var="max_load", coef=1)])
 
     return ORToolsSolveRequest(
         mode="optimize",
@@ -316,9 +302,7 @@ def convert_cpsat_to_assignment_response(
         return SolveAssignmentProblemResponse(
             status=result.status,
             solve_time_ms=result.solve_time_ms,
-            explanation=AssignmentExplanation(
-                summary=f"Problem is {result.status}"
-            ),
+            explanation=AssignmentExplanation(summary=f"Problem is {result.status}"),
         )
 
     if not result.solutions:
@@ -344,9 +328,7 @@ def convert_cpsat_to_assignment_response(
             var_id = f"assign_t{task_idx}_a{agent_idx}"
             if var_values.get(var_id) == 1:
                 cost = cost_matrix[task_idx][agent_idx]
-                assignments.append(
-                    Assignment(task_id=task.id, agent_id=agent.id, cost=cost)
-                )
+                assignments.append(Assignment(task_id=task.id, agent_id=agent.id, cost=cost))
                 agent_load[agent.id] += 1
                 total_cost += cost
                 assigned = True
@@ -360,13 +342,11 @@ def convert_cpsat_to_assignment_response(
 
     if result.status == "optimal":
         summary_parts.append(
-            f"Optimal assignment: {len(assignments)} tasks assigned "
-            f"to {num_agents_used} agents"
+            f"Optimal assignment: {len(assignments)} tasks assigned to {num_agents_used} agents"
         )
     elif result.status in ("feasible", "timeout_best"):
         summary_parts.append(
-            f"Feasible assignment: {len(assignments)} tasks assigned "
-            f"to {num_agents_used} agents"
+            f"Feasible assignment: {len(assignments)} tasks assigned to {num_agents_used} agents"
         )
         if result.optimality_gap is not None:
             summary_parts.append(f"(gap: {result.optimality_gap:.2f}%)")

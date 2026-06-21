@@ -205,8 +205,7 @@ class ORToolsConstraint(BaseModel):
             model_cls = _PARAMS_BY_KIND.get(kind)
             if model_cls is None:
                 raise ValueError(
-                    f"Unknown constraint kind '{kind}'; must be one of "
-                    f"{sorted(_PARAMS_BY_KIND)}"
+                    f"Unknown constraint kind '{kind}'; must be one of {sorted(_PARAMS_BY_KIND)}"
                 )
             values["params"] = model_cls(**params)
         return values

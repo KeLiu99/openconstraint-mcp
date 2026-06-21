@@ -39,10 +39,7 @@ def set_objective(
     if isinstance(objective, list):
         if len(objective) == 0:
             return
-        expr = sum(
-            o.weight * sum(t.coef * var_map[t.var] for t in o.terms)
-            for o in objective
-        )
+        expr = sum(o.weight * sum(t.coef * var_map[t.var] for t in o.terms) for o in objective)
         sense = objective[0].sense
     else:
         expr = sum(t.coef * var_map[t.var] for t in objective.terms)

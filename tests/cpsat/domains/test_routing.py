@@ -62,9 +62,7 @@ def test_vrp_unsupported():
     ]
 
     with pytest.raises(ValueError, match="VRP with multiple vehicles"):
-        solve_routing_problem(
-            SolveRoutingProblemRequest(locations=locations, vehicles=vehicles)
-        )
+        solve_routing_problem(SolveRoutingProblemRequest(locations=locations, vehicles=vehicles))
 
 
 def test_distance_matrix_used():
@@ -79,9 +77,7 @@ def test_distance_matrix_used():
         [10, 0, 30],
         [20, 30, 0],
     ]
-    request = SolveRoutingProblemRequest(
-        locations=locations, distance_matrix=dm
-    )
+    request = SolveRoutingProblemRequest(locations=locations, distance_matrix=dm)
 
     response = solve_routing_problem(request)
 

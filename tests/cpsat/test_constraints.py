@@ -25,9 +25,7 @@ def test_linear_satisfiable() -> None:
         ORToolsConstraint(
             id="c",
             kind="linear",
-            params=ORToolsLinearParams(
-                terms=[{"var": "x", "coef": 1}], sense="<=", rhs=5
-            ),
+            params=ORToolsLinearParams(terms=[{"var": "x", "coef": 1}], sense="<=", rhs=5),
         ),
         var_map,
     )
@@ -43,9 +41,7 @@ def test_linear_infeasible() -> None:
         ORToolsConstraint(
             id="c",
             kind="linear",
-            params=ORToolsLinearParams(
-                terms=[{"var": "x", "coef": 1}], sense="==", rhs=999
-            ),
+            params=ORToolsLinearParams(terms=[{"var": "x", "coef": 1}], sense="==", rhs=999),
         ),
         var_map,
     )
@@ -79,9 +75,7 @@ def test_element_domain_mismatch_infeasible() -> None:
         ORToolsConstraint(
             id="e",
             kind="element",
-            params=ORToolsElementParams(
-                index_var="idx", array=[1, 2, 3], target_var="target"
-            ),
+            params=ORToolsElementParams(index_var="idx", array=[1, 2, 3], target_var="target"),
         ),
         var_map,
     )
@@ -99,9 +93,7 @@ def test_table_membership() -> None:
         ORToolsConstraint(
             id="t",
             kind="table",
-            params=ORToolsTableParams(
-                vars=["x", "y"], allowed_tuples=[[1, 2], [3, 4]]
-            ),
+            params=ORToolsTableParams(vars=["x", "y"], allowed_tuples=[[1, 2], [3, 4]]),
         ),
         var_map,
     )
@@ -113,9 +105,7 @@ def test_table_membership() -> None:
 def test_cumulative_capacity_separation() -> None:
     """Two tasks exceeding capacity cannot overlap."""
     horizon = 100
-    model, var_map = _new_model(
-        s1=(0, horizon), d1=(0, 10), s2=(0, horizon), d2=(0, 10)
-    )
+    model, var_map = _new_model(s1=(0, horizon), d1=(0, 10), s2=(0, horizon), d2=(0, 10))
     build_constraint(
         model,
         ORToolsConstraint(
@@ -141,17 +131,13 @@ def test_cumulative_capacity_separation() -> None:
 def test_no_overlap_separation() -> None:
     """Two tasks with no_overlap must not overlap."""
     horizon = 100
-    model, var_map = _new_model(
-        s1=(0, horizon), d1=(0, 20), s2=(0, horizon), d2=(0, 20)
-    )
+    model, var_map = _new_model(s1=(0, horizon), d1=(0, 20), s2=(0, horizon), d2=(0, 20))
     build_constraint(
         model,
         ORToolsConstraint(
             id="no",
             kind="no_overlap",
-            params=ORToolsNoOverlapParams(
-                start_vars=["s1", "s2"], duration_vars=[10, 10]
-            ),
+            params=ORToolsNoOverlapParams(start_vars=["s1", "s2"], duration_vars=[10, 10]),
         ),
         var_map,
     )
@@ -166,9 +152,12 @@ def test_no_overlap_separation() -> None:
 def test_circuit_valid_tour() -> None:
     """Circuit constraint enforces a valid tour covering all nodes."""
     model, var_map = _new_model(
-        arc_0_1=(0, 1), arc_0_2=(0, 1),
-        arc_1_0=(0, 1), arc_1_2=(0, 1),
-        arc_2_0=(0, 1), arc_2_1=(0, 1),
+        arc_0_1=(0, 1),
+        arc_0_2=(0, 1),
+        arc_1_0=(0, 1),
+        arc_1_2=(0, 1),
+        arc_2_0=(0, 1),
+        arc_2_1=(0, 1),
     )
     arcs = [
         (0, 1, "arc_0_1"),
@@ -180,9 +169,7 @@ def test_circuit_valid_tour() -> None:
     ]
     build_constraint(
         model,
-        ORToolsConstraint(
-            id="circ", kind="circuit", params=ORToolsCircuitParams(arcs=arcs)
-        ),
+        ORToolsConstraint(id="circ", kind="circuit", params=ORToolsCircuitParams(arcs=arcs)),
         var_map,
     )
     status, solution = _solve_model(model, var_map)
@@ -203,20 +190,14 @@ def test_implication_enforce_if() -> None:
     lin = ORToolsConstraint(
         id="then_c",
         kind="linear",
-        params=ORToolsLinearParams(
-            terms=[{"var": "x", "coef": 1}], sense=">=", rhs=5
-        ),
+        params=ORToolsLinearParams(terms=[{"var": "x", "coef": 1}], sense=">=", rhs=5),
     )
     impl = ORToolsConstraint(
         id="impl",
         kind="implication",
-        params=ORToolsImplicationParams(
-            if_var="trigger", then_constraint_id="then_c"
-        ),
+        params=ORToolsImplicationParams(if_var="trigger", then_constraint_id="then_c"),
     )
-    build_constraint(
-        model, impl, var_map, constraints_by_id={"then_c": lin}
-    )
+    build_constraint(model, impl, var_map, constraints_by_id={"then_c": lin})
     model.Add(var_map["trigger"] == 1)
     status, solution = _solve_model(model, var_map)
     assert status in ("optimal", "feasible", "satisfied")

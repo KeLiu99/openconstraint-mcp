@@ -245,8 +245,7 @@ SAVE_VERIFIED_MINIZINC_MODEL_DESCRIPTION = (
     "`files` (role, bare filename, sha256 — only on `saved`), `check` (always "
     "present), and `solve` (null when the check gate already failed). A model "
     "that fails any verification gate returns `not_verified` with the gating "
-    "results and writes NOTHING; argument/path problems are MCP errors. "
-    + _LOCAL_ONLY_GUARANTEE
+    "results and writes NOTHING; argument/path problems are MCP errors. " + _LOCAL_ONLY_GUARANTEE
 )
 
 # Shared guidance injected into each path-based file-tool description.
@@ -368,8 +367,7 @@ CANCEL_SOLVE_JOB_DESCRIPTION = (
     + _cancellation_idempotent_note("`succeeded`/`failed`/`timeout`/`cancelled`")
     + "Returns the SolveJobStatus; the job reaches "
     "`cancelled` (with `result is None`) once the worker observes the request — "
-    "poll `get_solve_job` to confirm the terminal state. "
-    + _UNKNOWN_JOB_ID_ERROR
+    "poll `get_solve_job` to confirm the terminal state. " + _UNKNOWN_JOB_ID_ERROR
 )
 
 LIST_SOLVE_JOBS_DESCRIPTION = (
@@ -455,8 +453,7 @@ GET_PORTFOLIO_JOB_DESCRIPTION = (
     "`result` like a single `solve_minizinc_model`: lead with the winner's "
     "model/solver/seed/status, then the winning solve (solution + the COMPLETE "
     "`Statistics:` section) and the per-attempt table. The winning FORMULATION "
-    "is `models[attempts[winner_index].model_index]`. "
-    + _UNKNOWN_JOB_ID_ERROR
+    "is `models[attempts[winner_index].model_index]`. " + _UNKNOWN_JOB_ID_ERROR
 )
 
 CANCEL_PORTFOLIO_JOB_DESCRIPTION = (
@@ -466,8 +463,7 @@ CANCEL_PORTFOLIO_JOB_DESCRIPTION = (
     + _cancellation_idempotent_note("`succeeded`/`cancelled`")
     + "Returns the PortfolioJobStatus; the job reaches "
     "`cancelled` (with `result is None`) once the race observes the request — poll "
-    "`get_portfolio_job` to confirm the terminal state. "
-    + _UNKNOWN_JOB_ID_ERROR
+    "`get_portfolio_job` to confirm the terminal state. " + _UNKNOWN_JOB_ID_ERROR
 )
 
 LIST_PORTFOLIO_JOBS_DESCRIPTION = (

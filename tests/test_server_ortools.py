@@ -168,6 +168,7 @@ def test_knapsack_optimal(mcp) -> None:
 # Domain tool MCP-level smoke tests
 # ---------------------------------------------------------------------------
 
+
 def test_budget_allocation_mcp(mcp) -> None:
     """Happy-path budget allocation via MCP call_tool."""
     result = _call(

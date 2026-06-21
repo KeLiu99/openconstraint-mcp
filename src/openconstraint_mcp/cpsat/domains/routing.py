@@ -158,9 +158,7 @@ def convert_routing_to_cpsat(
     Unsupported features raise ``ValueError`` rather than silently ignoring them.
     """
     if len(request.vehicles) > 1:
-        raise ValueError(
-            "VRP with multiple vehicles is not yet supported"
-        )
+        raise ValueError("VRP with multiple vehicles is not yet supported")
 
     if request.objective != RoutingObjective.MINIMIZE_DISTANCE:
         raise ValueError(
@@ -169,26 +167,18 @@ def convert_routing_to_cpsat(
         )
 
     if not request.force_visit_all:
-        raise ValueError(
-            "force_visit_all=False is not yet supported"
-        )
+        raise ValueError("force_visit_all=False is not yet supported")
 
     if request.max_route_distance is not None:
-        raise ValueError(
-            "max_route_distance is not yet supported"
-        )
+        raise ValueError("max_route_distance is not yet supported")
 
     has_vehicle = len(request.vehicles) == 1
     if has_vehicle:
         vehicle = request.vehicles[0]
         if vehicle.max_distance is not None:
-            raise ValueError(
-                "vehicle.max_distance is not yet supported"
-            )
+            raise ValueError("vehicle.max_distance is not yet supported")
         if vehicle.max_time is not None:
-            raise ValueError(
-                "vehicle.max_time is not yet supported"
-            )
+            raise ValueError("vehicle.max_time is not yet supported")
         loc_ids = {loc.id for loc in request.locations}
         start_id = vehicle.start_location
         if start_id not in loc_ids:
@@ -225,9 +215,7 @@ def convert_routing_to_cpsat(
                 )
             )
             arcs.append((i, j, var_id))
-            arc_terms.append(
-                ORToolsLinearTerm(var=var_id, coef=dist[i][j])
-            )
+            arc_terms.append(ORToolsLinearTerm(var=var_id, coef=dist[i][j]))
 
     constraints.append(
         ORToolsConstraint(
@@ -263,18 +251,14 @@ def convert_cpsat_to_routing_response(
         return SolveRoutingProblemResponse(
             status=result.status,
             solve_time_ms=result.solve_time_ms,
-            explanation=RoutingExplanation(
-                summary=f"Problem is {result.status}"
-            ),
+            explanation=RoutingExplanation(summary=f"Problem is {result.status}"),
         )
 
     if not result.solutions:
         return SolveRoutingProblemResponse(
             status=result.status,
             solve_time_ms=result.solve_time_ms,
-            explanation=RoutingExplanation(
-                summary="No solution available"
-            ),
+            explanation=RoutingExplanation(summary="No solution available"),
         )
 
     solution = result.solutions[0]
@@ -299,9 +283,7 @@ def convert_cpsat_to_routing_response(
         return SolveRoutingProblemResponse(
             status=result.status,
             solve_time_ms=result.solve_time_ms,
-            explanation=RoutingExplanation(
-                summary="No route found — circuit incomplete"
-            ),
+            explanation=RoutingExplanation(summary="No route found — circuit incomplete"),
         )
 
     # Walk the tour starting from the vehicle's start location
@@ -333,11 +315,7 @@ def convert_cpsat_to_routing_response(
     # converter), so total_time and total_cost mirror total_distance; they gain
     # independent meaning once time/cost objectives land.
     route = Route(
-        vehicle_id=(
-            original_request.vehicles[0].id
-            if original_request.vehicles
-            else "vehicle_0"
-        ),
+        vehicle_id=(original_request.vehicles[0].id if original_request.vehicles else "vehicle_0"),
         sequence=sequence,
         total_distance=total_dist,
         total_time=total_dist,
@@ -346,17 +324,11 @@ def convert_cpsat_to_routing_response(
 
     summary_parts: list[str] = []
     if result.status == "optimal":
-        summary_parts.append(
-            f"Found optimal tour with distance {total_dist}"
-        )
+        summary_parts.append(f"Found optimal tour with distance {total_dist}")
     elif result.status in ("feasible", "timeout_best"):
-        summary_parts.append(
-            f"Found feasible tour with distance {total_dist}"
-        )
+        summary_parts.append(f"Found feasible tour with distance {total_dist}")
         if result.optimality_gap is not None:
-            summary_parts.append(
-                f"(gap: {result.optimality_gap:.2f}%)"
-            )
+            summary_parts.append(f"(gap: {result.optimality_gap:.2f}%)")
     else:
         summary_parts.append("Tour found")
 
@@ -371,9 +343,7 @@ def convert_cpsat_to_routing_response(
         vehicles_used=1,
         solve_time_ms=result.solve_time_ms,
         optimality_gap=result.optimality_gap,
-        explanation=RoutingExplanation(
-            summary=" ".join(summary_parts)
-        ),
+        explanation=RoutingExplanation(summary=" ".join(summary_parts)),
     )
 
 

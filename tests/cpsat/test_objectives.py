@@ -54,8 +54,7 @@ def _solve_lexicographic(
     values: list[int] = []
     groups = order_objective_groups(objectives)
     for group in groups:
-        expr = sum(o.weight * sum(t.coef * var_map[t.var] for t in o.terms)
-                    for o in group)
+        expr = sum(o.weight * sum(t.coef * var_map[t.var] for t in o.terms) for o in group)
         if group[0].sense == "min":
             model.Minimize(expr)
         else:

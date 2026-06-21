@@ -36,8 +36,5 @@ def _solve_model(
         cp_model.MODEL_INVALID: "model_invalid",
     }
     status = status_map.get(status_code, "unknown")
-    solution = {
-        var_id: solver.Value(cp_var)
-        for var_id, cp_var in var_map.items()
-    }
+    solution = {var_id: solver.Value(cp_var) for var_id, cp_var in var_map.items()}
     return status, solution

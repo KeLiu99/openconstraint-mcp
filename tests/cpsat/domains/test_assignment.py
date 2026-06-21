@@ -34,9 +34,7 @@ def test_skill_mismatch_leaves_unassigned():
     tasks = [
         AssignmentTask(id="T1", required_skills=["design"]),
     ]
-    request = SolveAssignmentProblemRequest(
-        agents=agents, tasks=tasks, force_assign_all=False
-    )
+    request = SolveAssignmentProblemRequest(agents=agents, tasks=tasks, force_assign_all=False)
 
     response = solve_assignment_problem(request)
 
@@ -51,9 +49,7 @@ def test_skill_mismatch_infeasible_with_force():
     tasks = [
         AssignmentTask(id="T1", required_skills=["design"]),
     ]
-    request = SolveAssignmentProblemRequest(
-        agents=agents, tasks=tasks, force_assign_all=True
-    )
+    request = SolveAssignmentProblemRequest(agents=agents, tasks=tasks, force_assign_all=True)
 
     response = solve_assignment_problem(request)
 
@@ -67,9 +63,7 @@ def test_capacity_respected():
         AssignmentTask(id="T1", duration=1),
         AssignmentTask(id="T2", duration=1),
     ]
-    request = SolveAssignmentProblemRequest(
-        agents=agents, tasks=tasks, force_assign_all=False
-    )
+    request = SolveAssignmentProblemRequest(agents=agents, tasks=tasks, force_assign_all=False)
 
     response = solve_assignment_problem(request)
 

@@ -225,8 +225,6 @@ def build_constraint(
     if constraint.kind == "implication":
         if constraints_by_id is None:
             raise ValueError("constraints_by_id is required for implication constraints")
-        _build_implication(
-            model, constraint, var_map, constraints_by_id=constraints_by_id
-        )
+        _build_implication(model, constraint, var_map, constraints_by_id=constraints_by_id)
     else:
         builder(model, constraint, var_map)  # type: ignore[operator]

@@ -105,7 +105,11 @@ def solve_model(request: ORToolsSolveRequest) -> ORToolsSolveResult:
         status_code = solver.Solve(model)
     else:
         status_code, lex_values = _run_lexicographic(
-            cp, solver, model, obj_spec, var_map  # type: ignore[arg-type]
+            cp,
+            solver,
+            model,
+            obj_spec,
+            var_map,  # type: ignore[arg-type]
         )
 
     elapsed_ms = int((time.monotonic() - start_time) * 1000)
@@ -256,10 +260,7 @@ def _collect_solutions(
     if callback is not None and hasattr(callback, "solutions"):
         sols: list[ORToolsSolution] = []
         for raw in callback.solutions:
-            sol_vars = [
-                ORToolsSolutionVariable(id=vid, value=val)
-                for vid, val in raw.items()
-            ]
+            sol_vars = [ORToolsSolutionVariable(id=vid, value=val) for vid, val in raw.items()]
             sols.append(ORToolsSolution(variables=sol_vars))
         return sols
 

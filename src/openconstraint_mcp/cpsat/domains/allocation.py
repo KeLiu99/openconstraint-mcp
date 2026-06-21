@@ -208,8 +208,7 @@ def convert_allocation_to_cpsat(
                     params=ORToolsLinearParams(terms=terms, sense="<=", rhs=limit),
                     metadata={
                         "description": (
-                            f"Budget constraint for {budget.resource} "
-                            f"(limit: {budget.limit})"
+                            f"Budget constraint for {budget.resource} (limit: {budget.limit})"
                         )
                     },
                 )
@@ -248,9 +247,7 @@ def convert_allocation_to_cpsat(
     for item in request.items:
         for conflict_id in item.conflicts:
             pair: tuple[str, str] = (
-                (item.id, conflict_id)
-                if item.id < conflict_id
-                else (conflict_id, item.id)
+                (item.id, conflict_id) if item.id < conflict_id else (conflict_id, item.id)
             )
             if pair in seen:
                 continue
@@ -385,7 +382,7 @@ def convert_cpsat_to_allocation_response(
     selected_items: list[str] = []
     for var_id, val in var_values.items():
         if val == 1 and var_id.startswith("select_"):
-            selected_items.append(var_id[len("select_"):])
+            selected_items.append(var_id[len("select_") :])
 
     item_map: dict[str, Item] = {item.id: item for item in original_request.items}
 

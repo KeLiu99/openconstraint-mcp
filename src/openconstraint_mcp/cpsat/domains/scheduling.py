@@ -171,9 +171,7 @@ def convert_scheduling_to_cpsat(
                     sense="==",
                     rhs=task.duration,
                 ),
-                metadata={
-                    "description": f"Task {task.id} duration = {task.duration}"
-                },
+                metadata={"description": f"Task {task.id} duration = {task.duration}"},
             )
         )
 
@@ -193,10 +191,7 @@ def convert_scheduling_to_cpsat(
                         rhs=0,
                     ),
                     metadata={
-                        "description": (
-                            f"Task {task.id} must start after "
-                            f"{dep_id} completes"
-                        )
+                        "description": (f"Task {task.id} must start after {dep_id} completes")
                     },
                 )
             )
@@ -213,12 +208,7 @@ def convert_scheduling_to_cpsat(
                         sense="<=",
                         rhs=task.deadline,
                     ),
-                    metadata={
-                        "description": (
-                            f"Task {task.id} must complete by "
-                            f"{task.deadline}"
-                        )
-                    },
+                    metadata={"description": (f"Task {task.id} must complete by {task.deadline}")},
                 )
             )
 
@@ -247,8 +237,7 @@ def convert_scheduling_to_cpsat(
                     ),
                     metadata={
                         "description": (
-                            f"Resource {resource.id} capacity limit "
-                            f"({resource.capacity})"
+                            f"Resource {resource.id} capacity limit ({resource.capacity})"
                         )
                     },
                 )
@@ -257,10 +246,7 @@ def convert_scheduling_to_cpsat(
     # --- No-overlap groups --------------------------------------------------
     for group in request.no_overlap_tasks:
         if len(group) >= 2:
-            durations = [
-                next(t.duration for t in request.tasks if t.id == tid)
-                for tid in group
-            ]
+            durations = [next(t.duration for t in request.tasks if t.id == tid) for tid in group]
             constraints.append(
                 ORToolsConstraint(
                     id=f"no_overlap_{'_'.join(group)}",
@@ -269,11 +255,7 @@ def convert_scheduling_to_cpsat(
                         start_vars=[f"start_{tid}" for tid in group],
                         duration_vars=durations,
                     ),
-                    metadata={
-                        "description": (
-                            f"Tasks {', '.join(group)} cannot overlap"
-                        )
-                    },
+                    metadata={"description": (f"Tasks {', '.join(group)} cannot overlap")},
                 )
             )
 
@@ -311,13 +293,9 @@ def convert_scheduling_to_cpsat(
             terms=[ORToolsLinearTerm(var="makespan", coef=1)],
         )
     elif request.objective == SchedulingObjective.MINIMIZE_COST:
-        raise ValueError(
-            "scheduling objective 'minimize_cost' is not yet supported"
-        )
+        raise ValueError("scheduling objective 'minimize_cost' is not yet supported")
     elif request.objective == SchedulingObjective.MINIMIZE_LATENESS:
-        raise ValueError(
-            "scheduling objective 'minimize_lateness' is not yet supported"
-        )
+        raise ValueError("scheduling objective 'minimize_lateness' is not yet supported")
 
     return ORToolsSolveRequest(
         mode="optimize" if objective else "satisfy",
@@ -343,18 +321,14 @@ def convert_cpsat_to_scheduling_response(
         return SolveSchedulingProblemResponse(
             status=result.status,
             solve_time_ms=result.solve_time_ms,
-            explanation=SchedulingExplanation(
-                summary=f"Problem is {result.status}"
-            ),
+            explanation=SchedulingExplanation(summary=f"Problem is {result.status}"),
         )
 
     if not result.solutions:
         return SolveSchedulingProblemResponse(
             status=result.status,
             solve_time_ms=result.solve_time_ms,
-            explanation=SchedulingExplanation(
-                summary="No solution available"
-            ),
+            explanation=SchedulingExplanation(summary="No solution available"),
         )
 
     solution = result.solutions[0]
@@ -363,9 +337,7 @@ def convert_cpsat_to_scheduling_response(
     schedule: list[TaskAssignment] = []
     for task in original_request.tasks:
         start_time = var_values.get(f"start_{task.id}", 0)
-        end_time = var_values.get(
-            f"end_{task.id}", start_time + task.duration
-        )
+        end_time = var_values.get(f"end_{task.id}", start_time + task.duration)
         schedule.append(
             TaskAssignment(
                 task_id=task.id,
@@ -382,25 +354,17 @@ def convert_cpsat_to_scheduling_response(
 
     summary_parts: list[str] = []
     if result.status == "optimal":
-        summary_parts.append(
-            f"Found optimal schedule completing in {makespan_val} time units"
-        )
+        summary_parts.append(f"Found optimal schedule completing in {makespan_val} time units")
     elif result.status in ("feasible", "timeout_best"):
-        summary_parts.append(
-            f"Found feasible schedule completing in {makespan_val} time units"
-        )
+        summary_parts.append(f"Found feasible schedule completing in {makespan_val} time units")
         if result.optimality_gap is not None:
-            summary_parts.append(
-                f"(gap: {result.optimality_gap:.2f}%)"
-            )
+            summary_parts.append(f"(gap: {result.optimality_gap:.2f}%)")
     else:
         summary_parts.append("Schedule found")
 
     summary_parts.append(f"with {len(schedule)} tasks")
     if original_request.resources:
-        summary_parts.append(
-            f"using {len(original_request.resources)} resources"
-        )
+        summary_parts.append(f"using {len(original_request.resources)} resources")
 
     return SolveSchedulingProblemResponse(
         status=result.status,
@@ -408,9 +372,7 @@ def convert_cpsat_to_scheduling_response(
         schedule=schedule,
         solve_time_ms=result.solve_time_ms,
         optimality_gap=result.optimality_gap,
-        explanation=SchedulingExplanation(
-            summary=" ".join(summary_parts)
-        ),
+        explanation=SchedulingExplanation(summary=" ".join(summary_parts)),
     )
 
 
