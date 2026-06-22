@@ -1,0 +1,21 @@
+{
+  "managed_by": "openconstraint-mcp",
+  "tool_version": "0.1.0",
+  "created_at": "2026-06-21T21:03:24.735709+00:00",
+  "verification": {
+    "status": "feasible",
+    "objective": null
+  },
+  "artifacts": [
+    {
+      "role": "model",
+      "path": "solution.py",
+      "sha256": "a057438c9c52e6d1598f969d8e1510e2319b943c9b549bbe8f6658daaaca3fd6"
+    },
+    {
+      "role": "problem",
+      "path": "problem.txt",
+      "sha256": "c85d91f5fa504630dbf7ae293b7dd88289467e93b8b414620b4178aa0336cfd3"
+    }
+  ]
+}

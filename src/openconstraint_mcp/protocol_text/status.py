@@ -35,40 +35,17 @@ SAVE_STAGES = (
     "MiniZinc finished; save decision made",
     "Save request complete",
 )
-
-ORTOOLS_SOLVE_STAGES = (
-    "Validating OR-Tools model",
-    "OR-Tools CP-SAT solve is running",
-    "OR-Tools finished; building result",
-    "Solve complete",
+CPSAT_PYTHON_STAGES = (
+    "Preparing CP-SAT Python source",
+    "Running CP-SAT Python in child process",
+    "Child finished; parsing result",
+    "CP-SAT Python execution complete",
 )
-
-BUDGET_ALLOCATION_STAGES = (
-    "Validating budget allocation request",
-    "OR-Tools CP-SAT solve is running",
-    "OR-Tools finished; building result",
-    "Budget allocation complete",
-)
-
-ASSIGNMENT_STAGES = (
-    "Validating assignment request",
-    "OR-Tools CP-SAT solve is running",
-    "OR-Tools finished; building result",
-    "Assignment complete",
-)
-
-SCHEDULING_STAGES = (
-    "Validating scheduling request",
-    "OR-Tools CP-SAT solve is running",
-    "OR-Tools finished; building result",
-    "Scheduling complete",
-)
-
-ROUTING_STAGES = (
-    "Validating routing request",
-    "OR-Tools CP-SAT solve is running",
-    "OR-Tools finished; building result",
-    "Routing complete",
+CPSAT_PYTHON_SAVE_STAGES = (
+    "Validating save request and CP-SAT Python source",
+    "Re-running CP-SAT Python to verify solution",
+    "Child finished; save decision made",
+    "Save complete",
 )
 
 

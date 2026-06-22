@@ -481,6 +481,50 @@ async def test_solve_constraint_problem_prompt_save_step_keeps_path_choice_clien
     assert "opens no file dialog" in normalized
 
 
+@pytest.mark.asyncio
+async def test_solve_cpsat_python_prompt_is_registered() -> None:
+    mcp = create_mcp_server()
+    prompts = await mcp.list_prompts()
+    names = {p.name for p in prompts}
+    assert "solve_cpsat_python" in names
+
+
+@pytest.mark.asyncio
+async def test_solve_cpsat_python_prompt_substitutes_problem() -> None:
+    text = await _get_prompt_text("solve_cpsat_python", {"problem": SAMPLE_PROBLEM})
+    assert SAMPLE_PROBLEM in text
+
+
+@pytest.mark.asyncio
+async def test_solve_cpsat_python_prompt_mentions_run_cpsat_python() -> None:
+    text = await _get_prompt_text("solve_cpsat_python", {"problem": SAMPLE_PROBLEM})
+    assert "run_cpsat_python" in text
+
+
+@pytest.mark.asyncio
+async def test_solve_cpsat_python_prompt_states_json_output_contract() -> None:
+    text = await _get_prompt_text("solve_cpsat_python", {"problem": SAMPLE_PROBLEM})
+    # Must describe the required JSON output format
+    assert '"status"' in text
+    assert '"solution"' in text
+    assert '"objective"' in text
+
+
+@pytest.mark.asyncio
+async def test_solve_cpsat_python_prompt_forbids_network_and_file_mutation() -> None:
+    text = await _get_prompt_text("solve_cpsat_python", {"problem": SAMPLE_PROBLEM})
+    lower = text.lower()
+    assert "network" in lower
+    assert "file" in lower
+
+
+@pytest.mark.asyncio
+async def test_solve_cpsat_python_prompt_states_local_child_process_execution() -> None:
+    text = await _get_prompt_text("solve_cpsat_python", {"problem": SAMPLE_PROBLEM})
+    lower = text.lower()
+    assert "child process" in lower or "subprocess" in lower or "local" in lower
+
+
 def test_solve_descriptions_state_checker_suffix_and_nested_report() -> None:
     # The protocol descriptions must state plainly that checking is a solve option,
     # requires a `.mzc`/`.mzc.mzn` checker on the path side, and returns the nested

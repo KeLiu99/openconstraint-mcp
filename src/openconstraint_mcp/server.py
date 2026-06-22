@@ -14,36 +14,6 @@ from anyio import to_thread
 from mcp.server.fastmcp import Context, FastMCP
 from mcp.types import CallToolResult, TextContent
 
-from .cpsat.core import solve_model as _solve_ortools_model
-from .cpsat.domains.allocation import (
-    SolveBudgetAllocationRequest,
-    SolveBudgetAllocationResponse,
-)
-from .cpsat.domains.allocation import (
-    solve_budget_allocation as _solve_budget_allocation,
-)
-from .cpsat.domains.assignment import (
-    SolveAssignmentProblemRequest,
-    SolveAssignmentProblemResponse,
-)
-from .cpsat.domains.assignment import (
-    solve_assignment_problem as _solve_assignment_problem,
-)
-from .cpsat.domains.routing import (
-    SolveRoutingProblemRequest,
-    SolveRoutingProblemResponse,
-)
-from .cpsat.domains.routing import (
-    solve_routing_problem as _solve_routing_problem,
-)
-from .cpsat.domains.scheduling import (
-    SolveSchedulingProblemRequest,
-    SolveSchedulingProblemResponse,
-)
-from .cpsat.domains.scheduling import (
-    solve_scheduling_problem as _solve_scheduling_problem,
-)
-from .cpsat.schemas import ORToolsSolveRequest, ORToolsSolveResult
 from .jobs import JobRegistry, JobRejectedError
 from .minizinc.core import (
     DEFAULT_CHECK_TIMEOUT_MS,
@@ -81,19 +51,17 @@ from .protocol_text.descriptions import (
     LIST_PORTFOLIO_JOBS_DESCRIPTION,
     LIST_SOLVE_JOBS_DESCRIPTION,
     MCP_SERVER_INSTRUCTIONS,
+    RUN_CPSAT_PYTHON_DESCRIPTION,
+    SAVE_VERIFIED_CPSAT_PYTHON_DESCRIPTION,
     SAVE_VERIFIED_MINIZINC_MODEL_DESCRIPTION,
-    SOLVE_ASSIGNMENT_PROBLEM_DESCRIPTION,
-    SOLVE_BUDGET_ALLOCATION_DESCRIPTION,
     SOLVE_CONSTRAINT_PROBLEM_PROMPT_DESCRIPTION,
+    SOLVE_CPSAT_PYTHON_PROMPT_DESCRIPTION,
     SOLVE_MINIZINC_FILES_DESCRIPTION,
     SOLVE_MINIZINC_MODEL_DESCRIPTION,
-    SOLVE_ORTOOLS_MODEL_DESCRIPTION,
-    SOLVE_ROUTING_PROBLEM_DESCRIPTION,
-    SOLVE_SCHEDULING_PROBLEM_DESCRIPTION,
     SUBMIT_PORTFOLIO_JOB_DESCRIPTION,
     SUBMIT_SOLVE_JOB_DESCRIPTION,
 )
-from .protocol_text.prompts import SOLVE_CONSTRAINT_PROBLEM_PROMPT
+from .protocol_text.prompts import SOLVE_CONSTRAINT_PROBLEM_PROMPT, SOLVE_CPSAT_PYTHON_PROMPT
 from .protocol_text.results import (
     SOLUTION_CHECK_NON_ADJUDICATION_NOTE,
     SOLVER_CAPABILITY_METADATA_NOTE,
@@ -102,6 +70,8 @@ from .protocol_text.results import (
     SOLVER_RUNTIME_CONFIG_CAUTION,
     STATS_PRESENTATION_REQUIREMENT,
 )
+from .pyexec.core import DEFAULT_PYEXEC_TIMEOUT_MS, CpsatPythonResult, run_cpsat_python
+from .pyexec.save import SaveVerifiedPythonResult, save_verified_cpsat_python
 from .runtime import RuntimeMissingError, get_runtime_status
 from .schemas import (
     CheckResult,
@@ -736,61 +706,6 @@ def create_mcp_server() -> FastMCP:
         await _status_finished(ctx, status.UNSAT_CORE_STAGES)
         return result
 
-    @mcp.tool(description=SOLVE_ORTOOLS_MODEL_DESCRIPTION)
-    @_as_mcp_error(ValueError)
-    async def solve_ortools_model(
-        model: ORToolsSolveRequest,
-        ctx: Context | None = None,
-    ) -> ORToolsSolveResult:
-        await _status_starting(ctx, status.ORTOOLS_SOLVE_STAGES)
-        result = await _run_blocking(functools.partial(_solve_ortools_model, model))
-        await _status_finished(ctx, status.ORTOOLS_SOLVE_STAGES)
-        return result
-
-    @mcp.tool(description=SOLVE_BUDGET_ALLOCATION_DESCRIPTION)
-    @_as_mcp_error(ValueError)
-    async def solve_budget_allocation(
-        request: SolveBudgetAllocationRequest,
-        ctx: Context | None = None,
-    ) -> SolveBudgetAllocationResponse:
-        await _status_starting(ctx, status.BUDGET_ALLOCATION_STAGES)
-        result = await _run_blocking(functools.partial(_solve_budget_allocation, request))
-        await _status_finished(ctx, status.BUDGET_ALLOCATION_STAGES)
-        return result
-
-    @mcp.tool(description=SOLVE_ASSIGNMENT_PROBLEM_DESCRIPTION)
-    @_as_mcp_error(ValueError)
-    async def solve_assignment_problem(
-        request: SolveAssignmentProblemRequest,
-        ctx: Context | None = None,
-    ) -> SolveAssignmentProblemResponse:
-        await _status_starting(ctx, status.ASSIGNMENT_STAGES)
-        result = await _run_blocking(functools.partial(_solve_assignment_problem, request))
-        await _status_finished(ctx, status.ASSIGNMENT_STAGES)
-        return result
-
-    @mcp.tool(description=SOLVE_SCHEDULING_PROBLEM_DESCRIPTION)
-    @_as_mcp_error(ValueError)
-    async def solve_scheduling_problem(
-        request: SolveSchedulingProblemRequest,
-        ctx: Context | None = None,
-    ) -> SolveSchedulingProblemResponse:
-        await _status_starting(ctx, status.SCHEDULING_STAGES)
-        result = await _run_blocking(functools.partial(_solve_scheduling_problem, request))
-        await _status_finished(ctx, status.SCHEDULING_STAGES)
-        return result
-
-    @mcp.tool(description=SOLVE_ROUTING_PROBLEM_DESCRIPTION)
-    @_as_mcp_error(ValueError)
-    async def solve_routing_problem(
-        request: SolveRoutingProblemRequest,
-        ctx: Context | None = None,
-    ) -> SolveRoutingProblemResponse:
-        await _status_starting(ctx, status.ROUTING_STAGES)
-        result = await _run_blocking(functools.partial(_solve_routing_problem, request))
-        await _status_finished(ctx, status.ROUTING_STAGES)
-        return result
-
     @mcp.tool(description=SUBMIT_SOLVE_JOB_DESCRIPTION)
     # Validation raises ValueError; a full bounded queue raises JobRejectedError
     # (a direct RuntimeError subclass, NOT in the default caught set). A gated
@@ -895,12 +810,57 @@ def create_mcp_server() -> FastMCP:
     def list_portfolio_jobs() -> list[PortfolioJobStatus]:
         return portfolios.list()
 
+    @mcp.tool(name="run_cpsat_python", description=RUN_CPSAT_PYTHON_DESCRIPTION)
+    @_as_mcp_error(ValueError)
+    async def run_cpsat_python_tool(
+        source: str,
+        timeout_ms: int = DEFAULT_PYEXEC_TIMEOUT_MS,
+        ctx: Context | None = None,
+    ) -> CpsatPythonResult:
+        await _status_starting(ctx, status.CPSAT_PYTHON_STAGES)
+        result = await _run_blocking(
+            functools.partial(run_cpsat_python, source, timeout_ms=timeout_ms)
+        )
+        await _status_finished(ctx, status.CPSAT_PYTHON_STAGES)
+        return result
+
+    @mcp.tool(name="save_verified_cpsat_python", description=SAVE_VERIFIED_CPSAT_PYTHON_DESCRIPTION)
+    @_as_mcp_error(ValueError)
+    async def save_verified_cpsat_python_tool(
+        source: str,
+        target_dir: str,
+        problem: str | None = None,
+        timeout_ms: int = DEFAULT_PYEXEC_TIMEOUT_MS,
+        overwrite: bool = False,
+        ctx: Context | None = None,
+    ) -> SaveVerifiedPythonResult:
+        await _status_starting(ctx, status.CPSAT_PYTHON_SAVE_STAGES)
+        result = await _run_blocking(
+            functools.partial(
+                save_verified_cpsat_python,
+                source,
+                target_dir=Path(target_dir),
+                problem=problem,
+                timeout_ms=timeout_ms,
+                overwrite=overwrite,
+            )
+        )
+        await _status_finished(ctx, status.CPSAT_PYTHON_SAVE_STAGES)
+        return result
+
     @mcp.prompt(
         name="solve_constraint_problem",
         description=SOLVE_CONSTRAINT_PROBLEM_PROMPT_DESCRIPTION,
     )
     def solve_constraint_problem(problem: str) -> str:
         return SOLVE_CONSTRAINT_PROBLEM_PROMPT.format(problem=problem)
+
+    @mcp.prompt(
+        name="solve_cpsat_python",
+        description=SOLVE_CPSAT_PYTHON_PROMPT_DESCRIPTION,
+    )
+    def solve_cpsat_python_prompt(problem: str) -> str:
+        return SOLVE_CPSAT_PYTHON_PROMPT.format(problem=problem)
 
     return mcp
 

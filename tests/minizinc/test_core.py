@@ -27,8 +27,6 @@ from openconstraint_mcp.minizinc.core import (
     MiniZincExecutionError,
     _run_managed_minizinc_cancellable,
     _solver_capabilities,
-    _terminate_process_tree,
-    _terminate_process_tree_windows,
     check_model,
     find_unsat_core,
     inspect_model,
@@ -2360,9 +2358,9 @@ def test_cancellable_runner_timeout_terminates_tree_and_flags_timed_out(
     fake = _FakePopen(stdout="partial\n", stderr="", timeout_first_communicate=True)
     _patch_popen(monkeypatch, fake)
     killed: list[tuple[int, int]] = []
-    monkeypatch.setattr("openconstraint_mcp.minizinc.core.os.getpgid", lambda _pid: 9999)
+    monkeypatch.setattr("openconstraint_mcp.proc.os.getpgid", lambda _pid: 9999)
     monkeypatch.setattr(
-        "openconstraint_mcp.minizinc.core.os.killpg",
+        "openconstraint_mcp.proc.os.killpg",
         lambda pgid, sig: killed.append((pgid, sig)),
     )
 
@@ -2398,107 +2396,3 @@ def test_cancellable_runner_wraps_oserror_as_execution_error(
             on_start=lambda _proc: None,
         )
     assert "install-runtime" in str(exc_info.value)
-
-
-@pytest.mark.skipif(sys.platform == "win32", reason="POSIX process-group termination")
-def test_terminate_process_tree_signals_group_when_running(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    fake = _FakePopen(returncode=0)  # poll() is None until wait/kill — a live handle
-    killed: list[tuple[int, int]] = []
-    monkeypatch.setattr("openconstraint_mcp.minizinc.core.os.getpgid", lambda _pid: 5555)
-    monkeypatch.setattr(
-        "openconstraint_mcp.minizinc.core.os.killpg",
-        lambda pgid, sig: killed.append((pgid, sig)),
-    )
-
-    _terminate_process_tree(fake)  # type: ignore[arg-type]
-
-    assert killed[0] == (5555, signal.SIGTERM)
-    assert fake.wait_calls >= 1
-
-
-@pytest.mark.skipif(sys.platform == "win32", reason="POSIX process-group termination")
-def test_terminate_process_tree_is_noop_after_terminal(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    # An already-exited handle (poll() returns a code) must not be signalled again.
-    fake = _FakePopen(returncode=0)
-    fake.returncode = 0  # already terminal
-    killed: list[tuple[int, int]] = []
-    monkeypatch.setattr(
-        "openconstraint_mcp.minizinc.core.os.killpg",
-        lambda pgid, sig: killed.append((pgid, sig)),
-    )
-
-    _terminate_process_tree(fake)  # type: ignore[arg-type]
-
-    assert killed == []
-
-
-@pytest.mark.skipif(sys.platform == "win32", reason="POSIX process-group termination")
-def test_terminate_process_tree_is_noop_when_group_already_gone(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    # A race/cancel-before-start: the process is gone before getpgid, which raises
-    # ProcessLookupError; termination degrades to a no-op rather than crashing.
-    fake = _FakePopen(returncode=0)
-    killed: list[tuple[int, int]] = []
-
-    def _gone(_pid: int) -> int:
-        raise ProcessLookupError
-
-    monkeypatch.setattr("openconstraint_mcp.minizinc.core.os.getpgid", _gone)
-    monkeypatch.setattr(
-        "openconstraint_mcp.minizinc.core.os.killpg",
-        lambda pgid, sig: killed.append((pgid, sig)),
-    )
-
-    _terminate_process_tree(fake)  # type: ignore[arg-type]
-
-    assert killed == []
-
-
-# The Windows branch is exercised directly (not via the platform-dispatching
-# _terminate_process_tree) so the control-flow regression is caught on the Linux CI
-# host, where TerminateProcess/taskkill cannot run for real.
-def test_terminate_process_tree_windows_kills_tree_via_taskkill_when_parent_exits_fast(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    # Regression: proc.terminate() (TerminateProcess) reaps only the parent, so
-    # gating taskkill behind the parent OUTLIVING the grace window meant the happy
-    # path returned having orphaned the solver child. taskkill /T /F must run while
-    # the parent is alive to anchor the tree walk, not as a post-wait escalation.
-    fake = _FakePopen(returncode=0)  # poll() is None → live; wait() returns at once
-    run_calls: list[list[str]] = []
-
-    def _fake_run(cmd: Any, **_kwargs: Any) -> subprocess.CompletedProcess[Any]:
-        run_calls.append(list(cmd))
-        return subprocess.CompletedProcess(cmd, 0)
-
-    monkeypatch.setattr("openconstraint_mcp.minizinc.core.subprocess.run", _fake_run)
-
-    _terminate_process_tree_windows(fake, grace_seconds=0.01)  # type: ignore[arg-type]
-
-    assert run_calls == [["taskkill", "/T", "/F", "/PID", "4321"]]
-    assert fake.terminate_calls == 0  # whole-tree kill, not a parent-only terminate
-
-
-def test_terminate_process_tree_windows_falls_back_to_terminate_when_taskkill_unavailable(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    # If taskkill is missing/unrunnable (OSError), still attempt it first, then
-    # degrade to terminating the parent rather than skipping teardown entirely.
-    fake = _FakePopen(returncode=0)
-    attempted: list[str] = []
-
-    def _no_taskkill(_cmd: Any, **_kwargs: Any) -> subprocess.CompletedProcess[Any]:
-        attempted.append("run")
-        raise FileNotFoundError("taskkill not found")
-
-    monkeypatch.setattr("openconstraint_mcp.minizinc.core.subprocess.run", _no_taskkill)
-
-    _terminate_process_tree_windows(fake, grace_seconds=0.01)  # type: ignore[arg-type]
-
-    assert attempted == ["run"]  # taskkill attempted before the fallback
-    assert fake.terminate_calls == 1  # then fell back to the parent terminate

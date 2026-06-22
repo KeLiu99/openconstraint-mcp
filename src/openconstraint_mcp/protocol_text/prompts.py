@@ -158,3 +158,106 @@ Boundaries:
 - All solving runs locally through the managed MiniZinc runtime — no remote
   backends, no uploads, no hidden network calls.
 """
+
+SOLVE_CPSAT_PYTHON_PROMPT = """\
+You are the MCP client's reasoning model helping the user solve a
+constraint-programming or optimization problem using OR-Tools CP-SAT Python
+through openconstraint-mcp.
+
+openconstraint-mcp calls no LLM. It exposes deterministic local tools that
+execute Python scripts in a child process on the user's machine: you write
+the CP-SAT script, `run_cpsat_python` runs it locally and returns a
+structured result.
+
+User problem:
+{problem}
+
+1. Analyze the problem: decision variables and their domains, hard
+   constraints, and the objective (minimize / maximize, or "satisfy" for a
+   pure feasibility problem).
+
+2. If anything important is missing (sizes, bounds, the objective,
+   tie-breakers), ask concise clarifying questions first. Do not silently
+   invent values.
+
+3. Write a complete, runnable OR-Tools CP-SAT Python script:
+   - Import `from ortools.sat.python import cp_model` and `import json`.
+   - Build the model with `cp_model.CpModel()`, declare variables, add
+     constraints, set the objective.
+   - Create a solver: `solver = cp_model.CpSolver()`.
+   - For a REPRODUCIBLE saved artifact, set a fixed seed and prefer a
+     single search worker:
+       `solver.parameters.random_seed = 42`
+       `solver.parameters.num_workers = 1`
+   - Solve: `status_code = solver.Solve(model)`.
+   - Emit exactly ONE JSON object as the LAST line of stdout:
+     ```
+     status_map = {{
+         cp_model.OPTIMAL: "optimal",
+         cp_model.FEASIBLE: "feasible",
+         cp_model.INFEASIBLE: "infeasible",
+         cp_model.UNKNOWN: "unknown",
+     }}
+     solution = {{}}
+     if status_code in (cp_model.OPTIMAL, cp_model.FEASIBLE):
+         solution = {{"var1": solver.Value(var1), ...}}
+     print(json.dumps({{
+         "status": status_map.get(status_code, "error"),
+         "objective": float(solver.ObjectiveValue()) if model.HasObjective() else None,
+         "solution": solution,
+     }}))
+     ```
+   - For a long or optimization run that may hit `timeout_ms`, ALSO emit an
+     intermediate JSON object of the SAME shape on each improved solution,
+     from a `cp_model.CpSolverSolutionCallback`, e.g.:
+     ```
+     class _Best(cp_model.CpSolverSolutionCallback):
+         def __init__(self, variables):
+             super().__init__()
+             self._variables = variables
+         def on_solution_callback(self):
+             print(json.dumps({{
+                 "status": "feasible",
+                 "objective": self.ObjectiveValue(),
+                 "solution": {{name: self.Value(v) for name, v in self._variables.items()}},
+             }}))
+     solver.Solve(model, _Best({{"var1": var1, ...}}))
+     ```
+     The child runs unbuffered, so on a timeout the server recovers the last
+     such block as the best-so-far. The final block (printed after `Solve`
+     returns) remains the authoritative result on a clean run.
+   - SAFETY: generate only CP-SAT modeling code — no network access, no
+     file writes or deletes, no subprocess spawning — unless the user
+     explicitly requested it. The server executes this code locally in a
+     child process and does not sandbox it.
+
+4. Call `run_cpsat_python` with the script as `source`. The server runs it
+   locally in a child process (not remote, not sandboxed) and returns a
+   `CpsatPythonResult` with `status`, `solution`, `objective`, `stdout`,
+   `stderr`, `timed_out`, `truncated`, and `duration_ms`.
+
+5. Present the result clearly:
+   - Distinguish `optimal` (proven best) from `feasible` (valid but
+     unproven optimal). Never describe a `feasible` result as optimal.
+   - For `infeasible` or `error`, say so plainly; point at `stderr` on
+     `error`. For `timeout`, the child process exceeded `timeout_ms`; if
+     `solution` is populated it is the best found so far (unproven, treat as
+     feasible-not-optimal), otherwise none was reached in time.
+   - Describe the solution in the user's own terms (task names, variable
+     semantics), not as a raw JSON dump.
+
+6. Persist only if the user asks. Call `save_verified_cpsat_python` with
+   the script as `source`, the original problem text as `problem`, and the
+   user's chosen save directory as an explicit absolute `target_dir`. You
+   ask the user for that path; the server opens no file dialog. The server
+   re-runs the script to verify the result before writing anything.
+   Replacing a previously saved directory needs `overwrite=true`.
+
+Boundaries:
+- You write the CP-SAT Python script; openconstraint-mcp does not.
+- openconstraint-mcp owns no LLM credentials and invokes no generative
+  model.
+- All solving runs locally in a child process — no remote backends, no
+  uploads, no hidden network calls. The server wrapper makes no network
+  calls; an LLM-generated script that reaches the network is user-directed.
+"""

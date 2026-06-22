@@ -5,10 +5,8 @@
 A local-first [Model Context Protocol](https://modelcontextprotocol.io) server for
 constraint programming and optimization. `openconstraint-mcp` gives an MCP client a
 deterministic way to compile-check and solve [MiniZinc](https://www.minizinc.org/)
-models on a **managed** solver runtime, **plus** structured zero-install solving
-via Google OR-Tools CP-SAT running entirely in-process — controlled by this project,
-not your system install — exposing open-source solvers (OR-Tools CP-SAT by default,
-Chuffed as an optional verifier) over MCP stdio.
+models on a **managed** solver runtime, exposing open-source solvers (OR-Tools CP-SAT
+by default, Chuffed as an optional verifier) over MCP stdio.
 
 Constraint problems — scheduling, rostering, assignment, routing, production
 planning, inventory — are exactly where a language model is most likely to produce an
@@ -138,10 +136,9 @@ The package exposes five commands:
 ## MCP tools
 
 The stdio server exposes two runtime-introspection tools, a model-check tool, a
-model-inspection tool, an execution tool, an unsat-core diagnostic tool, five
-**native OR-Tools CP-SAT** tools (below), and background/portfolio job tools —
-each of the MiniZinc tools in an **inline-source** form (below) and a **path-based
-file** sibling ([Path-based file tools](#path-based-file-tools)) — plus a
+model-inspection tool, an execution tool, an unsat-core diagnostic tool, and
+background/portfolio job tools — each of the MiniZinc tools in an **inline-source**
+form (below) and a **path-based file** sibling ([Path-based file tools](#path-based-file-tools)) — plus a
 verified-save tool that persists a successful inline workflow to a local
 project directory. The two solve
 tools also accept optional solution checkers, so a normal solve can validate each
@@ -816,60 +813,6 @@ core (raw `stdout` stays authoritative).
 
 [License](#license) · 
 
-The server exposes **five** native OR-Tools CP-SAT tools that require **no** managed-runtime
-download — they solve in-process via the bundled `ortools` Python package:
-
-| Tool | Purpose |
-| --- | --- |
-| `solve_ortools_model` | General structured constraint / optimization model with 9 constraint kinds |
-| `solve_budget_allocation` | Knapsack / budget allocation (maximize value / count, minimize cost) |
-| `solve_assignment_problem` | Task-to-agent assignment (minimize cost, maximize assignments, balance load) |
-| `solve_scheduling_problem` | Project scheduling with makespan minimization, resources, dependencies |
-| `solve_routing_problem` | TSP routing via circuit constraints (VRP deferred) |
-
-Each domain tool accepts a high-level problem description and returns a
-domain-specific result with an explanation.  All five share the same in-process
-CP-SAT engine — no subprocess, no MiniZinc runtime, no network.
-
-### Native CP-SAT vs. MiniZinc
-
-| | Native CP-SAT (`solve_ortools_model` family) | MiniZinc (`solve_minizinc_model` family) |
-| --- | --- | --- |
-| **Install** | Zero-install — `ortools` is a core wheel dependency | Requires `install-runtime` (one-time download) |
-| **Modeling** | Structured Pydantic request (variables, constraints, objective) | Full MiniZinc language (expressions, comprehensions, predicates) |
-| **Solvers** | CP-SAT only | OR-Tools CP-SAT, Chuffed, Gecode, and others |
-| **Verification** | — | Solution checkers, unsat-core diagnostics |
-| **Use case** | Common structured problems, zero-install first run | Expressive / complex models, independent verification pass |
-
-**MiniZinc is not deprecated.** The two paths coexist: use native CP-SAT for
-structured common problems with zero install overhead; use MiniZinc when you need
-richer expressiveness (global constraints not in the 9-kind set, comprehensions,
-nested predicates) or an independent verification of a CP-SAT result.
-
-### Nine constraint kinds (`solve_ortools_model`)
-
-`linear` (sum coef·var ≤/≥/= rhs), `all_different`, `element`, `table`,
-`cumulative` (resource capacity over time), `circuit` (single directed tour),
-`no_overlap` (disjunctive scheduling), `implication` (bool var → constraint), and
-`reservoir` (inventory with level changes).  All coefficients and bounds are
-integers; domain tools scale floats (money ×100, etc.) before entering the core.
-
-### Example: knapsack
-
-```python
-# In your MCP client, call solve_budget_allocation:
-{
-  "items": [
-    {"id": "A", "cost": 4, "value": 6},
-    {"id": "B", "cost": 3, "value": 5},
-    {"id": "C", "cost": 2, "value": 3}
-  ],
-  "budgets": [{"resource": "money", "limit": 5}],
-  "objective": "maximize_value"
-}
-# → selects B + C (cost 5, value 8), status "optimal"
-```
-
 ### Progress and status notifications
 
 The nine long-running tools (`check_minizinc_model` / `check_minizinc_files`,
@@ -897,9 +840,93 @@ to the connected client; nothing changes in any tool's input schema, output
 schema, or result semantics, and a client that supports neither channel simply
 sees the final result as before.
 
+## CP-SAT Python execution path
+
+In addition to the MiniZinc declarative path, `openconstraint-mcp` exposes a
+second solving path: the client's LLM writes OR-Tools CP-SAT Python, and the
+server runs it in a **local child process**.
+
+### Tools
+
+- **`run_cpsat_python(source: str, timeout_ms: int = 30000)`** — execute
+  LLM-generated OR-Tools CP-SAT Python source in a bounded child process and
+  return a `CpsatPythonResult`. The script must emit a single JSON object as
+  its last stdout line:
+
+  ```json
+  {"status": "optimal", "objective": 42.0, "solution": {"x": 3, "y": 7}}
+  ```
+
+  Valid `status` values: `optimal`, `feasible`, `infeasible`, `unknown`,
+  `error`. Use the `solve_cpsat_python` prompt to generate conforming scripts.
+
+  The child process runs under the server's own Python interpreter (the
+  project venv, which already ships `ortools`), launched unbuffered (`-u`).
+  Output beyond 1 MB is truncated and the child killed. Returns
+  `CpsatPythonResult`: `status`, `solution`, `objective`, `stdout`, `stderr`,
+  `return_code` (null on timeout), `timed_out`, `truncated`, `duration_ms`.
+
+  **Partial result on timeout.** A long or optimization run can also print an
+  intermediate JSON object of the same shape on each improved solution (from a
+  `cp_model.CpSolverSolutionCallback`). Because the child is unbuffered, the
+  last such block survives the timeout kill: on `status="timeout"` the
+  server recovers it into `solution`/`objective` as the best-so-far (unproven —
+  treat as feasible, not optimal), or leaves them null if none was printed in
+  time. On a clean run the final block (printed after `Solve` returns) is the
+  authoritative result.
+
+- **`save_verified_cpsat_python(source, target_dir, problem=None, timeout_ms=…, overwrite=False)`**
+  — re-run `source` and persist it to a local directory only when the re-run
+  yields a verified solution (`status` in `optimal`/`feasible` AND a non-null
+  `solution`). `target_dir` must be an explicit absolute local path; the
+  server never opens a file dialog. Fixed filenames: `solution.py`,
+  optionally `problem.txt`, and a `.openconstraint-model.json` manifest.
+  Overwrite is marker-gated: a non-empty directory is replaced wholesale
+  only when it holds a prior save's manifest, `overwrite=true` is passed,
+  and it contains no untracked files. Returns `SaveVerifiedPythonResult`
+  with `saved` (bool, derived from `status`), file list, and run details.
+
+### Security posture
+
+**The server executes user-provided Python locally. It is not sandboxed.**
+Timeout + output-cap + process-tree kill is a **robustness** boundary, not
+a security sandbox. The child is also launched with its stdin closed
+(`DEVNULL`) so a script that reads `input()`/`sys.stdin` gets an immediate
+EOF instead of consuming the server's JSON-RPC stream when running over
+stdio. There is no AST filtering, no network blocking, no import allowlist.
+This tool is local-only; a cloud/multi-tenant deployment would require a
+real sandbox. The **server wrapper** makes no network calls,
+but the executed child process is arbitrary code.
+
+### Example scripts
+
+`examples/cpsat_python/` holds reference scripts with the canonical emit
+snippet:
+
+- **`examples/cpsat_python/assignment.py`** — 4 workers × 4 tasks, maximize total score.
+- **`examples/cpsat_python/scheduling.py`** — 3 tasks on a single machine, minimize makespan.
+
+Both can be run standalone (`python examples/cpsat_python/assignment.py`) and
+are used as integration-test anchors for `run_cpsat_python`.
+
+### MiniZinc vs. CP-SAT Python
+
+| | MiniZinc path | CP-SAT Python path |
+|---|---|---|
+| Input | Declarative model (`.mzn`) | Executable Python (`ortools`) |
+| Execution | Managed MiniZinc runtime | Local child process |
+| Install | `install-runtime` needed | Zero-install (ortools bundled) |
+| Sandboxing | Runtime reads model, no exec | **Not sandboxed** |
+| LLM fluency | High (MiniZinc is LLM-friendly) | High (Python is LLM-friendly) |
+
+Use MiniZinc for declarative, verifiable models where the managed runtime
+provides the execution boundary. Use the CP-SAT Python path when the problem
+is naturally imperative, needs custom Python data structures, or you prefer
+direct OR-Tools APIs.
+
 ## MCP prompts
 
-The stdio server also exposes one MCP prompt for client-side LLMs to use:
+The stdio server exposes two MCP prompts for client-side LLMs:
 
 - **`solve_constraint_problem(problem: str)`** — a guided template for the
   MCP client's LLM. Given a natural-language constraint or optimization
@@ -951,6 +978,34 @@ The stdio server also exposes one MCP prompt for client-side LLMs to use:
   *client's* LLM should propose a MiniZinc model; the model is then
   verified by the local managed MiniZinc runtime via
   `solve_minizinc_model`. `LLM proposes, local MiniZinc verifies.`
+
+- **`solve_cpsat_python(problem: str)`** — a guided template for the MCP
+  client's LLM to write OR-Tools CP-SAT Python and run it via
+  `run_cpsat_python`. The prompt instructs the client's model to:
+
+  1. Identify decision variables, domains, constraints, and the objective.
+  2. Ask concise clarifying questions if the problem is underspecified.
+  3. Write a complete, runnable OR-Tools CP-SAT Python script that emits
+     the required JSON object (`{"status", "objective", "solution"}`) as its
+     last stdout line, using `status_map` to translate `cp_model.OPTIMAL`
+     etc. to vocabulary strings. For reproducible saved artifacts, set a
+     fixed `solver.parameters.random_seed` and prefer a single search
+     worker. **Safety instruction:** generate only CP-SAT modeling code —
+     no network access, no file writes or deletes, no subprocess spawning —
+     unless the user explicitly asked. The server executes this code locally
+     and does not sandbox it.
+  4. Call `run_cpsat_python` with the script as `source`.
+  5. Present the `CpsatPythonResult`: distinguish `optimal` (proven best)
+     from `feasible` (valid but not proven optimal); point at `stderr` on
+     `error`; explain `timeout` clearly.
+  6. Optionally — only when the user asks — call `save_verified_cpsat_python`
+     with the script and an explicit absolute `target_dir`. The client asks
+     the user for that path; the server opens no file dialog and re-runs the
+     script to verify before writing anything.
+
+  The server makes no LLM call. The prompt structures how the *client's*
+  LLM should write the script; the script is then executed locally by
+  `run_cpsat_python`. `LLM writes, server executes locally.`
 
 ## Example models
 

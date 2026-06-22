@@ -14,10 +14,6 @@ _LOCAL_ONLY_GUARANTEE = (
     "Runs locally through the managed runtime: no network, no LLM, no telemetry."
 )
 
-_CPSAT_NATIVE = (
-    "native in-process OR-Tools CP-SAT — no MiniZinc runtime, no subprocess, no network."
-)
-
 _UNKNOWN_JOB_ID_ERROR = "An unknown `job_id` is an MCP error."
 
 _NO_ARGS_LIST_TOOL = "Takes no arguments; never downloads or runs anything."
@@ -82,10 +78,17 @@ MCP_SERVER_INSTRUCTIONS = (
     "markers, not a completion percentage, so never render a percent bar. "
     "MiniZinc tools use the managed local MiniZinc runtime; never a remote "
     "solver or a bare PATH minizinc. "
-    "For structured/common problems, prefer solve_ortools_model "
-    "(native in-process Google OR-Tools CP-SAT, no MiniZinc runtime needed — "
-    "zero-install, still local and offline); for richer expressiveness or an "
-    "independent verification pass, use MiniZinc."
+    "For richer expressiveness or an independent verification pass, use MiniZinc. "
+    "A second, parallel path executes OR-Tools CP-SAT Python locally: use the "
+    "`solve_cpsat_python` prompt to guide the client LLM to write a conforming "
+    "script, then run it with `run_cpsat_python` (bounded child process, timeout "
+    "+ 1 MB output cap + tree-kill, returns `CpsatPythonResult`), and persist a "
+    "verified solution with `save_verified_cpsat_python`. The server executes "
+    "user-provided Python locally — it is NOT sandboxed; this is a local-only "
+    "tool. The server wrapper makes no network calls, but the executed child is "
+    "arbitrary code. Use MiniZinc for declarative/verifiable models; use the "
+    "CP-SAT Python path for imperative logic, custom data structures, or when "
+    "the managed MiniZinc runtime is not installed."
 )
 
 CHECK_RUNTIME_DESCRIPTION = "Report whether the managed MiniZinc runtime is installed."
@@ -474,6 +477,26 @@ LIST_PORTFOLIO_JOBS_DESCRIPTION = (
     + _NO_ARGS_LIST_TOOL
 )
 
+RUN_CPSAT_PYTHON_DESCRIPTION = (
+    "Execute LLM-generated OR-Tools CP-SAT Python source in a bounded child "
+    "process and return a structured CpsatPythonResult. The script runs under "
+    "the same Python interpreter as the server, with `ortools` and the stdlib "
+    "available. It MUST emit a single JSON object to stdout as its last line: "
+    '`{"status": "<status>", "objective": <float|null>, "solution": {<str: val>}}`. '
+    "Valid `status` values: `optimal`, `feasible`, `infeasible`, `unknown`, `error`. "
+    "Use the `solve_cpsat_python` prompt to generate conforming scripts. "
+    "Returns a CpsatPythonResult: `status` (one of the above, or `timeout` if the "
+    "process exceeded `timeout_ms`), `solution` (the parsed dict or null), "
+    "`objective` (parsed float/int or null), `stdout`, `stderr`, `return_code` "
+    "(null on timeout), `timed_out`, `truncated` (output exceeded 1 MB cap), "
+    "`duration_ms`. A non-zero exit code, missing/unparseable JSON, or an "
+    'off-vocabulary status string all yield `status="error"` with details in '
+    "`stderr`/`stdout`. Output beyond 1 MB is truncated and the child killed. "
+    "On `timeout`, `solution`/`objective` carry the last intermediate result "
+    "block the script printed (the child runs unbuffered, so a best-so-far "
+    "emitted from a CpSolverSolutionCallback survives), else null. " + _LOCAL_ONLY_GUARANTEE
+)
+
 SOLVE_CONSTRAINT_PROBLEM_PROMPT_DESCRIPTION = (
     "Guide the MCP client's LLM through translating a natural-language "
     "constraint or optimization problem into MiniZinc and running it "
@@ -483,73 +506,39 @@ SOLVE_CONSTRAINT_PROBLEM_PROMPT_DESCRIPTION = (
     "manually — never via a bare PATH-based minizinc)."
 )
 
-SOLVE_BUDGET_ALLOCATION_DESCRIPTION = (
-    "Solve a high-level budget allocation / knapsack problem using "
-    + _CPSAT_NATIVE
-    + " Takes a ``SolveBudgetAllocationRequest`` (``items`` with cost/value/"
-    "resource-usage/dependencies/conflicts, per-resource ``budgets``, optional "
-    "value/cost/count bounds) and an ``objective`` of ``maximize_value`` | "
-    "``maximize_count`` | ``minimize_cost``. Float costs and values are scaled to "
-    "integers internally (a power of ten preserving each input's precision) so "
-    "results stay exact. Returns the selected items, totals, per-budget "
-    "usage/slack, optimality gap, and an explanation. Use for structured "
-    "knapsack / capital-budgeting / portfolio-selection problems. "
-    + _LOCAL_ONLY_GUARANTEE.replace("managed runtime", "OR-Tools CP-SAT (in-process)")
+SAVE_VERIFIED_CPSAT_PYTHON_DESCRIPTION = (
+    "Re-run a CP-SAT Python script and persist it to a LOCAL directory ONLY "
+    "when the re-run yields a verified solution (`status` in `optimal`/`feasible` "
+    "AND a non-empty `solution` dict). The server trusts no prior claim of "
+    "success: it runs `source` again and saves only on a verified result. "
+    "`target_dir` must be an EXPLICIT ABSOLUTE local directory whose parent "
+    "exists; the server never opens a file dialog. "
+    "Fixed filenames: `solution.py` (the script); `problem.txt` only when "
+    "`problem` (the user's original natural-language problem text) is supplied; "
+    "and a `.openconstraint-model.json` manifest recording tool version, "
+    "timestamp, verification summary, and per-file sha256 hashes. "
+    "Overwrite is MARKER-GATED: a new or empty path is written directly; a "
+    "non-empty directory is replaced wholesale (staged sibling + atomic swap) "
+    "only when it holds a prior save's manifest marker, `overwrite=true` is "
+    "passed, and it contains no files the prior save did not write; anything "
+    "else is refused with an actionable error and nothing is touched. "
+    "Returns a SaveVerifiedPythonResult: `saved` (bool computed from `status`), "
+    "`status` (the re-run status), `target_dir` (absolute path, null on "
+    "non-save), `reason` (null on save), `solution`, `objective`, `stdout`, "
+    "`stderr`, `timed_out`, `truncated`, `duration_ms`, `files` (role, bare "
+    "filename, sha256 — only on save). A non-verified run returns `saved=False` "
+    "with `reason` and writes NOTHING; path/argument problems are MCP errors. "
+    "NOTE: there is no independent solution checker (unlike the MiniZinc save "
+    "tool) — 'verified' means only that this re-run produced a feasible/optimal "
+    "status. CP-SAT's nondeterminism may yield a different (but still valid) "
+    "solution from the prior run; the save gate checks status, not "
+    "solution-equality. " + _LOCAL_ONLY_GUARANTEE
 )
 
-SOLVE_ASSIGNMENT_PROBLEM_DESCRIPTION = (
-    "Solve a high-level task-to-agent assignment problem using "
-    + _CPSAT_NATIVE
-    + " Takes a ``SolveAssignmentProblemRequest`` (``agents`` with capacity/skills/"
-    "cost-multiplier, ``tasks`` with required-skills/duration/priority, optional "
-    "``cost_matrix`` [task_i][agent_j], ``force_assign_all``) and an ``objective`` "
-    "of ``minimize_cost`` | ``maximize_assignments`` | ``balance_load``. Skill "
-    "mismatches are forbidden, capacity caps enforced, and float costs scaled to "
-    "integers (x100). Returns assignments (task→agent, cost), unassigned tasks, "
-    "per-agent load, total cost, optimality gap, and an explanation. "
-    + _LOCAL_ONLY_GUARANTEE.replace("managed runtime", "OR-Tools CP-SAT (in-process)")
-)
-
-SOLVE_SCHEDULING_PROBLEM_DESCRIPTION = (
-    "Solve a high-level scheduling problem using "
-    + _CPSAT_NATIVE
-    + " Currently supports the ``minimize_makespan`` objective only "
-    "(``minimize_cost``/``minimize_lateness`` return a clear ``ValueError``). Takes "
-    "a ``SolveSchedulingProblemRequest`` (``tasks`` with duration/resource-usage/"
-    "dependencies/earliest-start/deadline/priority, ``resources`` with "
-    "capacity/cost, an optional ``max_makespan`` bound, ``no_overlap_tasks`` "
-    "groups). Returns the makespan, the per-task schedule (start/end), optimality "
-    "gap, and an explanation. "
-    + _LOCAL_ONLY_GUARANTEE.replace("managed runtime", "OR-Tools CP-SAT (in-process)")
-)
-
-SOLVE_ROUTING_PROBLEM_DESCRIPTION = (
-    "Solve a high-level routing problem using "
-    + _CPSAT_NATIVE
-    + " Currently supports single-vehicle TSP via circuit constraints; "
-    "multi-vehicle VRP is deferred and raises a clear ``ValueError``. Takes a "
-    "``SolveRoutingProblemRequest`` (``locations`` with optional ``coordinates`` "
-    "for Euclidean distance, service-time/time-window/demand, an optional "
-    "``distance_matrix``, optional ``vehicles``, ``force_visit_all``) and the "
-    "``minimize_distance`` objective. Returns the ordered route(s) and total "
-    "distance, optimality gap, and an explanation. "
-    + _LOCAL_ONLY_GUARANTEE.replace("managed runtime", "OR-Tools CP-SAT (in-process)")
-)
-
-SOLVE_ORTOOLS_MODEL_DESCRIPTION = (
-    "Solve a structured constraint/optimization model using "
-    + _CPSAT_NATIVE
-    + " Takes an ``ORToolsSolveRequest`` with ``mode`` (satisfy/optimize), "
-    "``variables`` (bool or integer domain), and optional ``constraints`` of nine "
-    "kinds: ``linear`` (sum coef*var sense rhs), ``all_different``, ``element``, "
-    "``table``, ``cumulative``, ``circuit``, ``no_overlap``, ``implication`` "
-    "(references a **template-only** linear constraint — enforced only under its "
-    "condition, not standalone), and ``reservoir``. For optimization pass an "
-    "``objective`` (single, or a list for lexicographic multi-objective by "
-    "``priority`` — smaller priority solved first); ``search`` exposes "
-    "``timeout_ms``, ``num_workers``, ``random_seed``, ``max_solutions``, and "
-    "``warm_start``. Returns ``solutions``, the (integer) objective value(s), "
-    "optimality gap, and solve time. PREFER this over MiniZinc for "
-    "structured/common/zero-install problems; prefer MiniZinc when you need richer "
-    "expressiveness or an independent verification pass."
+SOLVE_CPSAT_PYTHON_PROMPT_DESCRIPTION = (
+    "Guide the MCP client's LLM through writing a CP-SAT Python script "
+    "that conforms to the run_cpsat_python output contract and running it "
+    "via run_cpsat_python. Use when the user's problem is better expressed "
+    "in Python than in MiniZinc (custom data structures, imperative "
+    "pre-processing, NumPy-style indexing)."
 )
