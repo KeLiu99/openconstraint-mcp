@@ -37,10 +37,10 @@ from .minizinc.core import (
     DEFAULT_SOLVER,
     _enforce_solver_capabilities,
     _solve_extra_args,
-    _terminate_process_tree,
     _validate_model_and_timeout,
     solve_model_cancellable,
 )
+from .proc import terminate_process_tree as _terminate_process_tree
 
 # _RESULT_BEARING_STATES is imported, not re-declared: it is the load-bearing
 # D1.9 invariant ("result present iff state in this set") and schemas owns it, so

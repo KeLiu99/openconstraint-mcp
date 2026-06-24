@@ -36,8 +36,9 @@ integration:
 lint:
     uv run ruff check .
 
-# Auto-format with ruff (writes changes in-place).
+# Auto-format with ruff: apply lint autofixes (e.g. import sorting), then format.
 format:
+    uv run ruff check --fix .
     uv run ruff format .
 
 # Type-check the package source.

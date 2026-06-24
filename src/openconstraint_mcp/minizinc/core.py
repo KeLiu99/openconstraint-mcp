@@ -1,18 +1,24 @@
 from __future__ import annotations
 
-import contextlib
 import json
-import os
-import signal
 import subprocess
-import sys
 import tempfile
 import time
 from collections.abc import Callable, Sequence
 from pathlib import Path
 from typing import Any, NamedTuple
 
+from ..proc import (
+    CREATION_FLAGS as _CREATION_FLAGS,
+)
+from ..proc import (
+    START_NEW_SESSION as _START_NEW_SESSION,
+)
+from ..proc import (
+    terminate_process_tree as _terminate_process_tree,
+)
 from ..runtime import RuntimeMissingError, get_minizinc_binary, is_runtime_installed
+from ..save_target import validate_save_target
 from ..schemas import (
     CheckerReport,
     CheckerStatus,
@@ -29,7 +35,7 @@ from ..schemas import (
     UnsatCoreConstraint,
     UnsatCoreResult,
 )
-from .artifacts import validate_save_target, write_verified_model_dir
+from .artifacts import write_verified_model_dir
 from .checker import _parse_checker_stream
 from .interface import parse_model_interface
 from .stream import _parse_solve_stream
@@ -84,22 +90,6 @@ _SOLVE_STREAM_ARGS: tuple[str, ...] = (
     "json",
     "--output-objective",
 )
-
-# Launch the cancellable child as the leader of its own process group/session so
-# the *whole* tree (MiniZinc plus the solver subprocess it forks) can be signalled
-# at once. POSIX: a new session via `start_new_session=True`, killed with
-# `os.killpg`. Windows: `CREATE_NEW_PROCESS_GROUP` (the attribute is only referenced
-# on win32; child-solver cleanup there is best-effort via `taskkill /T` and may not
-# match POSIX — documented in `_terminate_process_tree`). Passed as explicit Popen
-# kwargs (not a `**dict`) so the call still matches a typed overload.
-if sys.platform == "win32":
-    _START_NEW_SESSION: bool = False
-    _CREATION_FLAGS: int = subprocess.CREATE_NEW_PROCESS_GROUP
-else:
-    _START_NEW_SESSION = True
-    _CREATION_FLAGS = 0
-# Grace period between SIGTERM and an escalated SIGKILL when terminating a tree.
-_TERMINATE_GRACE_SECONDS: float = 3.0
 
 
 class MiniZincExecutionError(RuntimeError):
@@ -393,70 +383,6 @@ def _build_inline_cmd(
         model_arg=str(model_file),
         data_args=data_args,
     )
-
-
-def _killpg(pgid: int, sig: int) -> None:
-    """Signal a process group, swallowing the already-gone / not-permitted cases."""
-    with contextlib.suppress(ProcessLookupError, PermissionError):
-        os.killpg(pgid, sig)
-
-
-def _terminate_process_tree(
-    proc: subprocess.Popen[str], *, grace_seconds: float = _TERMINATE_GRACE_SECONDS
-) -> None:
-    """Terminate ``proc`` and its child solver tree; idempotent.
-
-    MiniZinc forks the actual solver as a child, so ``proc.terminate()`` alone
-    leaks the solver tree. The cancellable runner launches ``proc`` as the leader
-    of a new session/process group (via ``_START_NEW_SESSION`` / ``_CREATION_FLAGS``)
-    so the whole tree can be signalled together. A handle that has already exited
-    is a no-op (cancel after a job is terminal, or a cancel-before-start race).
-
-    POSIX: SIGTERM the group, then escalate to SIGKILL after ``grace_seconds`` if
-    the leader is still alive. Windows: ``taskkill /T /F`` to tear down the whole
-    tree (parent + solver children) while it is still intact, falling back to
-    ``proc.terminate()`` if taskkill is unavailable — best-effort; guaranteed
-    child-solver cleanup may NOT match POSIX.
-    """
-    if proc.poll() is not None:
-        return
-    if sys.platform == "win32":
-        _terminate_process_tree_windows(proc, grace_seconds=grace_seconds)
-    else:
-        _terminate_process_tree_posix(proc, grace_seconds=grace_seconds)
-
-
-def _terminate_process_tree_posix(proc: subprocess.Popen[str], *, grace_seconds: float) -> None:
-    try:
-        pgid = os.getpgid(proc.pid)
-    except ProcessLookupError:
-        return  # already reaped — idempotent no-op
-    _killpg(pgid, signal.SIGTERM)
-    try:
-        proc.wait(timeout=grace_seconds)
-        return
-    except subprocess.TimeoutExpired:
-        _killpg(pgid, signal.SIGKILL)
-    with contextlib.suppress(subprocess.TimeoutExpired):
-        proc.wait(timeout=grace_seconds)
-
-
-def _terminate_process_tree_windows(proc: subprocess.Popen[str], *, grace_seconds: float) -> None:
-    # taskkill /T /F tears down the whole tree (parent + solver children) while the
-    # parent is still alive to anchor the tree walk. proc.terminate() (TerminateProcess)
-    # reaches only the parent; once it is reaped, taskkill /T can no longer find the
-    # orphaned solver children — so the tree kill must run FIRST, not as a post-wait
-    # escalation. Fall back to terminating the parent only if taskkill is unavailable.
-    try:
-        subprocess.run(
-            ["taskkill", "/T", "/F", "/PID", str(proc.pid)],
-            capture_output=True,
-            timeout=grace_seconds,
-        )
-    except (OSError, subprocess.SubprocessError):
-        proc.terminate()
-    with contextlib.suppress(subprocess.TimeoutExpired):
-        proc.wait(timeout=grace_seconds)
 
 
 def _run_popen(

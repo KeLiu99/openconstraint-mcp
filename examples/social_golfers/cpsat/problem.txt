@@ -1,0 +1,1 @@
+Social Golfer Problem (6-3-8): schedule 18 golfers into 6 groups of 3 over 8 weeks so no two golfers share a group more than once. Uses schedule IntVars + add_all_different + golfer_group element channeling + week-2 transversal symmetry break + minimize-violations objective (0 violations = feasible).

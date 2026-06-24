@@ -2508,3 +2508,42 @@ async def test_get_portfolio_job_unknown_id_surfaces_actionable_error() -> None:
     with pytest.raises(Exception) as exc_info:
         await mcp.call_tool("get_portfolio_job", {"job_id": "does-not-exist"})
     assert "unknown" in str(exc_info.value)
+
+
+# --- run_cpsat_python ---------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_run_cpsat_python_tool_is_listed() -> None:
+    mcp = create_mcp_server()
+    tools = await mcp.list_tools()
+    names = {tool.name for tool in tools}
+    assert "run_cpsat_python" in names
+
+
+@pytest.mark.asyncio
+async def test_run_cpsat_python_routes_to_cpsat_result(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from openconstraint_mcp.pyexec.core import CpsatPythonResult
+
+    fake_result = CpsatPythonResult(
+        status="optimal",
+        solution={"x": 3},
+        objective=3,
+        stdout='{"status":"optimal","objective":3,"solution":{"x":3}}',
+        stderr="",
+        return_code=0,
+        timed_out=False,
+        truncated=False,
+        duration_ms=42,
+    )
+    monkeypatch.setattr(
+        "openconstraint_mcp.server.run_cpsat_python",
+        lambda source, **kw: fake_result,
+    )
+
+    mcp = create_mcp_server()
+    result = _structured(await mcp.call_tool("run_cpsat_python", {"source": "print('hi')"}))
+    assert result["status"] == "optimal"
+    assert result["solution"] == {"x": 3}

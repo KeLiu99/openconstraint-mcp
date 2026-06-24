@@ -55,11 +55,11 @@ Plans must preserve explicit user requirements. If a plan intentionally deviates
 ```
 cli  ──►  server  ──►  minizinc  ──►  runtime  ──►  schemas
  │                 │
- │                 └──►  cpsat   (in-process ortools; imports no internal modules beyond cpsat.*)
+ │                 └──►  pyexec  (subprocess executor; imports proc + save_target; never minizinc/runtime)
  └─────►  runtime_install   (install-time only; imports no internal modules)
 ```
 
-A module may import any module to its right. Imports never flow leftward or between same-layer modules. The `cpsat` subtree is a parallel path from `server`: it imports third-party `ortools` and its own submodules, never `minizinc` or `runtime`. `runtime_install` is a leaf used only by `cli` (lazily, so its `httpx`/`rich.progress` deps stay off the cold paths); it imports no internal modules, so it sits outside the left-to-right chain.
+A module may import any module to its right. Imports never flow leftward or between same-layer modules. The `pyexec` subtree is a parallel path from `server`: it executes user/LLM-provided OR-Tools CP-SAT Python in a child process (`sys.executable`), importing only the shared leaves `proc` (process-group launch + tree-kill) and `save_target` (manifest-gated save policy), never `minizinc` or `runtime`. `runtime_install` is a leaf used only by `cli` (lazily, so its `httpx`/`rich.progress` deps stay off the cold paths); it imports no internal modules, so it sits outside the left-to-right chain.
 
 ## Before You Run Commands
 
@@ -97,14 +97,14 @@ If `just` is unavailable in your environment, fall back to the underlying `uv ru
 The v0 introspection-only restriction is lifted. Solving features — `solve`, `optimize`, model validation, dry-run compilation, solution checking, global-constraint lookup, and similar — may be added incrementally as long as the following invariants hold:
 
 - **Local-first.** All solving runs on the user's machine. No remote solving backends, no upload of models or data, no telemetry on solver runs.
-- **Managed runtime (MiniZinc path).** MiniZinc solver execution must use the managed/local runtime resolved through the runtime layer (`OPENCONSTRAINT_MCP_RUNTIME_DIR` or the install config), never an arbitrary `$PATH` lookup. A second backend — native CP-SAT via the bundled `ortools` Python package — may solve **in-process**, bound to the same invariants: local-first, fully offline, no telemetry, no new global mutable state; it never shells out and never resolves the managed runtime.
+- **Managed runtime (MiniZinc path).** MiniZinc solver execution must use the managed/local runtime resolved through the runtime layer (`OPENCONSTRAINT_MCP_RUNTIME_DIR` or the install config), never an arbitrary `$PATH` lookup. A second backend — OR-Tools CP-SAT Python execution — runs user/LLM-provided OR-Tools CP-SAT Python in a child process (`sys.executable`, the server's own venv which ships `ortools`), with a timeout, a stdout/stderr byte cap, and process-tree kill. **This is a local-only, robustness boundary, not a security sandbox.** v0 performs no sandboxing, no network blocking, and no AST/import filtering; a cloud or multi-tenant deployment would require a real sandbox and is out of scope. **Honest network posture:** the server *wrapper* makes no network calls on any code path; the executed child is arbitrary code that the server does not police, so "offline" is a property of the wrapper, not a guarantee about the child. The child must not generate network or file-mutating code unless the user explicitly requested it (enforced via the client-facing prompt, not by the server).
 - **No server-side LLM calls.** The MCP server must never own LLM credentials or invoke a generative model. This includes MCP sampling — the server may not request the client's LLM either.
 - **No LangChain / LangGraph in the core server.** Do not pull these dependencies into the server package. They imply agent loops and LLM coupling that conflict with the deterministic, local-first posture.
 - **No hidden network calls.** Solving, validation, model lookup, and result inspection must all be offline. The only sanctioned network call remains the user-invoked `install-runtime` download.
 
 LLM-assisted modeling — natural-language → MiniZinc, model critique, repair suggestions, explanation — belongs in the **MCP client**. The server's job is to expose deterministic, verifiable MCP tools and prompts the client's LLM can call: model validation, dry-run compilation, solving, solution checking, global-constraint lookup, example retrieval, etc. The division of labor is **LLM proposes, server verifies.**
 
-The current scope is discrete optimization through two paths: MiniZinc (expressive models, verification, rich constraint library — via the managed runtime) and native OR-Tools CP-SAT (zero-install structured solving, high-level problem tools — in-process via the bundled `ortools` package).
+The current scope is discrete optimization through two paths: MiniZinc (expressive models, verification, rich constraint library — via the managed runtime) and OR-Tools CP-SAT Python execution (zero-install, LLM-fluent — the client LLM writes complete OR-Tools Python, the server executes it locally in a child process and returns structured results).
 
 ## v0 Scope Guards
 
