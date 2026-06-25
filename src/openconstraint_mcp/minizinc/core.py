@@ -4,10 +4,12 @@ import json
 import subprocess
 import tempfile
 import time
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Iterator, Sequence
+from contextlib import AbstractContextManager, contextmanager
 from pathlib import Path
 from typing import Any, NamedTuple
 
+from ..childproc import ChildProcessTracker
 from ..proc import (
     CREATION_FLAGS as _CREATION_FLAGS,
 )
@@ -198,37 +200,47 @@ class _RunOutcome(NamedTuple):
     elapsed_ms: int
 
 
-def _invoke_minizinc(cmd: Sequence[str], *, timeout_ms: int, cwd: str) -> _RunOutcome:
-    """Run a fully-built MiniZinc ``cmd`` and capture the raw outcome.
+def _run_minizinc_popen(
+    cmd: Sequence[str],
+    *,
+    timeout_ms: int,
+    cwd: str,
+    manage_handle: Callable[[subprocess.Popen[str]], AbstractContextManager[None]],
+) -> _RunOutcome:
+    """Launch ``cmd`` as a process-group leader, run it under the wall-clock cap,
+    and capture the raw outcome.
 
-    Shared by the inline runner (``cwd`` is a private temp dir) and the
-    path-based runner (``cwd`` is the model's own directory). The
-    subprocess gets a wall-clock cap of ``(timeout_ms / 1000) + 5`` seconds —
-    a few seconds past MiniZinc's own ``--time-limit`` so the binary normally
-    stops itself first, and we capture its partial output. A ``TimeoutExpired``
-    becomes a ``timed_out`` outcome; an ``OSError`` (binary missing/not
-    executable) is wrapped as ``MiniZincExecutionError`` keyed on ``cmd[0]``.
+    The single launch-and-timeout body shared by the blocking runner
+    (``_invoke_minizinc``) and the cancellable runner
+    (``_run_managed_minizinc_cancellable``). The only thing that differs between
+    them is how the live handle is exposed for teardown, supplied as
+    ``manage_handle``: a context manager bracketing the run — register/unregister
+    with the server's child tracker, or publish-for-cancellation. ``Popen`` rather
+    than ``subprocess.run`` so that handle can be observed while the child runs.
+
+    The child is launched as the leader of its own process group/session (so the
+    whole tree can be signalled at once) and gets a wall-clock cap of
+    ``(timeout_ms / 1000) + 5`` seconds — a few seconds past MiniZinc's own
+    ``--time-limit`` so the binary normally stops itself first, and we capture its
+    partial output. A ``TimeoutExpired`` from ``communicate`` terminates the tree
+    and becomes a ``timed_out`` outcome; an external termination of the handle
+    makes ``communicate`` return normally (the caller then classifies the run). An
+    ``OSError`` on launch (binary missing/not executable) is wrapped as
+    ``MiniZincExecutionError`` keyed on ``cmd[0]``.
     """
     subprocess_timeout = (timeout_ms / 1000) + 5
     start = time.monotonic()
     try:
-        completed = subprocess.run(
-            cmd,
-            capture_output=True,
+        proc = subprocess.Popen(
+            list(cmd),
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
             text=True,
             encoding="utf-8",
             errors="replace",
-            timeout=subprocess_timeout,
             cwd=cwd,
-        )
-    except subprocess.TimeoutExpired as exc:
-        elapsed_ms = max(int((time.monotonic() - start) * 1000), 0)
-        return _RunOutcome(
-            timed_out=True,
-            returncode=-1,  # sentinel: never read while timed_out is True
-            stdout=_coerce_to_text(exc.stdout),
-            stderr=_coerce_to_text(exc.stderr),
-            elapsed_ms=elapsed_ms,
+            start_new_session=_START_NEW_SESSION,
+            creationflags=_CREATION_FLAGS,
         )
     except OSError as exc:
         raise MiniZincExecutionError(
@@ -236,14 +248,59 @@ def _invoke_minizinc(cmd: Sequence[str], *, timeout_ms: int, cwd: str) -> _RunOu
             "The runtime may be corrupt — try reinstalling with "
             "`openconstraint-mcp install-runtime`."
         ) from exc
-    elapsed_ms = max(int((time.monotonic() - start) * 1000), 0)
-    return _RunOutcome(
-        timed_out=False,
-        returncode=completed.returncode,
-        stdout=completed.stdout,
-        stderr=completed.stderr,
-        elapsed_ms=elapsed_ms,
-    )
+    with manage_handle(proc):
+        try:
+            stdout, stderr = proc.communicate(timeout=subprocess_timeout)
+        except subprocess.TimeoutExpired:
+            _terminate_process_tree(proc)
+            stdout, stderr = proc.communicate()  # drain after the tree is gone
+            elapsed_ms = max(int((time.monotonic() - start) * 1000), 0)
+            return _RunOutcome(
+                timed_out=True,
+                returncode=-1,  # sentinel: never read while timed_out is True
+                stdout=_coerce_to_text(stdout),
+                stderr=_coerce_to_text(stderr),
+                elapsed_ms=elapsed_ms,
+            )
+        elapsed_ms = max(int((time.monotonic() - start) * 1000), 0)
+        return _RunOutcome(
+            timed_out=False,
+            returncode=proc.returncode,
+            stdout=_coerce_to_text(stdout),
+            stderr=_coerce_to_text(stderr),
+            elapsed_ms=elapsed_ms,
+        )
+
+
+def _invoke_minizinc(
+    cmd: Sequence[str],
+    *,
+    timeout_ms: int,
+    cwd: str,
+    tracker: ChildProcessTracker | None = None,
+) -> _RunOutcome:
+    """Run a fully-built MiniZinc ``cmd`` (blocking) and capture the raw outcome.
+
+    Shared by the inline runner (``cwd`` is a private temp dir) and the path-based
+    runner (``cwd`` is the model's own directory). Delegates the launch and
+    wall-clock cap to ``_run_minizinc_popen``; its only specialization is the
+    handle lifecycle: while the child runs it is registered with ``tracker`` (the
+    server's per-run child tracker) so an abrupt server teardown terminates this
+    in-flight child instead of orphaning it, and it is unregistered on every exit
+    path. With no ``tracker`` the behaviour is identical, just untracked.
+    """
+
+    @contextmanager
+    def _track(proc: subprocess.Popen[str]) -> Iterator[None]:
+        if tracker is not None:
+            tracker.register(proc)
+        try:
+            yield
+        finally:
+            if tracker is not None:
+                tracker.unregister(proc)
+
+    return _run_minizinc_popen(cmd, timeout_ms=timeout_ms, cwd=cwd, manage_handle=_track)
 
 
 def _build_minizinc_cmd(
@@ -296,6 +353,7 @@ def _run_managed_minizinc(
     extra_args: Sequence[str],
     data: str | None = None,
     checker: str | None = None,
+    tracker: ChildProcessTracker | None = None,
 ) -> _RunOutcome:
     """Run the managed MiniZinc binary on ``model`` and report the raw outcome.
 
@@ -333,7 +391,7 @@ def _run_managed_minizinc(
             data=data,
             checker=checker,
         )
-        return _invoke_minizinc(cmd, timeout_ms=timeout_ms, cwd=str(tmp_dir))
+        return _invoke_minizinc(cmd, timeout_ms=timeout_ms, cwd=str(tmp_dir), tracker=tracker)
 
 
 def _build_inline_cmd(
@@ -385,70 +443,6 @@ def _build_inline_cmd(
     )
 
 
-def _run_popen(
-    cmd: Sequence[str],
-    *,
-    timeout_ms: int,
-    cwd: str,
-    on_start: Callable[[subprocess.Popen[str]], None],
-) -> _RunOutcome:
-    """Run ``cmd`` via ``subprocess.Popen`` and capture the raw outcome.
-
-    The cancellable counterpart of ``_invoke_minizinc``: it launches the child in
-    its own process group (``_START_NEW_SESSION`` / ``_CREATION_FLAGS``), publishes
-    the live handle via ``on_start`` so a caller can terminate it externally
-    (cancellation), and applies
-    the same ``(timeout_ms / 1000) + 5`` wall-clock cap. On the cap firing it
-    terminates the whole tree and drains the partial output as a ``timed_out``
-    outcome — byte-compatible with ``_invoke_minizinc`` so ``_build_solve_result``
-    is reused verbatim. An external termination of the handle makes
-    ``communicate`` return normally (the caller then classifies the job as
-    cancelled). An ``OSError`` on launch is wrapped as ``MiniZincExecutionError``.
-    """
-    subprocess_timeout = (timeout_ms / 1000) + 5
-    start = time.monotonic()
-    try:
-        proc = subprocess.Popen(
-            list(cmd),
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-            cwd=cwd,
-            start_new_session=_START_NEW_SESSION,
-            creationflags=_CREATION_FLAGS,
-        )
-    except OSError as exc:
-        raise MiniZincExecutionError(
-            f"Managed MiniZinc binary at {cmd[0]} failed to execute: {exc}. "
-            "The runtime may be corrupt — try reinstalling with "
-            "`openconstraint-mcp install-runtime`."
-        ) from exc
-    on_start(proc)
-    try:
-        stdout, stderr = proc.communicate(timeout=subprocess_timeout)
-    except subprocess.TimeoutExpired:
-        _terminate_process_tree(proc)
-        stdout, stderr = proc.communicate()  # drain after the tree is gone
-        elapsed_ms = max(int((time.monotonic() - start) * 1000), 0)
-        return _RunOutcome(
-            timed_out=True,
-            returncode=-1,  # sentinel: never read while timed_out is True
-            stdout=_coerce_to_text(stdout),
-            stderr=_coerce_to_text(stderr),
-            elapsed_ms=elapsed_ms,
-        )
-    elapsed_ms = max(int((time.monotonic() - start) * 1000), 0)
-    return _RunOutcome(
-        timed_out=False,
-        returncode=proc.returncode,
-        stdout=_coerce_to_text(stdout),
-        stderr=_coerce_to_text(stderr),
-        elapsed_ms=elapsed_ms,
-    )
-
-
 def _run_managed_minizinc_cancellable(
     model: str,
     *,
@@ -463,12 +457,19 @@ def _run_managed_minizinc_cancellable(
 
     Same temp-dir / model-data-checker file contract (via ``_build_inline_cmd``)
     and same wall-clock cap as the blocking runner, but launched through
-    ``_run_popen`` so the caller receives the live process handle through
-    ``on_start`` and can terminate the whole tree to cancel. Returns the same
-    ``_RunOutcome``, so ``_build_solve_result`` consumes it unchanged.
+    ``_run_minizinc_popen`` with a ``manage_handle`` that publishes the live
+    process handle via ``on_start``, so the caller can terminate the whole tree to
+    cancel. Returns the same ``_RunOutcome``, so ``_build_solve_result`` consumes
+    it unchanged.
     """
     _validate_model_and_timeout(model, timeout_ms)
     binary = _require_minizinc_binary()
+
+    @contextmanager
+    def _publish(proc: subprocess.Popen[str]) -> Iterator[None]:
+        on_start(proc)
+        yield
+
     with tempfile.TemporaryDirectory(prefix="openconstraint-mcp-") as tmp:
         tmp_dir = Path(tmp)
         cmd = _build_inline_cmd(
@@ -481,7 +482,9 @@ def _run_managed_minizinc_cancellable(
             data=data,
             checker=checker,
         )
-        return _run_popen(cmd, timeout_ms=timeout_ms, cwd=str(tmp_dir), on_start=on_start)
+        return _run_minizinc_popen(
+            cmd, timeout_ms=timeout_ms, cwd=str(tmp_dir), manage_handle=_publish
+        )
 
 
 def _merge_stderr(real_stderr: str, messages: Sequence[str]) -> str:
@@ -717,6 +720,7 @@ def find_unsat_core(
     *,
     data: str | None = None,
     timeout_ms: int = DEFAULT_UNSAT_CORE_TIMEOUT_MS,
+    tracker: ChildProcessTracker | None = None,
 ) -> UnsatCoreResult:
     outcome = _run_managed_minizinc(
         model,
@@ -724,6 +728,7 @@ def find_unsat_core(
         timeout_ms=timeout_ms,
         extra_args=(),
         data=data,
+        tracker=tracker,
     )
     return _build_unsat_core_result(outcome, model)
 
@@ -877,6 +882,7 @@ def _run_solve(
     checker: str | None,
     timeout_ms: int,
     extra_args: Sequence[str],
+    tracker: ChildProcessTracker | None = None,
 ) -> SolveResult:
     """Run a prepared (validated, capability-enforced) inline solve and build its result.
 
@@ -893,6 +899,7 @@ def _run_solve(
         extra_args=extra_args,
         data=data,
         checker=checker,
+        tracker=tracker,
     )
     result = _build_solve_result(outcome, solver=solver)
     if checker is not None:
@@ -912,6 +919,7 @@ def solve_model(
     random_seed: int | None = None,
     all_solutions: bool = False,
     num_solutions: int | None = None,
+    tracker: ChildProcessTracker | None = None,
 ) -> SolveResult:
     # Pure validation + arg build first (raises on a bad parallel/num_solutions
     # before any subprocess), THEN the lazy capability resolution (one
@@ -938,6 +946,7 @@ def solve_model(
         checker=checker,
         timeout_ms=timeout_ms,
         extra_args=extra_args,
+        tracker=tracker,
     )
 
 
@@ -993,9 +1002,15 @@ def check_model(
     solver: str = DEFAULT_SOLVER,
     data: str | None = None,
     timeout_ms: int = DEFAULT_CHECK_TIMEOUT_MS,
+    tracker: ChildProcessTracker | None = None,
 ) -> CheckResult:
     outcome = _run_managed_minizinc(
-        model, solver=solver, timeout_ms=timeout_ms, extra_args=("-c",), data=data
+        model,
+        solver=solver,
+        timeout_ms=timeout_ms,
+        extra_args=("-c",),
+        data=data,
+        tracker=tracker,
     )
     return _build_check_result(outcome, solver=solver)
 
@@ -1006,6 +1021,7 @@ def inspect_model(
     solver: str = DEFAULT_SOLVER,
     data: str | None = None,
     timeout_ms: int = DEFAULT_INSPECT_TIMEOUT_MS,
+    tracker: ChildProcessTracker | None = None,
 ) -> ModelInspectionResult:
     """Inspect a MiniZinc model's interface WITHOUT solving it.
 
@@ -1018,7 +1034,12 @@ def inspect_model(
     only that the interface was extracted — NOT that the data is complete.
     """
     outcome = _run_managed_minizinc(
-        model, solver=solver, timeout_ms=timeout_ms, extra_args=(INSPECT_FLAG,), data=data
+        model,
+        solver=solver,
+        timeout_ms=timeout_ms,
+        extra_args=(INSPECT_FLAG,),
+        data=data,
+        tracker=tracker,
     )
     return _build_inspection_result(outcome, solver=solver)
 
@@ -1060,6 +1081,7 @@ def save_verified_model(
     all_solutions: bool = False,
     num_solutions: int | None = None,
     overwrite: bool = False,
+    tracker: ChildProcessTracker | None = None,
 ) -> SaveVerifiedModelResult:
     """Re-verify an inline model through the managed runtime, then save it.
 
@@ -1099,7 +1121,7 @@ def save_verified_model(
     )
     target = validate_save_target(target_dir, overwrite=overwrite)
 
-    check = check_model(model, solver=solver, data=data, timeout_ms=timeout_ms)
+    check = check_model(model, solver=solver, data=data, timeout_ms=timeout_ms, tracker=tracker)
     if check.status != "ok":
         return SaveVerifiedModelResult(
             status="not_verified",
@@ -1117,6 +1139,7 @@ def save_verified_model(
         checker=checker,
         timeout_ms=timeout_ms,
         extra_args=extra_args,
+        tracker=tracker,
     )
     failure = _verification_failure(solve, checker_supplied=checker is not None)
     if failure is not None:
@@ -1236,6 +1259,7 @@ def _run_managed_minizinc_paths(
     timeout_ms: int,
     extra_args: Sequence[str],
     data_path: Path | None = None,
+    tracker: ChildProcessTracker | None = None,
 ) -> _RunOutcome:
     """Run the managed binary on the real ``model_path`` with ``cwd`` = its parent.
 
@@ -1259,7 +1283,7 @@ def _run_managed_minizinc_paths(
         model_arg=str(model_path),
         data_args=data_args,
     )
-    return _invoke_minizinc(cmd, timeout_ms=timeout_ms, cwd=str(model_path.parent))
+    return _invoke_minizinc(cmd, timeout_ms=timeout_ms, cwd=str(model_path.parent), tracker=tracker)
 
 
 def solve_model_path(
@@ -1274,6 +1298,7 @@ def solve_model_path(
     random_seed: int | None = None,
     all_solutions: bool = False,
     num_solutions: int | None = None,
+    tracker: ChildProcessTracker | None = None,
 ) -> SolveResult:
     """Solve a MiniZinc model read from ``model_path`` via the managed runtime.
 
@@ -1313,6 +1338,7 @@ def solve_model_path(
         timeout_ms=timeout_ms,
         extra_args=extra_args,
         data_path=data_path,
+        tracker=tracker,
     )
     result = _build_solve_result(outcome, solver=solver)
     if checker_path is not None:
@@ -1326,6 +1352,7 @@ def check_model_path(
     solver: str = DEFAULT_SOLVER,
     data_path: Path | None = None,
     timeout_ms: int = DEFAULT_CHECK_TIMEOUT_MS,
+    tracker: ChildProcessTracker | None = None,
 ) -> CheckResult:
     """Compile-check a MiniZinc model read from ``model_path`` via the runtime.
 
@@ -1351,6 +1378,7 @@ def check_model_path(
                 str(Path(tmp) / "out.ozn"),
             ),
             data_path=data_path,
+            tracker=tracker,
         )
     return _build_check_result(outcome, solver=solver)
 
@@ -1361,6 +1389,7 @@ def inspect_model_path(
     solver: str = DEFAULT_SOLVER,
     data_path: Path | None = None,
     timeout_ms: int = DEFAULT_INSPECT_TIMEOUT_MS,
+    tracker: ChildProcessTracker | None = None,
 ) -> ModelInspectionResult:
     """Inspect a MiniZinc model read from ``model_path`` via the managed runtime.
 
@@ -1375,6 +1404,7 @@ def inspect_model_path(
         timeout_ms=timeout_ms,
         extra_args=(INSPECT_FLAG,),
         data_path=data_path,
+        tracker=tracker,
     )
     return _build_inspection_result(outcome, solver=solver)
 
@@ -1384,6 +1414,7 @@ def find_unsat_core_path(
     *,
     data_path: Path | None = None,
     timeout_ms: int = DEFAULT_UNSAT_CORE_TIMEOUT_MS,
+    tracker: ChildProcessTracker | None = None,
 ) -> UnsatCoreResult:
     """Compute a MUS for a model read from ``model_path`` via the runtime.
 
@@ -1399,6 +1430,7 @@ def find_unsat_core_path(
         timeout_ms=timeout_ms,
         extra_args=(),
         data_path=data_path,
+        tracker=tracker,
     )
     model = _read_text_utf8(model_path)
     return _build_unsat_core_result(outcome, model, model_filename=model_path.name)

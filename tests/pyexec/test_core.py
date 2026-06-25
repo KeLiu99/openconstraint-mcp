@@ -62,6 +62,7 @@ def _run_with_mocked_proc(
     timeout: bool = False,
     large_output: bool = False,
     timeout_ms: int = 5000,
+    tracker: Any = None,
 ) -> CpsatPythonResult:
     """Run run_cpsat_python with all subprocess/proc calls patched."""
 
@@ -119,9 +120,41 @@ def _run_with_mocked_proc(
         patch("openconstraint_mcp.pyexec.core.popen_process_group", side_effect=_fake_popen_group),
         patch("openconstraint_mcp.pyexec.core.terminate_process_tree") as mock_kill,
     ):
-        result = run_cpsat_python(source, timeout_ms=timeout_ms)
+        result = run_cpsat_python(source, timeout_ms=timeout_ms, tracker=tracker)
     result._mock_kill = mock_kill  # type: ignore[attr-defined]
     return result
+
+
+class _SpyTracker:
+    """Records register/unregister calls so wiring can be asserted without a kill."""
+
+    def __init__(self) -> None:
+        self.events: list[tuple[str, Any]] = []
+
+    def register(self, proc: Any) -> None:
+        self.events.append(("register", proc))
+
+    def unregister(self, proc: Any) -> None:
+        self.events.append(("unregister", proc))
+
+
+def test_run_cpsat_python_registers_then_unregisters_child_with_tracker() -> None:
+    tracker = _SpyTracker()
+
+    _run_with_mocked_proc(tracker=tracker)
+
+    assert [name for name, _ in tracker.events] == ["register", "unregister"]
+    assert tracker.events[0][1] is tracker.events[1][1]  # same handle both times
+
+
+def test_run_cpsat_python_unregisters_child_after_timeout_kill() -> None:
+    tracker = _SpyTracker()
+
+    _run_with_mocked_proc(timeout=True, timeout_ms=100, tracker=tracker)
+
+    # Even on the timeout path the killed child must leave the live set so the
+    # lifespan never re-terminates a process that is already gone.
+    assert [name for name, _ in tracker.events] == ["register", "unregister"]
 
 
 # (a) valid JSON → parsed status/solution

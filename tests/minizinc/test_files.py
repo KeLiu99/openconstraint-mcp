@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import json
-import subprocess
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
@@ -103,7 +102,7 @@ def _record_run(
         )
         return completed
 
-    monkeypatch.setattr("openconstraint_mcp.minizinc.core.subprocess.run", _fake_run)
+    monkeypatch.setattr("openconstraint_mcp.minizinc.core.subprocess.Popen", _fake_run)
     return calls
 
 
@@ -111,7 +110,7 @@ def _fail_if_run_called(monkeypatch: pytest.MonkeyPatch) -> None:
     def _fail(*args: Any, **kwargs: Any) -> Any:
         raise AssertionError("subprocess.run must not be invoked")
 
-    monkeypatch.setattr("openconstraint_mcp.minizinc.core.subprocess.run", _fail)
+    monkeypatch.setattr("openconstraint_mcp.minizinc.core.subprocess.Popen", _fail)
 
 
 # --- CLI-style execution (real path, cwd = model's parent) -----------------
@@ -542,7 +541,7 @@ def test_oserror_wraps_as_execution_error(
     def _fake_run(*args: Any, **kwargs: Any) -> Any:
         raise OSError(8, "Exec format error")
 
-    monkeypatch.setattr("openconstraint_mcp.minizinc.core.subprocess.run", _fake_run)
+    monkeypatch.setattr("openconstraint_mcp.minizinc.core.subprocess.Popen", _fake_run)
 
     with pytest.raises(MiniZincExecutionError) as exc_info:
         solve_model_path(model_path)
@@ -754,10 +753,10 @@ def test_solve_model_path_with_checker_timeout_status(
 ) -> None:
     model_path, checker_path = _write_model_and_checker(tmp_path)
 
-    def _fake_run(*args: Any, **kwargs: Any) -> Any:
-        raise subprocess.TimeoutExpired(cmd=args[0], timeout=kwargs.get("timeout", 0), output="")
+    def _fake_run(*args: Any, **kwargs: Any) -> FakeCompletedProcess:
+        return FakeCompletedProcess(stdout="", stderr="", returncode=0, timeout=True)
 
-    monkeypatch.setattr("openconstraint_mcp.minizinc.core.subprocess.run", _fake_run)
+    monkeypatch.setattr("openconstraint_mcp.minizinc.core.subprocess.Popen", _fake_run)
 
     result = solve_model_path(model_path, checker_path=checker_path)
 

@@ -14,6 +14,7 @@ from anyio import to_thread
 from mcp.server.fastmcp import Context, FastMCP
 from mcp.types import CallToolResult, TextContent
 
+from .childproc import ChildProcessTracker
 from .jobs import JobRegistry, JobRejectedError
 from .minizinc.core import (
     DEFAULT_CHECK_TIMEOUT_MS,
@@ -403,17 +404,20 @@ def _as_mcp_error(
 
 def _make_lifespan(
     registry: JobRegistry,
+    child_tracker: ChildProcessTracker,
 ) -> Callable[[FastMCP[Any]], AbstractAsyncContextManager[None]]:
-    """Build the server lifespan bound to ``registry``.
+    """Build the server lifespan bound to ``registry`` and ``child_tracker``.
 
-    Startup emits the boot diagnostic; teardown (after ``yield``) calls
-    ``registry.shutdown()`` so any still-running solve children are terminated and
-    the worker pool joined before the process exits. This also covers a background
-    portfolio's attempts — they are ordinary jobs in this same registry, and the
-    ``PortfolioJobRegistry`` owns no threads or processes of its own. The registry is
-    created in ``create_mcp_server`` and captured by the job-tool closures, so the
-    lifespan must close over that same instance — hence a factory rather than a
-    module-level function.
+    Startup emits the boot diagnostic; teardown (after ``yield``) terminates every
+    in-flight child so none is orphaned before the process exits:
+    ``registry.shutdown()`` covers background solve jobs (and a background
+    portfolio's attempts — ordinary jobs in this same registry; the
+    ``PortfolioJobRegistry`` owns no threads or processes of its own), and
+    ``child_tracker.terminate_all()`` covers the *synchronous* tools' children (the
+    MiniZinc and CP-SAT subprocesses they run in a worker thread, which are
+    process-group leaders that would otherwise survive the server). Both are
+    created in ``create_mcp_server`` and captured by the tool closures, so the
+    lifespan must close over those same instances — hence a factory.
     """
 
     @asynccontextmanager
@@ -422,7 +426,12 @@ def _make_lifespan(
         try:
             yield
         finally:
-            registry.shutdown()
+            # Disjoint child sets, independently guarded: a failure tearing down the
+            # job registry must not skip terminating the synchronous tools' children.
+            try:
+                registry.shutdown()
+            finally:
+                child_tracker.terminate_all()
 
     return _lifespan
 
@@ -467,11 +476,17 @@ def create_mcp_server() -> FastMCP:
     # pool and cannot starve the attempt pool. Retention of finished portfolio
     # records is bounded; the dominant capacity bound is the solve registry's.
     portfolios = PortfolioJobRegistry(registry)
+    # The server-owned tracker of in-flight SYNCHRONOUS-tool children (the
+    # bounded "no global mutable state" exception, like `registry`): the sync
+    # MiniZinc/CP-SAT tools register their child while it runs so the lifespan can
+    # terminate it on teardown instead of orphaning it. Background-job children
+    # are handled by `registry.shutdown()`, not this tracker.
+    child_tracker = ChildProcessTracker()
     mcp: FastMCP[Any] = FastMCP(
         "openconstraint-mcp",
         instructions=MCP_SERVER_INSTRUCTIONS,
         website_url=_homepage_url(),
-        lifespan=_make_lifespan(registry),
+        lifespan=_make_lifespan(registry, child_tracker),
     )
 
     @mcp.tool(description=CHECK_RUNTIME_DESCRIPTION)
@@ -515,6 +530,7 @@ def create_mcp_server() -> FastMCP:
                 random_seed=random_seed,
                 all_solutions=all_solutions,
                 num_solutions=num_solutions,
+                tracker=child_tracker,
             )
         )
         await _status_finished(ctx, stages)
@@ -531,7 +547,14 @@ def create_mcp_server() -> FastMCP:
     ) -> CheckResult:
         await _status_starting(ctx, status.CHECK_STAGES)
         result = await _run_blocking(
-            functools.partial(check_model, model, solver=solver, data=data, timeout_ms=timeout_ms)
+            functools.partial(
+                check_model,
+                model,
+                solver=solver,
+                data=data,
+                timeout_ms=timeout_ms,
+                tracker=child_tracker,
+            )
         )
         await _status_finished(ctx, status.CHECK_STAGES)
         return result
@@ -547,7 +570,14 @@ def create_mcp_server() -> FastMCP:
     ) -> ModelInspectionResult:
         await _status_starting(ctx, status.INSPECT_STAGES)
         result = await _run_blocking(
-            functools.partial(inspect_model, model, solver=solver, data=data, timeout_ms=timeout_ms)
+            functools.partial(
+                inspect_model,
+                model,
+                solver=solver,
+                data=data,
+                timeout_ms=timeout_ms,
+                tracker=child_tracker,
+            )
         )
         await _status_finished(ctx, status.INSPECT_STAGES)
         return result
@@ -562,7 +592,9 @@ def create_mcp_server() -> FastMCP:
     ) -> UnsatCoreResult:
         await _status_starting(ctx, status.UNSAT_CORE_STAGES)
         result = await _run_blocking(
-            functools.partial(_find_unsat_core, model, data=data, timeout_ms=timeout_ms)
+            functools.partial(
+                _find_unsat_core, model, data=data, timeout_ms=timeout_ms, tracker=child_tracker
+            )
         )
         await _status_finished(ctx, status.UNSAT_CORE_STAGES)
         return result
@@ -602,6 +634,7 @@ def create_mcp_server() -> FastMCP:
                 all_solutions=all_solutions,
                 num_solutions=num_solutions,
                 overwrite=overwrite,
+                tracker=child_tracker,
             )
         )
         await _status_finished(ctx, status.SAVE_STAGES)
@@ -624,6 +657,7 @@ def create_mcp_server() -> FastMCP:
                 solver=solver,
                 data_path=Path(data_path) if data_path is not None else None,
                 timeout_ms=timeout_ms,
+                tracker=child_tracker,
             )
         )
         await _status_finished(ctx, status.CHECK_STAGES)
@@ -646,6 +680,7 @@ def create_mcp_server() -> FastMCP:
                 solver=solver,
                 data_path=Path(data_path) if data_path is not None else None,
                 timeout_ms=timeout_ms,
+                tracker=child_tracker,
             )
         )
         await _status_finished(ctx, status.INSPECT_STAGES)
@@ -681,6 +716,7 @@ def create_mcp_server() -> FastMCP:
                 random_seed=random_seed,
                 all_solutions=all_solutions,
                 num_solutions=num_solutions,
+                tracker=child_tracker,
             )
         )
         await _status_finished(ctx, stages)
@@ -701,6 +737,7 @@ def create_mcp_server() -> FastMCP:
                 Path(model_path),
                 data_path=Path(data_path) if data_path is not None else None,
                 timeout_ms=timeout_ms,
+                tracker=child_tracker,
             )
         )
         await _status_finished(ctx, status.UNSAT_CORE_STAGES)
@@ -819,7 +856,9 @@ def create_mcp_server() -> FastMCP:
     ) -> CpsatPythonResult:
         await _status_starting(ctx, status.CPSAT_PYTHON_STAGES)
         result = await _run_blocking(
-            functools.partial(run_cpsat_python, source, timeout_ms=timeout_ms)
+            functools.partial(
+                run_cpsat_python, source, timeout_ms=timeout_ms, tracker=child_tracker
+            )
         )
         await _status_finished(ctx, status.CPSAT_PYTHON_STAGES)
         return result
@@ -843,6 +882,7 @@ def create_mcp_server() -> FastMCP:
                 problem=problem,
                 timeout_ms=timeout_ms,
                 overwrite=overwrite,
+                tracker=child_tracker,
             )
         )
         await _status_finished(ctx, status.CPSAT_PYTHON_SAVE_STAGES)

@@ -1,152 +1,164 @@
+import itertools
 import json
 
 from ortools.sat.python import cp_model
 
+FANO_LINES: tuple[tuple[int, int, int], ...] = (
+    (0, 1, 2),
+    (0, 3, 4),
+    (0, 5, 6),
+    (1, 3, 5),
+    (1, 4, 6),
+    (2, 3, 6),
+    (2, 4, 5),
+)
 
-def solve_social_golfers(n_groups: int = 6, group_size: int = 3, n_weeks: int = 8) -> None:
-    n_golfers = n_groups * group_size
+
+def _line_positions() -> tuple[dict[int, list[int]], dict[tuple[int, int], int]]:
+    incident_lines: dict[int, list[int]] = {point: [] for point in range(7)}
+    edge_line: dict[tuple[int, int], int] = {}
+    for line_index, line in enumerate(FANO_LINES):
+        for point in line:
+            incident_lines[point].append(line_index)
+        for left, right in itertools.combinations(line, 2):
+            edge_line[(left, right)] = line_index
+    return incident_lines, edge_line
+
+
+def _validate_schedule(schedule: list[list[list[int]]]) -> None:
+    seen_pairs: set[tuple[int, int]] = set()
+    for groups in schedule:
+        week_players = sorted(player for group in groups for player in group)
+        if week_players != list(range(1, 22)):
+            msg = f"week is not a partition of players 1..21: {groups}"
+            raise ValueError(msg)
+        for group in groups:
+            if len(group) != 3:
+                msg = f"group does not have 3 players: {group}"
+                raise ValueError(msg)
+            for pair in itertools.combinations(sorted(group), 2):
+                if pair in seen_pairs:
+                    msg = f"pair meets twice: {pair}"
+                    raise ValueError(msg)
+                seen_pairs.add(pair)
+    if len(seen_pairs) != 210:
+        msg = f"expected 210 unique pairs, saw {len(seen_pairs)}"
+        raise ValueError(msg)
+
+
+def solve_social_golfers(n_groups: int = 7, group_size: int = 3, n_weeks: int = 10) -> None:
+    if (n_groups, group_size, n_weeks) != (7, 3, 10):
+        msg = "this compact CP-SAT construction is specialized for the 7-3-10 instance"
+        raise ValueError(msg)
+
+    incident_lines, edge_line = _line_positions()
+    line_slot = {
+        (point, line_index): incident_lines[point].index(line_index)
+        for point in range(7)
+        for line_index in incident_lines[point]
+    }
+    permutations = list(itertools.permutations(range(3)))
+
     model = cp_model.CpModel()
 
-    # schedule[w][g][s]: golfer (0-based) at sorted slot s in group g, week w
-    schedule = [
+    # Week 1 is fixed as seven groups of three. For weeks 2..10, each Fano-plane
+    # line picks one player from each of three week-1 groups. The CP-SAT search
+    # chooses, for every later week and week-1 group, which permutation maps that
+    # group's three players onto its three incident Fano lines.
+    choices = [
         [
-            [model.new_int_var(0, n_golfers - 1, f"sch_{w}_{g}_{s}") for s in range(group_size)]
-            for g in range(n_groups)
+            model.new_int_var(0, len(permutations) - 1, f"choice_{week}_{point}")
+            for point in range(7)
         ]
-        for w in range(n_weeks)
+        for week in range(n_weeks - 1)
     ]
+    line_values: dict[tuple[int, int, int], cp_model.IntVar] = {}
+    for week in range(n_weeks - 1):
+        for point in range(7):
+            for line_index in incident_lines[point]:
+                value = model.new_int_var(0, 2, f"value_{week}_{point}_{line_index}")
+                model.add_element(
+                    choices[week][point],
+                    [perm[line_slot[(point, line_index)]] for perm in permutations],
+                    value,
+                )
+                line_values[(week, point, line_index)] = value
 
-    # golfer_group[w][p]: group (0-based) of golfer p in week w
-    golfer_group = [
-        [model.new_int_var(0, n_groups - 1, f"gg_{w}_{p}") for p in range(n_golfers)]
-        for w in range(n_weeks)
-    ]
+    # Every pair of week-1 groups shares exactly one Fano line. Across the nine
+    # remaining weeks, the ordered player slots on that shared line must cover all
+    # 3 x 3 combinations, so every cross-group player pair meets exactly once.
+    for left, right in itertools.combinations(range(7), 2):
+        line_index = edge_line[(left, right)]
+        pair_codes = []
+        for week in range(n_weeks - 1):
+            code = model.new_int_var(0, 8, f"pair_{week}_{left}_{right}")
+            model.add(
+                code
+                == 3 * line_values[(week, left, line_index)]
+                + line_values[(week, right, line_index)]
+            )
+            pair_codes.append(code)
+        model.add_all_different(pair_codes)
 
-    # Each week is a permutation of all golfers
-    for w in range(n_weeks):
-        model.add_all_different(
-            [schedule[w][g][s] for g in range(n_groups) for s in range(group_size)]
+    # Symmetry breaks: week 2 uses identity permutations, then later weeks are
+    # ordered by the permutation choices. This removes week-interchange symmetry.
+    for point in range(7):
+        model.add(choices[0][point] == 0)
+    week_codes = []
+    for week in range(n_weeks - 1):
+        code = model.new_int_var(0, (len(permutations) ** 7) - 1, f"week_code_{week}")
+        model.add(
+            code
+            == sum((len(permutations) ** point) * choices[week][point] for point in range(7))
         )
+        week_codes.append(code)
+    for left_code, right_code in zip(week_codes, week_codes[1:], strict=False):
+        model.add(left_code < right_code)
 
-    # Sorted slots within each group (breaks intra-group permutation symmetry)
-    for w in range(n_weeks):
-        for g in range(n_groups):
-            for s in range(group_size - 1):
-                model.add(schedule[w][g][s] < schedule[w][g][s + 1])
-
-    # Channel schedule → golfer_group:  golfer_group[w][schedule[w][g][s]] == g
-    for w in range(n_weeks):
-        for g in range(n_groups):
-            for s in range(group_size):
-                model.add_element(schedule[w][g][s], golfer_group[w], g)
-
-    # ── Symmetry breaks ────────────────────────────────────────────────────────
-    # Week 1: natural partition
-    for g in range(n_groups):
-        for s in range(group_size):
-            model.add(schedule[0][g][s] == g * group_size + s)
-
-    # Week 2: transversal (valid when n_groups % group_size == 0)
-    has_transversal = n_groups % group_size == 0
-    if has_transversal:
-        for b in range(n_groups // group_size):
-            bs = b * group_size
-            for g_i in range(group_size):
-                for s_i in range(group_size):
-                    model.add(schedule[1][bs + g_i][s_i] == (bs + s_i) * group_size + g_i)
-
-    fixed_weeks = {0} | ({1} if has_transversal else set())
-    free_weeks = [w for w in range(n_weeks) if w not in fixed_weeks]
-
-    # Group ordering for free weeks: min member of group g < min of group g+1
-    for w in free_weeks:
-        for g in range(n_groups - 1):
-            model.add(schedule[w][g][0] < schedule[w][g + 1][0])
-
-    # ── Identify pairs that already met in fixed weeks ─────────────────────────
-    met_already: set[tuple[int, int]] = set()
-
-    def add_group_pairs(members: list[int]) -> None:
-        for i, p1 in enumerate(members):
-            for p2 in members[i + 1 :]:
-                met_already.add((min(p1, p2), max(p1, p2)))
-
-    for g in range(n_groups):
-        add_group_pairs([g * group_size + s for s in range(group_size)])
-    if has_transversal:
-        for b in range(n_groups // group_size):
-            bs = b * group_size
-            for g_i in range(group_size):
-                add_group_pairs([(bs + s_i) * group_size + g_i for s_i in range(group_size)])
-
-    # Already-met: hard "never again" inequalities (tight propagation)
-    for p1, p2 in met_already:
-        for w in free_weeks:
-            model.add(golfer_group[w][p1] != golfer_group[w][p2])
-
-    # ── Soft pair uniqueness: minimize excess meetings ─────────────────────────
-    # For each not-yet-met pair, count free-week co-group appearances.
-    # same[w][p1][p2]: bool defined via abs_diff + conditional linear constraints
-    # (avoids conditional != which is unreliable across OR-Tools versions).
-    # Target: minimize total violations to 0 → provably feasible schedule.
-    all_violations: list = []
-
-    for p1 in range(n_golfers):
-        for p2 in range(p1 + 1, n_golfers):
-            if (p1, p2) in met_already:
-                continue
-            same_week_bools = []
-            for w in free_weeks:
-                abs_diff = model.new_int_var(0, n_groups - 1, f"ad_{w}_{p1}_{p2}")
-                model.add_abs_equality(abs_diff, golfer_group[w][p1] - golfer_group[w][p2])
-                same = model.new_bool_var(f"sg_{w}_{p1}_{p2}")
-                model.add(abs_diff == 0).only_enforce_if(same)
-                model.add(abs_diff >= 1).only_enforce_if(same.negated())
-                same_week_bools.append(same)
-
-            # violation = max(0, meetings - 1): reaches 0 iff pair meets at most once
-            viol = model.new_int_var(0, len(free_weeks) - 1, f"v_{p1}_{p2}")
-            model.add_max_equality(viol, [cp_model.LinearExpr.sum(same_week_bools) - 1, 0])
-            all_violations.append(viol)
-
-    # Minimize total violations. Objective = 0 ↔ valid social-golfer schedule.
-    model.minimize(cp_model.LinearExpr.sum(all_violations))
-
-    # ── Search ─────────────────────────────────────────────────────────────────
-    # First-fail (CHOOSE_MIN_DOMAIN_SIZE) on schedule vars mirrors Gecode's strategy.
     model.add_decision_strategy(
-        [schedule[w][g][s] for w in free_weeks for g in range(n_groups) for s in range(group_size)],
+        [choices[week][point] for week in range(n_weeks - 1) for point in range(7)],
         cp_model.CHOOSE_MIN_DOMAIN_SIZE,
         cp_model.SELECT_MIN_VALUE,
     )
 
     solver = cp_model.CpSolver()
-    solver.parameters.max_time_in_seconds = 240.0
+    solver.parameters.max_time_in_seconds = 300.0
     solver.parameters.num_workers = 8
-    # Portfolio with quick restarts: diverse search strategies share learned clauses
     solver.parameters.search_branching = cp_model.PORTFOLIO_WITH_QUICK_RESTART_SEARCH
+    solver.parameters.random_seed = 21
+    solver.parameters.randomize_search = True
+    solver.parameters.use_lns = True
+    solver.parameters.diversify_lns_params = True
+    solver.parameters.symmetry_level = 2
 
     status = solver.solve(model)
 
-    if status in (cp_model.OPTIMAL, cp_model.FEASIBLE):
-        obj = solver.objective_value
-        print(f"Solver status: {solver.status_name(status)}, violations: {int(obj)}")
-        if int(obj) > 0:
-            print(f"Best found has {int(obj)} unresolved pair-meetings — not yet feasible.")
-            print(json.dumps({"status": "unknown", "objective": obj, "solution": None}))
-            return
-        sol = {}
-        for w in range(n_weeks):
-            groups = [
-                [solver.value(schedule[w][g][s]) + 1 for s in range(group_size)]
-                for g in range(n_groups)
-            ]
-            week_str = "  ".join(f"[{' '.join(map(str, sorted(grp)))}]" for grp in groups)
-            print(f"Week {w + 1}: {week_str}")
-            sol[f"week_{w + 1}"] = [sorted(grp) for grp in groups]
-        print(json.dumps({"status": "feasible", "objective": None, "solution": sol}))
-    else:
+    if status not in (cp_model.OPTIMAL, cp_model.FEASIBLE):
         print(json.dumps({"status": "unknown", "objective": None, "solution": None}))
+        return
+
+    schedule = [
+        [[3 * group + slot + 1 for slot in range(3)] for group in range(7)]
+    ]
+    for week in range(n_weeks - 1):
+        groups = []
+        for line_index, line in enumerate(FANO_LINES):
+            group = sorted(
+                3 * point + solver.value(line_values[(week, point, line_index)]) + 1
+                for point in line
+            )
+            groups.append(group)
+        schedule.append(groups)
+
+    _validate_schedule(schedule)
+
+    print(f"Solver status: {solver.status_name(status)}")
+    sol = {}
+    for week, groups in enumerate(schedule, start=1):
+        week_str = "  ".join(f"[{' '.join(map(str, group))}]" for group in groups)
+        print(f"Week {week}: {week_str}")
+        sol[f"week_{week}"] = groups
+    print(json.dumps({"status": "feasible", "objective": None, "solution": sol}))
 
 
-solve_social_golfers(n_groups=6, group_size=3, n_weeks=8)
+solve_social_golfers()

@@ -63,7 +63,7 @@ async def _call_check_over_protocol(
     callback — so callback delivery itself proves the token echo.
     """
     monkeypatch.setattr(
-        "openconstraint_mcp.minizinc.core.subprocess.run",
+        "openconstraint_mcp.minizinc.core.subprocess.Popen",
         lambda *a, **k: FakeCompletedProcess(stdout="", stderr="", returncode=0),
     )
 
