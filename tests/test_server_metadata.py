@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import sys
 from importlib import metadata
 from pathlib import Path
 
@@ -7,7 +8,9 @@ import pytest
 
 # Tests deliberately white-box server internals, which are private by design.
 # noinspection PyProtectedMember
+from openconstraint_mcp.childproc import ChildProcessTracker
 from openconstraint_mcp.jobs import JobRegistry
+from openconstraint_mcp.proc import popen_process_group
 from openconstraint_mcp.server import (
     _homepage_url,
     _make_lifespan,
@@ -18,7 +21,50 @@ from openconstraint_mcp.server import (
 
 def _boot_lifespan() -> object:
     """A wired lifespan over a fresh server-owned solve registry (boot tests)."""
-    return _make_lifespan(JobRegistry())
+    return _make_lifespan(JobRegistry(), ChildProcessTracker())
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_lifespan_teardown_terminates_in_flight_sync_child(
+    fake_runtime_dir: Path,
+) -> None:
+    # The synchronous tools register their live child with the tracker; the
+    # lifespan must terminate whatever is still in flight on teardown so it is
+    # not orphaned, the same coverage background-job children already get.
+    tracker = ChildProcessTracker()
+    child = popen_process_group([sys.executable, "-c", "import time; time.sleep(60)"])
+    tracker.register(child)
+    lifespan = _make_lifespan(JobRegistry(), tracker)
+
+    async with lifespan(create_mcp_server()):
+        assert child.poll() is None  # still running within the server's lifetime
+
+    assert child.wait(timeout=5) is not None  # terminated on teardown
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_lifespan_teardown_reaps_sync_child_even_if_registry_shutdown_raises(
+    fake_runtime_dir: Path,
+) -> None:
+    # The two teardown steps cover disjoint child sets and are independently
+    # guarded: a failure tearing down the background-job registry must not skip
+    # terminating the in-flight synchronous children, or they would be orphaned.
+    class _BoomRegistry:
+        def shutdown(self) -> None:
+            raise RuntimeError("registry boom")
+
+    tracker = ChildProcessTracker()
+    child = popen_process_group([sys.executable, "-c", "import time; time.sleep(60)"])
+    tracker.register(child)
+    lifespan = _make_lifespan(_BoomRegistry(), tracker)  # type: ignore[arg-type]
+
+    with pytest.raises(RuntimeError, match="registry boom"):
+        async with lifespan(create_mcp_server()):
+            assert child.poll() is None  # still running within the server's lifetime
+
+    assert child.wait(timeout=5) is not None  # reaped despite the registry failure
 
 
 # --- website_url metadata --------------------------------------------------

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import subprocess
 from typing import Any
 
 # Shared `--json-stream` test fixtures for the MiniZinc solve/checker parsers and
@@ -15,13 +16,64 @@ from typing import Any
 
 
 class FakeCompletedProcess:
-    """Stand-in for ``subprocess.CompletedProcess`` with just the attributes the
-    MiniZinc runner reads: ``stdout``, ``stderr``, ``returncode``."""
+    """Stand-in for the ``subprocess.Popen`` handle the MiniZinc runner drives.
 
-    def __init__(self, stdout: str, stderr: str, returncode: int) -> None:
+    ``_invoke_minizinc`` launches via ``subprocess.Popen`` and reads the result
+    through ``communicate``/``returncode`` (Popen rather than ``subprocess.run``
+    so the live child can be registered with the teardown tracker). Tests patch
+    ``core.subprocess.Popen`` to return one of these; it exposes exactly what the
+    runner touches: ``communicate`` (returning the captured ``stdout``/``stderr``),
+    ``returncode``, ``poll`` (non-``None`` so a tree-kill on this fake is a no-op),
+    ``pid``, and the context-manager protocol.
+
+    With ``timeout=True`` the first ``communicate`` raises ``TimeoutExpired`` (the
+    runner then tree-kills and drains a second ``communicate``, which returns the
+    partial ``stdout``) — the way a real wall-clock-cap firing is exercised. The
+    timeout passed to ``communicate`` is recorded on ``communicate_timeout`` (and,
+    when the recording helpers attach a call record, into that record) so a test
+    can assert the outer grace window.
+    """
+
+    def __init__(self, stdout: str, stderr: str, returncode: int, *, timeout: bool = False) -> None:
         self.stdout = stdout
         self.stderr = stderr
         self.returncode = returncode
+        self.pid = 4321
+        self._timeout = timeout
+        self._communicate_calls = 0
+        self.communicate_timeout: float | None = None
+        self._record: dict[str, Any] | None = None
+
+    def poll(self) -> int | None:
+        # Non-None → terminate_process_tree treats the fake as already-exited, so
+        # the timeout path never reaches os.getpgid/killpg on a fake pid.
+        return self.returncode
+
+    def wait(self, timeout: float | None = None) -> int:
+        return self.returncode
+
+    def terminate(self) -> None:
+        pass
+
+    def kill(self) -> None:
+        pass
+
+    def communicate(self, timeout: float | None = None) -> tuple[str, str]:
+        self._communicate_calls += 1
+        self.communicate_timeout = timeout
+        if self._record is not None:
+            self._record["communicate_timeout"] = timeout
+        if self._timeout and self._communicate_calls == 1:
+            raise subprocess.TimeoutExpired(
+                cmd="minizinc", timeout=timeout or 0, output=self.stdout, stderr=self.stderr
+            )
+        return self.stdout, self.stderr
+
+    def __enter__(self) -> FakeCompletedProcess:
+        return self
+
+    def __exit__(self, *exc: object) -> bool:
+        return False
 
 
 def stream(*objects: dict[str, Any]) -> str:

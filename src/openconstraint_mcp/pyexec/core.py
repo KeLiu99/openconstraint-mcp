@@ -50,6 +50,7 @@ from typing import Literal
 
 from pydantic import BaseModel
 
+from ..childproc import ChildProcessTracker
 from ..proc import popen_process_group, terminate_process_tree
 
 DEFAULT_PYEXEC_TIMEOUT_MS: int = 30_000
@@ -145,7 +146,10 @@ def _read_capped(path: Path) -> tuple[str, int]:
 
 
 def run_cpsat_python(
-    source: str, *, timeout_ms: int = DEFAULT_PYEXEC_TIMEOUT_MS
+    source: str,
+    *,
+    timeout_ms: int = DEFAULT_PYEXEC_TIMEOUT_MS,
+    tracker: ChildProcessTracker | None = None,
 ) -> CpsatPythonResult:
     """Execute OR-Tools CP-SAT Python ``source`` in a child process.
 
@@ -157,6 +161,11 @@ def run_cpsat_python(
     Raises ``ValueError`` on a non-positive ``timeout_ms`` — matching the
     MiniZinc path's ``_validate_model_and_timeout`` so a zero/negative cap is
     rejected up front rather than spawning a child only to kill it immediately.
+
+    When a ``tracker`` is supplied (the server's per-run child tracker), the live
+    child is registered for the duration of the run so an abrupt server teardown
+    can terminate it instead of orphaning it; it is unregistered on every exit
+    path (clean, timeout-kill, or output-cap kill).
     """
     if timeout_ms <= 0:
         raise ValueError("timeout_ms must be positive")
@@ -192,26 +201,32 @@ def run_cpsat_python(
                 cwd=str(tmp),
             )
 
-            deadline = start + timeout_s
-            while proc.poll() is None:
-                now = time.monotonic()
-                if now >= deadline:
-                    terminate_process_tree(proc)
-                    timed_out = True
-                    break
-                # Check combined output size to enforce cap
-                try:
-                    combined = stdout_path.stat().st_size + stderr_path.stat().st_size
-                except OSError:
-                    combined = 0
-                if combined > MAX_OUTPUT_BYTES:
-                    terminate_process_tree(proc)
-                    truncated = True
-                    break
-                time.sleep(_POLL_INTERVAL_S)
+            if tracker is not None:
+                tracker.register(proc)
+            try:
+                deadline = start + timeout_s
+                while proc.poll() is None:
+                    now = time.monotonic()
+                    if now >= deadline:
+                        terminate_process_tree(proc)
+                        timed_out = True
+                        break
+                    # Check combined output size to enforce cap
+                    try:
+                        combined = stdout_path.stat().st_size + stderr_path.stat().st_size
+                    except OSError:
+                        combined = 0
+                    if combined > MAX_OUTPUT_BYTES:
+                        terminate_process_tree(proc)
+                        truncated = True
+                        break
+                    time.sleep(_POLL_INTERVAL_S)
 
-            # Wait for process to be fully reaped after kill or natural exit
-            proc.wait()
+                # Wait for process to be fully reaped after kill or natural exit
+                proc.wait()
+            finally:
+                if tracker is not None:
+                    tracker.unregister(proc)
 
         return_code = proc.returncode
         elapsed_ms = max(int((time.monotonic() - start) * 1000), 0)

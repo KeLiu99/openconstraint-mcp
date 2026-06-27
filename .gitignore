@@ -50,3 +50,6 @@ docs/*
 /examples/social_golfers/model_table_streamlined.mzn
 /examples/social_golfers/data_15.dzn
 /examples/social_golfers/data_18.dzn
+/examples/social_golfers/cpsat_24/.openconstraint-model.json
+/examples/social_golfers/cpsat_24/problem.txt
+/examples/social_golfers/cpsat_24/solution.py

@@ -14,6 +14,7 @@ from pathlib import Path
 
 from pydantic import BaseModel, computed_field
 
+from ..childproc import ChildProcessTracker
 from ..save_target import (
     MANIFEST_FILENAME,
     commit_staged_dir,
@@ -100,6 +101,7 @@ def save_verified_cpsat_python(
     problem: str | None = None,
     timeout_ms: int = DEFAULT_PYEXEC_TIMEOUT_MS,
     overwrite: bool = False,
+    tracker: ChildProcessTracker | None = None,
 ) -> SaveVerifiedPythonResult:
     """Re-run ``source`` and persist it when it yields a verified solution.
 
@@ -110,7 +112,7 @@ def save_verified_cpsat_python(
     nothing on a non-verified run is guaranteed — the commit never starts.
     """
     target = validate_save_target(target_dir, overwrite=overwrite)
-    run_result = run_cpsat_python(source, timeout_ms=timeout_ms)
+    run_result = run_cpsat_python(source, timeout_ms=timeout_ms, tracker=tracker)
 
     if run_result.status not in VERIFIED_STATUSES or not run_result.solution:
         reason_parts = [f"status={run_result.status!r}"]

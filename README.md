@@ -1023,7 +1023,9 @@ also ships a `model.mzc.mzn` solution checker:
   groups of `group_size` golfers over `n_weeks` weeks so no pair ever shares a
   group twice (`solve satisfy`). The shipped data is the 6-3-8 instance — 18
   golfers in 6 groups of 3 over 8 weeks, the most weeks a 6-3 schedule can reach
-  before some pair must repeat.
+  before some pair must repeat. The CP-SAT examples under `cpsat/` and
+  `cpsat_24/` are specialized Python constructions for the 7-3-10 and 8-3-11
+  boundary instances.
 - **`examples/australia_map_coloring`** — colour Australia's seven
   states/territories with three colours so no two bordering regions share one
   (`solve satisfy`). Its data (`nc = 3`) is inline, so there is no `data.dzn`;
