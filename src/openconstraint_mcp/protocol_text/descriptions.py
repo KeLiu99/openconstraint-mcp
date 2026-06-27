@@ -14,6 +14,16 @@ _LOCAL_ONLY_GUARANTEE = (
     "Runs locally through the managed runtime: no network, no LLM, no telemetry."
 )
 
+# CP-SAT tools execute arbitrary Python under the server's own interpreter, not
+# the managed runtime, so the wrapper's offline guarantee cannot extend to the
+# child — keep that posture honest rather than reusing _LOCAL_ONLY_GUARANTEE.
+_CPSAT_CHILD_POSTURE = (
+    "Network posture: the server wrapper makes no network, LLM, or telemetry "
+    "calls, but the child is arbitrary, unsandboxed Python run under the "
+    "server's interpreter — it can open sockets, import `requests`, or shell "
+    "out. 'Offline' describes the wrapper here, not the executed script."
+)
+
 _UNKNOWN_JOB_ID_ERROR = "An unknown `job_id` is an MCP error."
 
 _NO_ARGS_LIST_TOOL = "Takes no arguments; never downloads or runs anything."
@@ -494,7 +504,26 @@ RUN_CPSAT_PYTHON_DESCRIPTION = (
     "`stderr`/`stdout`. Output beyond 1 MB is truncated and the child killed. "
     "On `timeout`, `solution`/`objective` carry the last intermediate result "
     "block the script printed (the child runs unbuffered, so a best-so-far "
-    "emitted from a CpSolverSolutionCallback survives), else null. " + _LOCAL_ONLY_GUARANTEE
+    "emitted from a CpSolverSolutionCallback survives), else null. " + _CPSAT_CHILD_POSTURE
+)
+
+RUN_CPSAT_PYTHON_FILE_DESCRIPTION = (
+    "Execute an OR-Tools CP-SAT Python script from a LOCAL file path — the "
+    "path-based sibling of `run_cpsat_python`. Pass `script_path` instead of "
+    "pasting the whole source, so iterating on a local file does not mean "
+    "re-copying it on every call. The script runs with its working directory set "
+    "to the file's own directory, so a relative `open()` of a sibling data file "
+    "or `import` of a helper module resolves (mirroring the MiniZinc file tools). "
+    "`script_path` is resolved to absolute and validated before any run: a "
+    "missing path, a non-file, an empty/whitespace-only script, or non-UTF-8 "
+    "content is rejected with an actionable MCP error and nothing runs. Same "
+    "execution contract, output cap, timeout, and tree-kill as `run_cpsat_python`: "
+    "the script MUST emit a single JSON object to stdout as its last line "
+    '(`{"status": "<status>", "objective": <float|null>, "solution": {<str: val>}}`), '
+    "and the returned CpsatPythonResult has the identical shape (`status`, "
+    "`solution`, `objective`, `stdout`, `stderr`, `return_code`, `timed_out`, "
+    "`truncated`, `duration_ms`), including `timeout` partial recovery. "
+    + _CPSAT_CHILD_POSTURE
 )
 
 SOLVE_CONSTRAINT_PROBLEM_PROMPT_DESCRIPTION = (
@@ -532,7 +561,7 @@ SAVE_VERIFIED_CPSAT_PYTHON_DESCRIPTION = (
     "tool) — 'verified' means only that this re-run produced a feasible/optimal "
     "status. CP-SAT's nondeterminism may yield a different (but still valid) "
     "solution from the prior run; the save gate checks status, not "
-    "solution-equality. " + _LOCAL_ONLY_GUARANTEE
+    "solution-equality. " + _CPSAT_CHILD_POSTURE
 )
 
 SOLVE_CPSAT_PYTHON_PROMPT_DESCRIPTION = (

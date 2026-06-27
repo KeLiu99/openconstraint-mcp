@@ -16,6 +16,7 @@ from openconstraint_mcp.pyexec.core import (
     CpsatPythonResult,
     _read_capped,
     run_cpsat_python,
+    run_cpsat_python_file,
 )
 
 _VALID_SOLUTION = {"x": 3, "y": 7}
@@ -436,3 +437,141 @@ def test_read_capped_missing_file_returns_empty(tmp_path: Path) -> None:
 
     assert text == ""
     assert size == 0
+
+
+# --- run_cpsat_python_file: path-based variant -----------------------------
+
+
+def _run_file_with_mocked_proc(
+    script_path: Path,
+    *,
+    stdout_content: str = _VALID_STDOUT,
+    returncode: int = 0,
+    timeout_ms: int = 5000,
+    tracker: Any = None,
+) -> tuple[CpsatPythonResult, dict[str, Any]]:
+    """Run run_cpsat_python_file with popen patched; capture the popen call."""
+    captured: dict[str, Any] = {}
+
+    def _fake_popen_group(cmd: list[str], **kwargs: Any) -> MagicMock:
+        captured["cmd"] = cmd
+        captured.update(kwargs)
+        fake = MagicMock()
+        fake.pid = 1234
+        fake.returncode = returncode
+        stdout_file = kwargs.get("stdout")
+        if stdout_file and hasattr(stdout_file, "write"):
+            stdout_file.write(stdout_content)
+            stdout_file.flush()
+        fake.poll = lambda: returncode
+        fake.wait.return_value = returncode
+        return fake
+
+    with (
+        patch(
+            "openconstraint_mcp.pyexec.core.popen_process_group",
+            side_effect=_fake_popen_group,
+        ),
+        patch("openconstraint_mcp.pyexec.core.terminate_process_tree"),
+    ):
+        result = run_cpsat_python_file(script_path, timeout_ms=timeout_ms, tracker=tracker)
+    return result, captured
+
+
+# (k) a valid script file delegates to the same execution/parse path as inline.
+def test_run_cpsat_python_file_parses_valid_solution(tmp_path: Path) -> None:
+    script = tmp_path / "model.py"
+    script.write_text("print('ignored by mock')", encoding="utf-8")
+
+    result, _ = _run_file_with_mocked_proc(script)
+
+    assert result.status == "optimal"
+    assert result.solution == _VALID_SOLUTION
+    assert result.objective == 10
+
+
+# (k1) the key value-add: the script runs in its OWN directory (cwd=parent), so a
+# relative open()/import resolves — unlike inline, which runs in a throwaway tempdir.
+def test_run_cpsat_python_file_runs_in_script_directory(tmp_path: Path) -> None:
+    script = tmp_path / "sub" / "model.py"
+    script.parent.mkdir()
+    script.write_text("print('x')", encoding="utf-8")
+
+    _, captured = _run_file_with_mocked_proc(script)
+
+    assert captured["cwd"] == str(script.parent.resolve())
+
+
+# (k2) argv runs the real file path unbuffered (-u), not a copy.
+def test_run_cpsat_python_file_argv_targets_file_unbuffered(tmp_path: Path) -> None:
+    script = tmp_path / "model.py"
+    script.write_text("print('x')", encoding="utf-8")
+
+    _, captured = _run_file_with_mocked_proc(script)
+
+    assert captured["cmd"] == [sys.executable, "-u", str(script.resolve())]
+
+
+# (k3) tracker is registered then unregistered on the file path too.
+def test_run_cpsat_python_file_registers_then_unregisters_child(tmp_path: Path) -> None:
+    script = tmp_path / "model.py"
+    script.write_text("print('x')", encoding="utf-8")
+    tracker = _SpyTracker()
+
+    _run_file_with_mocked_proc(script, tracker=tracker)
+
+    assert [name for name, _ in tracker.events] == ["register", "unregister"]
+
+
+# (k4) a missing path is rejected before any child is spawned.
+def test_run_cpsat_python_file_missing_path_raises(tmp_path: Path) -> None:
+    missing = tmp_path / "nope.py"
+
+    with patch("openconstraint_mcp.pyexec.core.popen_process_group") as fake_popen:
+        with pytest.raises(ValueError, match="does not exist"):
+            run_cpsat_python_file(missing)
+    fake_popen.assert_not_called()
+
+
+# (k5) a directory is not a runnable script.
+def test_run_cpsat_python_file_directory_raises(tmp_path: Path) -> None:
+    with patch("openconstraint_mcp.pyexec.core.popen_process_group") as fake_popen:
+        with pytest.raises(ValueError, match="not a file"):
+            run_cpsat_python_file(tmp_path)
+    fake_popen.assert_not_called()
+
+
+# (k6) an empty/whitespace-only script is rejected with a clear error.
+def test_run_cpsat_python_file_empty_file_raises(tmp_path: Path) -> None:
+    script = tmp_path / "empty.py"
+    script.write_text("   \n", encoding="utf-8")
+
+    with patch("openconstraint_mcp.pyexec.core.popen_process_group") as fake_popen:
+        with pytest.raises(ValueError, match="is empty"):
+            run_cpsat_python_file(script)
+    fake_popen.assert_not_called()
+
+
+# (k7) a non-UTF-8 file surfaces a clear ValueError, not an opaque decode traceback.
+def test_run_cpsat_python_file_non_utf8_raises(tmp_path: Path) -> None:
+    script = tmp_path / "latin1.py"
+    script.write_bytes(b"print('caf\xe9')")
+
+    with patch("openconstraint_mcp.pyexec.core.popen_process_group") as fake_popen:
+        with pytest.raises(ValueError, match="not valid UTF-8"):
+            run_cpsat_python_file(script)
+    fake_popen.assert_not_called()
+
+
+# (k8) a non-positive timeout is rejected before any child is spawned.
+@pytest.mark.parametrize("timeout_ms", [0, -1])
+def test_run_cpsat_python_file_non_positive_timeout_raises(
+    tmp_path: Path, timeout_ms: int
+) -> None:
+    script = tmp_path / "model.py"
+    script.write_text("print('x')", encoding="utf-8")
+
+    with patch("openconstraint_mcp.pyexec.core.popen_process_group") as fake_popen:
+        with pytest.raises(ValueError, match="timeout_ms must be positive"):
+            run_cpsat_python_file(script, timeout_ms=timeout_ms)
+    fake_popen.assert_not_called()

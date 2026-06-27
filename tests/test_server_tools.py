@@ -2547,3 +2547,51 @@ async def test_run_cpsat_python_routes_to_cpsat_result(
     result = _structured(await mcp.call_tool("run_cpsat_python", {"source": "print('hi')"}))
     assert result["status"] == "optimal"
     assert result["solution"] == {"x": 3}
+
+
+# --- run_cpsat_python_file ----------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_run_cpsat_python_file_tool_is_listed() -> None:
+    mcp = create_mcp_server()
+    tools = await mcp.list_tools()
+    names = {tool.name for tool in tools}
+    assert "run_cpsat_python_file" in names
+
+
+@pytest.mark.asyncio
+async def test_run_cpsat_python_file_routes_path_to_cpsat_result(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from pathlib import Path
+
+    from openconstraint_mcp.pyexec.core import CpsatPythonResult
+
+    fake_result = CpsatPythonResult(
+        status="optimal",
+        solution={"x": 3},
+        objective=3,
+        stdout='{"status":"optimal","objective":3,"solution":{"x":3}}',
+        stderr="",
+        return_code=0,
+        timed_out=False,
+        truncated=False,
+        duration_ms=42,
+    )
+    seen: dict[str, object] = {}
+
+    def _fake(script_path: Path, **kw: object) -> CpsatPythonResult:
+        seen["script_path"] = script_path
+        return fake_result
+
+    monkeypatch.setattr("openconstraint_mcp.server.run_cpsat_python_file", _fake)
+
+    mcp = create_mcp_server()
+    result = _structured(
+        await mcp.call_tool("run_cpsat_python_file", {"script_path": "/tmp/model.py"})
+    )
+    assert result["status"] == "optimal"
+    assert result["solution"] == {"x": 3}
+    # The string path is wrapped in a Path before reaching the executor.
+    assert seen["script_path"] == Path("/tmp/model.py")

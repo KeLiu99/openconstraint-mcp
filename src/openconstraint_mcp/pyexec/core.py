@@ -145,6 +145,30 @@ def _read_capped(path: Path) -> tuple[str, int]:
     return data.decode("utf-8", errors="replace"), size
 
 
+def _validate_script_path(script_path: Path) -> Path:
+    """Resolve and validate a CP-SAT Python script path before any subprocess.
+
+    Mirrors the MiniZinc path tools' contract (``_validate_model_data_paths``):
+    resolve to an absolute path (following a symlink the caller named), then
+    reject a missing or non-regular file, and an empty/whitespace-only or
+    non-UTF-8 script, with a clear ``ValueError`` naming the offending path. The
+    resolved path is returned so the caller uses the same path for argv and its
+    parent for ``cwd`` — a relative input can't then double-count its subdir.
+    """
+    script_path = script_path.resolve()
+    if not script_path.exists():
+        raise ValueError(f"script_path does not exist: {script_path}")
+    if not script_path.is_file():
+        raise ValueError(f"script_path is not a file: {script_path}")
+    try:
+        text = script_path.read_text(encoding="utf-8")
+    except UnicodeDecodeError as exc:
+        raise ValueError(f"{script_path} is not valid UTF-8") from exc
+    if not text.strip():
+        raise ValueError(f"script file is empty: {script_path}")
+    return script_path
+
+
 def run_cpsat_python(
     source: str,
     *,
@@ -166,6 +190,74 @@ def run_cpsat_python(
     child is registered for the duration of the run so an abrupt server teardown
     can terminate it instead of orphaning it; it is unregistered on every exit
     path (clean, timeout-kill, or output-cap kill).
+
+    For an existing local file, use ``run_cpsat_python_file`` instead — it runs
+    the script in its own directory so relative file/import references resolve.
+    """
+    with tempfile.TemporaryDirectory() as tmp_dir:
+        tmp = Path(tmp_dir)
+        script = tmp / "script.py"
+        script.write_text(source, encoding="utf-8")
+        # Run from the temp dir: an inline snippet has no sibling files to find.
+        return _execute_cpsat(
+            _python_script_argv(script),
+            cwd=tmp,
+            timeout_ms=timeout_ms,
+            tracker=tracker,
+        )
+
+
+def _python_script_argv(script: Path) -> list[str]:
+    return [sys.executable, "-u", str(script)]
+
+
+def run_cpsat_python_file(
+    script_path: Path,
+    *,
+    timeout_ms: int = DEFAULT_PYEXEC_TIMEOUT_MS,
+    tracker: ChildProcessTracker | None = None,
+) -> CpsatPythonResult:
+    """Execute an existing OR-Tools CP-SAT Python file in its own directory.
+
+    The path-based counterpart to ``run_cpsat_python``: instead of pasting the
+    full source, the caller passes a local script path. The script runs with
+    ``cwd`` set to its parent directory, so a relative ``open()`` of a sibling
+    data file or ``import`` of a helper module resolves — the iteration win over
+    copying the whole file inline. Mirrors the MiniZinc file tools
+    (``solve_model_path``), which likewise run from the model's directory so a
+    relative ``include`` resolves.
+
+    Validates the path (exists / regular file / non-empty / UTF-8) with a clear
+    ``ValueError`` before any child is spawned. Same execution contract, output
+    cap, timeout, and tree-kill as ``run_cpsat_python``.
+    """
+    resolved = _validate_script_path(script_path)
+    return _execute_cpsat(
+        _python_script_argv(resolved),
+        cwd=resolved.parent,
+        timeout_ms=timeout_ms,
+        tracker=tracker,
+    )
+
+
+def _execute_cpsat(
+    argv: list[str],
+    cwd: Path,
+    *,
+    timeout_ms: int,
+    tracker: ChildProcessTracker | None,
+) -> CpsatPythonResult:
+    """Run a prepared CP-SAT child command, capturing bounded output.
+
+    Shared core of both entry points: ``run_cpsat_python`` writes source to a
+    temp script, ``run_cpsat_python_file`` uses an existing file; each builds
+    ``argv`` (``[sys.executable, "-u", <script>]``) and a ``cwd`` and delegates
+    here for the timeout / output-cap / tree-kill run loop, partial recovery, and
+    result parsing. Centralizing it keeps the two paths from drifting.
+
+    Raises ``ValueError`` on a non-positive ``timeout_ms`` — the single gate, so
+    a zero/negative cap is rejected before any child is spawned. ``tracker``
+    wiring (register for the run, unregister on every exit path) is handled here.
     """
     if timeout_ms <= 0:
         raise ValueError("timeout_ms must be positive")
@@ -176,9 +268,6 @@ def run_cpsat_python(
 
     with tempfile.TemporaryDirectory() as tmp_dir:
         tmp = Path(tmp_dir)
-        script = tmp / "script.py"
-        script.write_text(source, encoding="utf-8")
-
         stdout_path = tmp / "stdout.txt"
         stderr_path = tmp / "stderr.txt"
 
@@ -191,14 +280,14 @@ def run_cpsat_python(
                 # files as they happen (not on a full buffer) and a flushed
                 # intermediate result survives the timeout kill — see the partial
                 # recovery in the timeout branch below.
-                [sys.executable, "-u", str(script)],
+                argv,
                 stdout=stdout_f,
                 stderr=stderr_f,
                 # No stdin: over stdio the server's stdin is the JSON-RPC channel, so
                 # a script that reads input()/sys.stdin would steal protocol bytes or
                 # block the server. DEVNULL gives the child an immediate EOF instead.
                 stdin=subprocess.DEVNULL,
-                cwd=str(tmp),
+                cwd=str(cwd),
             )
 
             if tracker is not None:

@@ -875,6 +875,18 @@ server runs it in a **local child process**.
   time. On a clean run the final block (printed after `Solve` returns) is the
   authoritative result.
 
+- **`run_cpsat_python_file(script_path: str, timeout_ms: int = 30000)`** —
+  path-based sibling of `run_cpsat_python`. Pass a local `.py` path instead of
+  pasting the source, so iterating on a file does not mean re-copying it on
+  every call. The script runs with its working directory set to the file's own
+  directory, so a relative `open()` of a sibling data file or `import` of a
+  helper module resolves (mirroring `solve_minizinc_files`). `script_path` is
+  resolved to absolute and validated before any run — a missing path, a
+  non-file, an empty/whitespace-only script, or non-UTF-8 content is rejected
+  with a clear error and nothing runs. Same JSON output contract, output cap,
+  timeout, tree-kill, and `CpsatPythonResult` shape (including timeout partial
+  recovery) as `run_cpsat_python`.
+
 - **`save_verified_cpsat_python(source, target_dir, problem=None, timeout_ms=…, overwrite=False)`**
   — re-run `source` and persist it to a local directory only when the re-run
   yields a verified solution (`status` in `optimal`/`feasible` AND a non-null

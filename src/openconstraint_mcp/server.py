@@ -53,6 +53,7 @@ from .protocol_text.descriptions import (
     LIST_SOLVE_JOBS_DESCRIPTION,
     MCP_SERVER_INSTRUCTIONS,
     RUN_CPSAT_PYTHON_DESCRIPTION,
+    RUN_CPSAT_PYTHON_FILE_DESCRIPTION,
     SAVE_VERIFIED_CPSAT_PYTHON_DESCRIPTION,
     SAVE_VERIFIED_MINIZINC_MODEL_DESCRIPTION,
     SOLVE_CONSTRAINT_PROBLEM_PROMPT_DESCRIPTION,
@@ -71,7 +72,12 @@ from .protocol_text.results import (
     SOLVER_RUNTIME_CONFIG_CAUTION,
     STATS_PRESENTATION_REQUIREMENT,
 )
-from .pyexec.core import DEFAULT_PYEXEC_TIMEOUT_MS, CpsatPythonResult, run_cpsat_python
+from .pyexec.core import (
+    DEFAULT_PYEXEC_TIMEOUT_MS,
+    CpsatPythonResult,
+    run_cpsat_python,
+    run_cpsat_python_file,
+)
 from .pyexec.save import SaveVerifiedPythonResult, save_verified_cpsat_python
 from .runtime import RuntimeMissingError, get_runtime_status
 from .schemas import (
@@ -212,10 +218,14 @@ def _format_save_result_content(result: SaveVerifiedModelResult) -> str:
             for artifact in result.files
         )
     lines.extend(["", f"Check status: {result.check.status}"])
-    if result.solve is not None:
-        lines.append(f"Solve status: {result.solve.status}")
-        if result.solve.checker is not None:
-            lines.append(f"Checker status: {result.solve.checker.status}")
+
+    solve = result.solve
+    if solve is None:
+        return "\n".join(lines)
+
+    lines.append(f"Solve status: {solve.status}")
+    if solve.checker is not None:
+        lines.append(f"Checker status: {solve.checker.status}")
     return "\n".join(lines)
 
 
@@ -858,6 +868,25 @@ def create_mcp_server() -> FastMCP:
         result = await _run_blocking(
             functools.partial(
                 run_cpsat_python, source, timeout_ms=timeout_ms, tracker=child_tracker
+            )
+        )
+        await _status_finished(ctx, status.CPSAT_PYTHON_STAGES)
+        return result
+
+    @mcp.tool(name="run_cpsat_python_file", description=RUN_CPSAT_PYTHON_FILE_DESCRIPTION)
+    @_as_mcp_error(ValueError)
+    async def run_cpsat_python_file_tool(
+        script_path: str,
+        timeout_ms: int = DEFAULT_PYEXEC_TIMEOUT_MS,
+        ctx: Context | None = None,
+    ) -> CpsatPythonResult:
+        await _status_starting(ctx, status.CPSAT_PYTHON_STAGES)
+        result = await _run_blocking(
+            functools.partial(
+                run_cpsat_python_file,
+                Path(script_path),
+                timeout_ms=timeout_ms,
+                tracker=child_tracker,
             )
         )
         await _status_finished(ctx, status.CPSAT_PYTHON_STAGES)
