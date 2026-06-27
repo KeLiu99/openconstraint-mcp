@@ -13,11 +13,11 @@ import pytest
 
 from openconstraint_mcp.pyexec.core import (
     MAX_OUTPUT_BYTES,
-    CpsatPythonResult,
     _read_capped,
     run_cpsat_python,
     run_cpsat_python_file,
 )
+from openconstraint_mcp.schemas import CpsatPythonResult
 
 _VALID_SOLUTION = {"x": 3, "y": 7}
 _VALID_STDOUT = json.dumps({"status": "optimal", "objective": 10, "solution": _VALID_SOLUTION})
@@ -533,6 +533,176 @@ def test_run_cpsat_python_file_missing_path_raises(tmp_path: Path) -> None:
     fake_popen.assert_not_called()
 
 
+# --- on_start hook -----------------------------------------------------------
+
+
+def test_run_cpsat_python_on_start_called_once_with_live_proc() -> None:
+    """on_start receives the Popen handle exactly once right after launch."""
+    received: list[Any] = []
+
+    def _capture(proc: Any) -> None:
+        received.append(proc)
+
+    def _fake_popen_group(cmd: list[str], **kwargs: Any) -> MagicMock:
+        fake = MagicMock()
+        fake.pid = 1234
+        fake.returncode = 0
+        stdout_file = kwargs.get("stdout")
+        if stdout_file and hasattr(stdout_file, "write"):
+            stdout_file.write(_VALID_STDOUT)
+            stdout_file.flush()
+        fake.poll = lambda: 0
+        fake.wait.return_value = 0
+        return fake
+
+    with (
+        patch("openconstraint_mcp.pyexec.core.popen_process_group", side_effect=_fake_popen_group),
+        patch("openconstraint_mcp.pyexec.core.terminate_process_tree"),
+    ):
+        run_cpsat_python("print('hi')", timeout_ms=5000, on_start=_capture)
+
+    assert len(received) == 1
+    assert received[0].pid == 1234
+
+
+def test_run_cpsat_python_on_start_terminate_ends_run() -> None:
+    """Calling terminate_process_tree inside on_start kills the child."""
+    killed: list[Any] = []
+
+    def _kill_it(proc: Any) -> None:
+        from openconstraint_mcp.pyexec.core import terminate_process_tree
+
+        terminate_process_tree(proc)
+        killed.append(proc)
+
+    def _fake_popen_group(cmd: list[str], **kwargs: Any) -> MagicMock:
+        fake = MagicMock()
+        fake.pid = 9999
+        fake.returncode = None  # simulate live
+        stdout_file = kwargs.get("stdout")
+        if stdout_file and hasattr(stdout_file, "write"):
+            stdout_file.write("")
+            stdout_file.flush()
+        # poll returns None first (live), then non-zero after the kill
+        _calls = [0]
+
+        def _poll() -> int | None:
+            _calls[0] += 1
+            if _calls[0] == 1:
+                return None
+            fake.returncode = -15
+            return -15
+
+        fake.poll = _poll
+        fake.wait.return_value = -15
+        return fake
+
+    with (
+        patch("openconstraint_mcp.pyexec.core.popen_process_group", side_effect=_fake_popen_group),
+        patch("openconstraint_mcp.pyexec.core.terminate_process_tree") as mock_kill,
+    ):
+        run_cpsat_python("print('hi')", timeout_ms=5000, on_start=_kill_it)
+
+    assert mock_kill.called
+    assert len(killed) == 1
+
+
+def test_run_cpsat_python_on_start_raise_still_reaps_child() -> None:
+    """If on_start raises, the finally still kills and reaps the live child.
+
+    The callback fires inside the reaping guard, so a raising hook must not
+    orphan the process it was handed — the finally terminates and waits it.
+    """
+
+    def _boom(proc: Any) -> None:
+        raise RuntimeError("on_start failed")
+
+    def _fake_popen_group(cmd: list[str], **kwargs: Any) -> MagicMock:
+        fake = MagicMock()
+        fake.pid = 4242
+        fake.returncode = None  # live when on_start fires
+        _calls = [0]
+
+        def _poll() -> int | None:
+            _calls[0] += 1
+            if _calls[0] == 1:
+                return None  # still running at the finally's reap check
+            fake.returncode = -15
+            return -15
+
+        fake.poll = _poll
+        fake.wait.return_value = -15
+        return fake
+
+    with (
+        patch("openconstraint_mcp.pyexec.core.popen_process_group", side_effect=_fake_popen_group),
+        patch("openconstraint_mcp.pyexec.core.terminate_process_tree") as mock_kill,
+    ):
+        with pytest.raises(RuntimeError, match="on_start failed"):
+            run_cpsat_python("print('hi')", timeout_ms=5000, on_start=_boom)
+
+    # The reaping finally must have terminated the still-live child.
+    assert mock_kill.called
+
+
+def test_run_cpsat_python_no_on_start_default_is_none() -> None:
+    """Omitting on_start (default None) behaves identically to the old API."""
+    result = _run_with_mocked_proc()
+
+    assert result.status == "optimal"
+
+
+def test_validate_script_path_unreadable_raises_value_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An OSError (e.g. unreadable file) is translated to ValueError, not leaked raw.
+
+    So the tool's @_as_mcp_error(ValueError, ...) wrapper turns a mode-000 script
+    into an actionable client message instead of an opaque traceback.
+    """
+    from openconstraint_mcp.pyexec.core import _validate_script_path
+
+    script = tmp_path / "secret.py"
+    script.write_text("print('x')", encoding="utf-8")
+
+    def _boom(*_a: Any, **_k: Any) -> str:
+        raise PermissionError("Permission denied")
+
+    monkeypatch.setattr(Path, "read_text", _boom)
+    with pytest.raises(ValueError, match="not readable"):
+        _validate_script_path(script)
+
+
+def test_run_cpsat_python_file_on_start_called_once(tmp_path: Path) -> None:
+    """on_start works on the file-path entry point too."""
+    script = tmp_path / "model.py"
+    script.write_text("print('x')", encoding="utf-8")
+    received: list[Any] = []
+
+    _, _ = _run_file_with_mocked_proc(script)  # baseline: no on_start
+
+    def _fake_popen_group(cmd: list[str], **kwargs: Any) -> MagicMock:
+        fake = MagicMock()
+        fake.pid = 7777
+        fake.returncode = 0
+        stdout_file = kwargs.get("stdout")
+        if stdout_file and hasattr(stdout_file, "write"):
+            stdout_file.write(_VALID_STDOUT)
+            stdout_file.flush()
+        fake.poll = lambda: 0
+        fake.wait.return_value = 0
+        return fake
+
+    with (
+        patch("openconstraint_mcp.pyexec.core.popen_process_group", side_effect=_fake_popen_group),
+        patch("openconstraint_mcp.pyexec.core.terminate_process_tree"),
+    ):
+        run_cpsat_python_file(script, timeout_ms=5000, on_start=lambda p: received.append(p))
+
+    assert len(received) == 1
+    assert received[0].pid == 7777
+
+
 # (k5) a directory is not a runnable script.
 def test_run_cpsat_python_file_directory_raises(tmp_path: Path) -> None:
     with patch("openconstraint_mcp.pyexec.core.popen_process_group") as fake_popen:
@@ -565,9 +735,7 @@ def test_run_cpsat_python_file_non_utf8_raises(tmp_path: Path) -> None:
 
 # (k8) a non-positive timeout is rejected before any child is spawned.
 @pytest.mark.parametrize("timeout_ms", [0, -1])
-def test_run_cpsat_python_file_non_positive_timeout_raises(
-    tmp_path: Path, timeout_ms: int
-) -> None:
+def test_run_cpsat_python_file_non_positive_timeout_raises(tmp_path: Path, timeout_ms: int) -> None:
     script = tmp_path / "model.py"
     script.write_text("print('x')", encoding="utf-8")
 

@@ -6,7 +6,7 @@ from typing import Any
 
 import pytest
 
-from openconstraint_mcp.jobs import JobRejectedError
+from openconstraint_mcp.job_errors import JobRejectedError
 from openconstraint_mcp.minizinc.core import MiniZincExecutionError
 from openconstraint_mcp.runtime import RuntimeMissingError
 

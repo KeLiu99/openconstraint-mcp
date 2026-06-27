@@ -33,7 +33,8 @@ from collections.abc import Sequence
 from dataclasses import dataclass, field
 from uuid import uuid4
 
-from .jobs import JobRegistry, JobRejectedError
+from .job_errors import JobRejectedError
+from .jobs import JobRegistry
 from .minizinc.core import DEFAULT_SOLVE_TIMEOUT_MS
 
 # portfolio_jobs reuses portfolio's synchronous admission (_admit_portfolio) and its

@@ -898,6 +898,54 @@ server runs it in a **local child process**.
   and it contains no untracked files. Returns `SaveVerifiedPythonResult`
   with `saved` (bool, derived from `status`), file list, and run details.
 
+### Background CP-SAT jobs
+
+For long-running CP-SAT solves (`timeout_ms` of minutes), the synchronous
+`run_cpsat_python` / `run_cpsat_python_file` tools will block past most MCP
+client per-call timeouts. Use the background-job surface instead — the
+CP-SAT analogue of the MiniZinc `submit_solve_job` / `get_solve_job` pair:
+
+- **`submit_cpsat_python_job(source: str, timeout_ms: int = 30000)`** — submit
+  inline OR-Tools CP-SAT Python source as a background job. Returns a
+  `CpsatPythonJobStatus` with an opaque `job_id` and an initial `state` of
+  `"queued"` or `"running"` (a very fast job may already be terminal). The same
+  output contract as `run_cpsat_python` applies.
+- **`submit_cpsat_python_file_job(script_path: str, timeout_ms: int = 30000)`**
+  — submit a local script file as a background job. The path is validated
+  before admission (missing / non-file / empty / non-UTF-8 → MCP error, no
+  job created). The script runs in its own directory so relative imports and
+  data-file opens resolve.
+- **`get_cpsat_python_job(job_id: str)`** — poll a job by `job_id` (works
+  for both inline and file submits). Returns a `CpsatPythonJobStatus`: `state`
+  (`"queued"`, `"running"`, `"succeeded"`, `"failed"`, `"timeout"`,
+  `"cancelled"`), timing fields, an optional `result` (the full
+  `CpsatPythonResult`), and an optional `message`. **State contract:** `result`
+  is present exactly when `state` is `"succeeded"` or `"timeout"`; absent for
+  all other states. A script-level error (`status="error"`) is a `"succeeded"`
+  job (the child ran and produced a result); `"failed"` means the job machinery
+  raised before any result was produced. A `"timeout"` job carries its partial
+  `CpsatPythonResult` (`timed_out=True`, best-so-far `solution`/`objective`).
+  Pace polling against `timeout_ms - elapsed_ms`.
+- **`cancel_cpsat_python_job(job_id: str)`** — terminate a running job's child
+  process tree. Best-effort and idempotent; the job reaches `"cancelled"` (with
+  `result is None`).
+- **`list_cpsat_python_jobs()`** — list the retained CP-SAT jobs, one
+  `CpsatPythonJobStatus` each. Both inline-source and file-based jobs appear.
+
+#### Configuring CP-SAT registry bounds
+
+The CP-SAT job registry has its own three bounds, independently configurable
+from the MiniZinc registry:
+
+| Env var | Meaning | Default | Minimum |
+| --- | --- | --- | --- |
+| `OPENCONSTRAINT_MCP_CPSAT_MAX_RUNNING_JOBS` | CP-SAT jobs running concurrently | `4` | `1` |
+| `OPENCONSTRAINT_MCP_CPSAT_MAX_QUEUED_JOBS` | Submissions queued past the running cap | `16` | `0` |
+| `OPENCONSTRAINT_MCP_CPSAT_MAX_RETAINED_TERMINAL` | Finished jobs kept for status polling | `64` | `1` |
+
+An invalid value — non-integer or below the minimum — **fails fast at server
+start, naming the offending variable** (no silent fallback to the default).
+
 ### Security posture
 
 **The server executes user-provided Python locally. It is not sandboxed.**

@@ -17,7 +17,8 @@ from typing import Any
 
 import pytest
 
-from openconstraint_mcp.jobs import JobRegistry, JobRejectedError
+from openconstraint_mcp.job_errors import JobRejectedError
+from openconstraint_mcp.jobs import JobRegistry
 from openconstraint_mcp.minizinc.core import DEFAULT_SOLVE_TIMEOUT_MS
 
 # The portfolio engine retained for the background path; these are package-internal

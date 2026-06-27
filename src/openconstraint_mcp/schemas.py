@@ -5,6 +5,90 @@ from typing import Any, Literal, cast
 
 from pydantic import BaseModel, Field, field_validator, model_validator
 
+# ---------------------------------------------------------------------------
+# CP-SAT Python executor output models (moved from pyexec/core.py per D7 so
+# CpsatPythonJobStatus can reference CpsatPythonResult without a
+# schemas → pyexec.core edge that would break the dependency-free leaf).
+# ---------------------------------------------------------------------------
+
+CpsatStatus = Literal["optimal", "feasible", "infeasible", "unknown", "error", "timeout"]
+
+
+class CpsatPythonResult(BaseModel):
+    status: CpsatStatus
+    solution: dict | None
+    objective: float | int | None
+    stdout: str
+    stderr: str
+    return_code: int | None
+    timed_out: bool
+    truncated: bool
+    duration_ms: int
+
+
+# A background CP-SAT job's lifecycle state. Mirrors JobState; result-bearing
+# set is {succeeded, timeout} — same invariant as SolveJobStatus (D3).
+CpsatJobState = Literal["queued", "running", "succeeded", "failed", "timeout", "cancelled"]
+_CPSAT_RESULT_BEARING_STATES: frozenset[CpsatJobState] = cast(
+    "frozenset[CpsatJobState]", frozenset({"succeeded", "timeout"})
+)
+
+
+def cpsat_job_state_for_result(result: CpsatPythonResult) -> CpsatJobState:
+    """Map a produced ``CpsatPythonResult`` to its terminal ``CpsatJobState`` (D3).
+
+    ``timeout`` → ``timeout`` (result-bearing; partial recovered).
+    All other statuses — including ``error`` — → ``succeeded``: ``status="error"``
+    is a normal structured verdict (the child ran and produced output), not a
+    job-machinery failure. The job "succeeded at running the code"; the embedded
+    ``CpsatPythonResult.status`` tells the client whether the code itself errored.
+    ``failed`` is reserved for a worker exception with no result; ``cancelled``
+    for user cancel — both result-absent, consistent with ``result present ⇔
+    state ∈ {succeeded, timeout}``.
+    """
+    if result.timed_out or result.status == "timeout":
+        return "timeout"
+    return "succeeded"
+
+
+class CpsatPythonJobStatus(BaseModel):
+    """A background CP-SAT Python job's status snapshot.
+
+    Mirrors ``SolveJobStatus``: ``result`` is present IFF ``state`` is a
+    result-bearing terminal state (``succeeded`` or ``timeout``), absent for
+    ``queued``/``running`` and for ``failed``/``cancelled``. The invariant
+    ``result present ⇔ state ∈ {succeeded, timeout}`` is enforced.
+    ``timeout_ms`` echoes the caller's cap so a polling client can pace itself
+    (``remaining ≈ timeout_ms - elapsed_ms``). ``message`` carries failure/cancel
+    detail; a ``failed`` job has no result so its diagnostic lives only in ``message``.
+    """
+
+    job_id: str
+    state: CpsatJobState
+    timeout_ms: int
+    submitted_at_ms: int
+    started_at_ms: int | None = None
+    finished_at_ms: int | None = None
+    elapsed_ms: int | None = None
+    result: CpsatPythonResult | None = None
+    message: str | None = None
+
+    @model_validator(mode="after")
+    def _result_presence_matches_state(self) -> CpsatPythonJobStatus:
+        has_result = self.result is not None
+        expects_result = self.state in _CPSAT_RESULT_BEARING_STATES
+        if has_result and not expects_result:
+            raise ValueError(
+                f"CpsatPythonJobStatus state={self.state!r} must not carry a result "
+                "(result is present only for state 'succeeded' or 'timeout')"
+            )
+        if expects_result and not has_result:
+            raise ValueError(
+                f"CpsatPythonJobStatus state={self.state!r} requires a result "
+                "(state 'succeeded'/'timeout' ⇔ result is present)"
+            )
+        return self
+
 
 class RuntimeStatus(BaseModel):
     installed: bool

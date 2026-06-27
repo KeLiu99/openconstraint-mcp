@@ -15,7 +15,8 @@ from mcp.server.fastmcp import Context, FastMCP
 from mcp.types import CallToolResult, TextContent
 
 from .childproc import ChildProcessTracker
-from .jobs import JobRegistry, JobRejectedError
+from .job_errors import JobRejectedError
+from .jobs import JobRegistry
 from .minizinc.core import (
     DEFAULT_CHECK_TIMEOUT_MS,
     DEFAULT_INSPECT_TIMEOUT_MS,
@@ -37,6 +38,7 @@ from .minizinc.core import find_unsat_core as _find_unsat_core
 from .portfolio_jobs import PortfolioJobRegistry
 from .protocol_text import status
 from .protocol_text.descriptions import (
+    CANCEL_CPSAT_PYTHON_JOB_DESCRIPTION,
     CANCEL_PORTFOLIO_JOB_DESCRIPTION,
     CANCEL_SOLVE_JOB_DESCRIPTION,
     CHECK_MINIZINC_FILES_DESCRIPTION,
@@ -44,11 +46,13 @@ from .protocol_text.descriptions import (
     CHECK_RUNTIME_DESCRIPTION,
     FIND_UNSAT_CORE_DESCRIPTION,
     FIND_UNSAT_CORE_FILES_DESCRIPTION,
+    GET_CPSAT_PYTHON_JOB_DESCRIPTION,
     GET_PORTFOLIO_JOB_DESCRIPTION,
     GET_SOLVE_JOB_DESCRIPTION,
     INSPECT_MINIZINC_FILES_DESCRIPTION,
     INSPECT_MINIZINC_MODEL_DESCRIPTION,
     LIST_AVAILABLE_SOLVERS_DESCRIPTION,
+    LIST_CPSAT_PYTHON_JOBS_DESCRIPTION,
     LIST_PORTFOLIO_JOBS_DESCRIPTION,
     LIST_SOLVE_JOBS_DESCRIPTION,
     MCP_SERVER_INSTRUCTIONS,
@@ -60,6 +64,8 @@ from .protocol_text.descriptions import (
     SOLVE_CPSAT_PYTHON_PROMPT_DESCRIPTION,
     SOLVE_MINIZINC_FILES_DESCRIPTION,
     SOLVE_MINIZINC_MODEL_DESCRIPTION,
+    SUBMIT_CPSAT_PYTHON_FILE_JOB_DESCRIPTION,
+    SUBMIT_CPSAT_PYTHON_JOB_DESCRIPTION,
     SUBMIT_PORTFOLIO_JOB_DESCRIPTION,
     SUBMIT_SOLVE_JOB_DESCRIPTION,
 )
@@ -74,14 +80,16 @@ from .protocol_text.results import (
 )
 from .pyexec.core import (
     DEFAULT_PYEXEC_TIMEOUT_MS,
-    CpsatPythonResult,
     run_cpsat_python,
     run_cpsat_python_file,
 )
+from .pyexec.jobs import CpsatJobRegistry
 from .pyexec.save import SaveVerifiedPythonResult, save_verified_cpsat_python
 from .runtime import RuntimeMissingError, get_runtime_status
 from .schemas import (
     CheckResult,
+    CpsatPythonJobStatus,
+    CpsatPythonResult,
     ModelInspectionResult,
     PortfolioJobStatus,
     RuntimeStatus,
@@ -414,20 +422,16 @@ def _as_mcp_error(
 
 def _make_lifespan(
     registry: JobRegistry,
+    cpsat_registry: CpsatJobRegistry,
     child_tracker: ChildProcessTracker,
 ) -> Callable[[FastMCP[Any]], AbstractAsyncContextManager[None]]:
-    """Build the server lifespan bound to ``registry`` and ``child_tracker``.
+    """Build the server lifespan bound to the registries and ``child_tracker``.
 
-    Startup emits the boot diagnostic; teardown (after ``yield``) terminates every
-    in-flight child so none is orphaned before the process exits:
-    ``registry.shutdown()`` covers background solve jobs (and a background
-    portfolio's attempts — ordinary jobs in this same registry; the
-    ``PortfolioJobRegistry`` owns no threads or processes of its own), and
-    ``child_tracker.terminate_all()`` covers the *synchronous* tools' children (the
-    MiniZinc and CP-SAT subprocesses they run in a worker thread, which are
-    process-group leaders that would otherwise survive the server). Both are
-    created in ``create_mcp_server`` and captured by the tool closures, so the
-    lifespan must close over those same instances — hence a factory.
+    Teardown terminates every in-flight child so none is orphaned:
+    ``registry.shutdown()`` covers MiniZinc background jobs (and portfolio attempts),
+    ``cpsat_registry.shutdown()`` covers CP-SAT background jobs, and
+    ``child_tracker.terminate_all()`` covers the synchronous tools' children.
+    All three are independently guarded so a failure in one does not skip the others.
     """
 
     @asynccontextmanager
@@ -436,12 +440,13 @@ def _make_lifespan(
         try:
             yield
         finally:
-            # Disjoint child sets, independently guarded: a failure tearing down the
-            # job registry must not skip terminating the synchronous tools' children.
             try:
                 registry.shutdown()
             finally:
-                child_tracker.terminate_all()
+                try:
+                    cpsat_registry.shutdown()
+                finally:
+                    child_tracker.terminate_all()
 
     return _lifespan
 
@@ -486,17 +491,28 @@ def create_mcp_server() -> FastMCP:
     # pool and cannot starve the attempt pool. Retention of finished portfolio
     # records is bounded; the dominant capacity bound is the solve registry's.
     portfolios = PortfolioJobRegistry(registry)
+    # The server-owned CP-SAT background-job registry (the deliberate, bounded
+    # exception to "no global mutable state", like `registry`): parallel to the
+    # MiniZinc registry but for CP-SAT Python jobs. Bounds are independently
+    # overridable via CP-SAT-prefixed env vars; defaults match the MiniZinc values.
+    cpsat_registry = CpsatJobRegistry(
+        max_running_jobs=_env_int("OPENCONSTRAINT_MCP_CPSAT_MAX_RUNNING_JOBS", 4, minimum=1),
+        max_queued_jobs=_env_int("OPENCONSTRAINT_MCP_CPSAT_MAX_QUEUED_JOBS", 16, minimum=0),
+        max_retained_terminal=_env_int(
+            "OPENCONSTRAINT_MCP_CPSAT_MAX_RETAINED_TERMINAL", 64, minimum=1
+        ),
+    )
     # The server-owned tracker of in-flight SYNCHRONOUS-tool children (the
     # bounded "no global mutable state" exception, like `registry`): the sync
     # MiniZinc/CP-SAT tools register their child while it runs so the lifespan can
     # terminate it on teardown instead of orphaning it. Background-job children
-    # are handled by `registry.shutdown()`, not this tracker.
+    # are handled by `registry.shutdown()` / `cpsat_registry.shutdown()`.
     child_tracker = ChildProcessTracker()
     mcp: FastMCP[Any] = FastMCP(
         "openconstraint-mcp",
         instructions=MCP_SERVER_INSTRUCTIONS,
         website_url=_homepage_url(),
-        lifespan=_make_lifespan(registry, child_tracker),
+        lifespan=_make_lifespan(registry, cpsat_registry, child_tracker),
     )
 
     @mcp.tool(description=CHECK_RUNTIME_DESCRIPTION)
@@ -856,6 +872,44 @@ def create_mcp_server() -> FastMCP:
     # reachable — nothing to translate.
     def list_portfolio_jobs() -> list[PortfolioJobStatus]:
         return portfolios.list()
+
+    @mcp.tool(
+        name="submit_cpsat_python_job",
+        description=SUBMIT_CPSAT_PYTHON_JOB_DESCRIPTION,
+    )
+    @_as_mcp_error(ValueError, JobRejectedError)
+    def submit_cpsat_python_job(
+        source: str,
+        timeout_ms: int = DEFAULT_PYEXEC_TIMEOUT_MS,
+    ) -> CpsatPythonJobStatus:
+        job_id = cpsat_registry.submit_source(source, timeout_ms=timeout_ms)
+        return cpsat_registry.get(job_id)
+
+    @mcp.tool(
+        name="submit_cpsat_python_file_job",
+        description=SUBMIT_CPSAT_PYTHON_FILE_JOB_DESCRIPTION,
+    )
+    @_as_mcp_error(ValueError, JobRejectedError)
+    def submit_cpsat_python_file_job(
+        script_path: str,
+        timeout_ms: int = DEFAULT_PYEXEC_TIMEOUT_MS,
+    ) -> CpsatPythonJobStatus:
+        job_id = cpsat_registry.submit_file(Path(script_path), timeout_ms=timeout_ms)
+        return cpsat_registry.get(job_id)
+
+    @mcp.tool(name="get_cpsat_python_job", description=GET_CPSAT_PYTHON_JOB_DESCRIPTION)
+    @_as_mcp_error(ValueError)
+    def get_cpsat_python_job(job_id: str) -> CpsatPythonJobStatus:
+        return cpsat_registry.get(job_id)
+
+    @mcp.tool(name="cancel_cpsat_python_job", description=CANCEL_CPSAT_PYTHON_JOB_DESCRIPTION)
+    @_as_mcp_error(ValueError)
+    def cancel_cpsat_python_job(job_id: str) -> CpsatPythonJobStatus:
+        return cpsat_registry.cancel(job_id)
+
+    @mcp.tool(name="list_cpsat_python_jobs", description=LIST_CPSAT_PYTHON_JOBS_DESCRIPTION)
+    def list_cpsat_python_jobs() -> list[CpsatPythonJobStatus]:
+        return cpsat_registry.list()
 
     @mcp.tool(name="run_cpsat_python", description=RUN_CPSAT_PYTHON_DESCRIPTION)
     @_as_mcp_error(ValueError)

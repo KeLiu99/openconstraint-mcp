@@ -1,0 +1,362 @@
+"""Unit tests for pyexec/jobs.py — executor mocked for speed."""
+
+from __future__ import annotations
+
+import threading
+import time
+from pathlib import Path
+from typing import Any
+
+import pytest
+
+from openconstraint_mcp.job_errors import JobRejectedError
+from openconstraint_mcp.pyexec.jobs import CpsatJobRegistry
+from openconstraint_mcp.schemas import CpsatPythonResult, CpsatStatus
+
+
+def _cpsat_result(
+    status: CpsatStatus = "optimal",
+    *,
+    timed_out: bool = False,
+    solution: dict | None = None,
+) -> CpsatPythonResult:
+    return CpsatPythonResult(
+        status=status,
+        solution=solution or {"x": 1},
+        objective=None,
+        stdout="",
+        stderr="",
+        return_code=None if timed_out else 0,
+        timed_out=timed_out,
+        truncated=False,
+        duration_ms=10,
+    )
+
+
+class _FakeProc:
+    """Stand-in Popen handle passed through on_start/terminate.
+
+    ``poll`` reports exited so the real ``terminate_process_tree`` is a no-op
+    on handles that survive their run in tests that don't mock termination.
+    """
+
+    def poll(self) -> int:
+        return 0
+
+
+def _patch_run_source(monkeypatch: pytest.MonkeyPatch, fake: Any) -> None:
+    monkeypatch.setattr("openconstraint_mcp.pyexec.jobs.run_cpsat_python", fake)
+
+
+def _patch_run_file(monkeypatch: pytest.MonkeyPatch, fake: Any) -> None:
+    monkeypatch.setattr("openconstraint_mcp.pyexec.jobs.run_cpsat_python_file", fake)
+
+
+def _patch_terminate(monkeypatch: pytest.MonkeyPatch, recorder: list[Any]) -> None:
+    def _fake(proc: Any, **_: Any) -> None:
+        recorder.append(proc)
+
+    monkeypatch.setattr("openconstraint_mcp.pyexec.jobs._terminate_process_tree", _fake)
+
+
+def _wait_until_terminal(registry: CpsatJobRegistry, job_id: str, timeout: float = 3.0) -> str:
+    deadline = time.monotonic() + timeout
+    terminal = {"succeeded", "failed", "timeout", "cancelled"}
+    while time.monotonic() < deadline:
+        state = registry.get(job_id).state
+        if state in terminal:
+            return state
+        time.sleep(0.005)
+    raise AssertionError(f"job {job_id} did not reach a terminal state within {timeout}s")
+
+
+# --- submit_source happy path -----------------------------------------------
+
+
+def test_submit_source_returns_job_id(monkeypatch: pytest.MonkeyPatch) -> None:
+    _patch_run_source(monkeypatch, lambda source, *, on_start, **kw: _cpsat_result())
+    registry = CpsatJobRegistry()
+    try:
+        job_id = registry.submit_source("print('x')")
+        assert isinstance(job_id, str) and job_id
+    finally:
+        registry.shutdown()
+
+
+def test_submit_source_reaches_succeeded_with_result(monkeypatch: pytest.MonkeyPatch) -> None:
+    _patch_run_source(monkeypatch, lambda source, *, on_start, **kw: _cpsat_result("optimal"))
+    registry = CpsatJobRegistry()
+    try:
+        job_id = registry.submit_source("print('x')")
+        _wait_until_terminal(registry, job_id)
+        status = registry.get(job_id)
+        assert status.state == "succeeded"
+        assert status.result is not None
+        assert status.result.status == "optimal"
+    finally:
+        registry.shutdown()
+
+
+def test_submit_source_error_status_yields_succeeded_job(monkeypatch: pytest.MonkeyPatch) -> None:
+    # D3: error → succeeded (a structured verdict, not a job-machinery failure).
+    _patch_run_source(
+        monkeypatch,
+        lambda source, *, on_start, **kw: _cpsat_result("error", solution=None),
+    )
+    registry = CpsatJobRegistry()
+    try:
+        job_id = registry.submit_source("raise ValueError('boom')")
+        _wait_until_terminal(registry, job_id)
+        status = registry.get(job_id)
+        assert status.state == "succeeded"
+        assert status.result is not None
+        assert status.result.status == "error"
+    finally:
+        registry.shutdown()
+
+
+def test_submit_source_echoes_timeout_ms(monkeypatch: pytest.MonkeyPatch) -> None:
+    _patch_run_source(monkeypatch, lambda source, *, on_start, **kw: _cpsat_result())
+    registry = CpsatJobRegistry()
+    try:
+        job_id = registry.submit_source("x=1", timeout_ms=45000)
+        assert registry.get(job_id).timeout_ms == 45000
+    finally:
+        registry.shutdown()
+
+
+# --- submit_file happy path -------------------------------------------------
+
+
+def test_submit_file_reaches_succeeded_with_result(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    script = tmp_path / "sol.py"
+    script.write_text("print('x')", encoding="utf-8")
+    _patch_run_file(
+        monkeypatch,
+        lambda path, *, on_start, **kw: _cpsat_result("feasible"),
+    )
+    registry = CpsatJobRegistry()
+    try:
+        job_id = registry.submit_file(script)
+        _wait_until_terminal(registry, job_id)
+        status = registry.get(job_id)
+        assert status.state == "succeeded"
+        assert status.result is not None
+        assert status.result.status == "feasible"
+    finally:
+        registry.shutdown()
+
+
+# --- path validation before admission ---------------------------------------
+
+
+def test_submit_file_rejects_missing_path_before_creating_job(tmp_path: Path) -> None:
+    missing = tmp_path / "nope.py"
+    registry = CpsatJobRegistry()
+    try:
+        with pytest.raises(ValueError, match="does not exist"):
+            registry.submit_file(missing)
+        assert registry.list() == []
+    finally:
+        registry.shutdown()
+
+
+def test_submit_file_rejects_empty_script_before_creating_job(tmp_path: Path) -> None:
+    empty = tmp_path / "empty.py"
+    empty.write_text("   \n", encoding="utf-8")
+    registry = CpsatJobRegistry()
+    try:
+        with pytest.raises(ValueError, match="empty"):
+            registry.submit_file(empty)
+        assert registry.list() == []
+    finally:
+        registry.shutdown()
+
+
+# --- admission bounds -------------------------------------------------------
+
+
+def test_queue_overflow_raises_job_rejected_error(monkeypatch: pytest.MonkeyPatch) -> None:
+    # 1 running slot, 0 queued → second submit is rejected immediately.
+    block = {"wait": True}
+    released: list[None] = []
+
+    def _blocking_run(source: str, *, on_start: Any, **kw: Any) -> CpsatPythonResult:
+        on_start(_FakeProc())
+        while block["wait"]:
+            time.sleep(0.005)
+        released.append(None)
+        return _cpsat_result()
+
+    _patch_run_source(monkeypatch, _blocking_run)
+    registry = CpsatJobRegistry(max_running_jobs=1, max_queued_jobs=0)
+    try:
+        registry.submit_source("print('a')")
+        time.sleep(0.05)  # let the worker start
+        with pytest.raises(JobRejectedError):
+            registry.submit_source("print('b')")
+    finally:
+        block["wait"] = False
+        registry.shutdown()
+
+
+# --- cancel running job → cancelled, NOT succeeded (D4) --------------------
+
+
+def test_cancel_running_job_finalizes_as_cancelled_not_succeeded(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A cancelled running job must finalize as 'cancelled', not 'succeeded'.
+
+    When the child is killed mid-run, _execute_cpsat returns an error result
+    (nonzero exit). Without the cancel_requested check in _run_job, D3 would
+    map that to 'succeeded'. The check must override it.
+    """
+    running_event = threading.Event()
+    cancel_event = threading.Event()
+
+    def _slow_run(source: str, *, on_start: Any, **kw: Any) -> CpsatPythonResult:
+        proc = _FakeProc()
+        on_start(proc)
+        running_event.set()
+        cancel_event.wait(timeout=3.0)
+        return _cpsat_result("error", solution=None)  # simulates kill → error
+
+    _patch_run_source(monkeypatch, _slow_run)
+    killed: list[Any] = []
+    _patch_terminate(monkeypatch, killed)
+
+    registry = CpsatJobRegistry()
+    try:
+        job_id = registry.submit_source("time.sleep(60)")
+        running_event.wait(timeout=3.0)
+        registry.cancel(job_id)
+        cancel_event.set()
+        state = _wait_until_terminal(registry, job_id)
+        assert state == "cancelled"
+        status = registry.get(job_id)
+        assert status.result is None
+    finally:
+        cancel_event.set()
+        registry.shutdown()
+
+
+# --- cancel before start → cancelled ----------------------------------------
+
+
+def test_cancel_queued_job_before_start(monkeypatch: pytest.MonkeyPatch) -> None:
+    block: dict[str, bool] = {"wait": True}
+
+    def _slow(source: str, *, on_start: Any, **kw: Any) -> CpsatPythonResult:
+        on_start(_FakeProc())
+        while block["wait"]:
+            time.sleep(0.005)
+        return _cpsat_result()
+
+    _patch_run_source(monkeypatch, _slow)
+    registry = CpsatJobRegistry(max_running_jobs=1, max_queued_jobs=4)
+    try:
+        _first = registry.submit_source("x=1")
+        time.sleep(0.05)  # let worker start
+        second = registry.submit_source("y=2")  # queued
+        registry.cancel(second)
+        state = _wait_until_terminal(registry, second)
+        assert state == "cancelled"
+    finally:
+        block["wait"] = False
+        registry.shutdown()
+
+
+# --- terminal eviction ------------------------------------------------------
+
+
+def test_terminal_eviction_respects_max_retained(monkeypatch: pytest.MonkeyPatch) -> None:
+    _patch_run_source(monkeypatch, lambda source, *, on_start, **kw: _cpsat_result())
+    registry = CpsatJobRegistry(max_retained_terminal=2, max_running_jobs=4)
+    try:
+        for i in range(4):
+            registry.submit_source(f"x={i}")
+        # Poll until the registry stabilizes below or at the cap.
+        deadline = time.monotonic() + 5.0
+        while time.monotonic() < deadline:
+            if len(registry.list()) <= 2:
+                break
+            time.sleep(0.01)
+        assert len(registry.list()) <= 2
+    finally:
+        registry.shutdown()
+
+
+# --- shutdown terminates live children --------------------------------------
+
+
+def test_shutdown_terminates_running_child(monkeypatch: pytest.MonkeyPatch) -> None:
+    running_event = threading.Event()
+    stop_event = threading.Event()
+
+    def _blocking_run(source: str, *, on_start: Any, **kw: Any) -> CpsatPythonResult:
+        on_start(_FakeProc())
+        running_event.set()
+        stop_event.wait(timeout=5.0)
+        return _cpsat_result()
+
+    _patch_run_source(monkeypatch, _blocking_run)
+    killed: list[Any] = []
+
+    # The real terminator kills the child, which unblocks its run; model that so
+    # the executor join inside shutdown() returns immediately instead of waiting
+    # out the worker's 5s stop_event timeout.
+    def _kill(proc: Any, **_: Any) -> None:
+        killed.append(proc)
+        stop_event.set()
+
+    monkeypatch.setattr("openconstraint_mcp.pyexec.jobs._terminate_process_tree", _kill)
+
+    registry = CpsatJobRegistry()
+    registry.submit_source("time.sleep(60)")
+    running_event.wait(timeout=3.0)
+    registry.shutdown()
+    assert len(killed) >= 1
+
+
+# --- get/list reflect the job -----------------------------------------------
+
+
+def test_list_reflects_submitted_job(monkeypatch: pytest.MonkeyPatch) -> None:
+    _patch_run_source(monkeypatch, lambda source, *, on_start, **kw: _cpsat_result())
+    registry = CpsatJobRegistry()
+    try:
+        job_id = registry.submit_source("x=1")
+        _wait_until_terminal(registry, job_id)
+        statuses = registry.list()
+        assert any(s.job_id == job_id for s in statuses)
+    finally:
+        registry.shutdown()
+
+
+def test_get_unknown_job_id_raises_value_error(monkeypatch: pytest.MonkeyPatch) -> None:
+    registry = CpsatJobRegistry()
+    try:
+        with pytest.raises(ValueError, match="unknown job_id"):
+            registry.get("no-such-id")
+    finally:
+        registry.shutdown()
+
+
+def test_timeout_result_yields_timeout_job_state(monkeypatch: pytest.MonkeyPatch) -> None:
+    _patch_run_source(
+        monkeypatch,
+        lambda source, *, on_start, **kw: _cpsat_result("timeout", timed_out=True, solution=None),
+    )
+    registry = CpsatJobRegistry()
+    try:
+        job_id = registry.submit_source("x=1")
+        _wait_until_terminal(registry, job_id)
+        status = registry.get(job_id)
+        assert status.state == "timeout"
+        assert status.result is not None
+        assert status.result.timed_out is True
+    finally:
+        registry.shutdown()

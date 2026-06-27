@@ -7,8 +7,9 @@ from pathlib import Path
 
 import pytest
 
-from openconstraint_mcp.pyexec.core import VERIFIED_STATUSES, CpsatPythonResult
+from openconstraint_mcp.pyexec.core import VERIFIED_STATUSES
 from openconstraint_mcp.save_target import MANIFEST_FILENAME
+from openconstraint_mcp.schemas import CpsatPythonResult
 
 _SCRIPT = "print('hi')"
 _OPTIMAL_RESULT = CpsatPythonResult(
