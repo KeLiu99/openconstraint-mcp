@@ -153,12 +153,13 @@ def solve_social_golfers(n_groups: int = 7, group_size: int = 3, n_weeks: int = 
     _validate_schedule(schedule)
 
     print(f"Solver status: {solver.status_name(status)}")
+    result_status = "optimal" if status == cp_model.OPTIMAL else "feasible"
     sol = {}
     for week, groups in enumerate(schedule, start=1):
         week_str = "  ".join(f"[{' '.join(map(str, group))}]" for group in groups)
         print(f"Week {week}: {week_str}")
         sol[f"week_{week}"] = groups
-    print(json.dumps({"status": "feasible", "objective": None, "solution": sol}))
+    print(json.dumps({"status": result_status, "objective": None, "solution": sol}))
 
 
 solve_social_golfers()

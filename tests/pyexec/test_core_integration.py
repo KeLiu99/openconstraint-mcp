@@ -6,7 +6,11 @@ from pathlib import Path
 
 import pytest
 
-from openconstraint_mcp.pyexec.core import VERIFIED_STATUSES, run_cpsat_python
+from openconstraint_mcp.pyexec.core import (
+    VERIFIED_STATUSES,
+    run_cpsat_python,
+    run_cpsat_python_file,
+)
 
 _EXAMPLES = Path(__file__).parent.parent.parent / "examples" / "cpsat_python"
 
@@ -54,3 +58,35 @@ def test_run_cpsat_python_timeout_recovers_unflushed_partial() -> None:
     # The child is killed (SIGTERM); its exit code (-15 on POSIX) must not leak —
     # the contract reports null on timeout. This asserts the override over a real kill.
     assert result.return_code is None
+
+
+@pytest.mark.integration
+def test_run_cpsat_python_file_resolves_relative_sibling_file(tmp_path: Path) -> None:
+    # The file tool's reason to exist: the script runs in its own directory, so a
+    # relative open() of a sibling data file resolves. Inline run_cpsat_python runs
+    # in a throwaway tempdir where this read would fail, so this proves cwd=parent.
+    (tmp_path / "bound.txt").write_text("7", encoding="utf-8")
+    script = tmp_path / "model.py"
+    script.write_text(
+        "import json\n"
+        "from pathlib import Path\n"
+        "from ortools.sat.python import cp_model\n"
+        "bound = int(Path('bound.txt').read_text())\n"
+        "model = cp_model.CpModel()\n"
+        "x = model.NewIntVar(0, bound, 'x')\n"
+        "model.Maximize(x)\n"
+        "solver = cp_model.CpSolver()\n"
+        "status = solver.Solve(model)\n"
+        "status_map = {0: 'unknown', 1: 'error', 2: 'infeasible', 3: 'feasible', 4: 'optimal'}\n"
+        "print(json.dumps({\n"
+        "    'status': status_map.get(status, 'error'),\n"
+        "    'objective': solver.ObjectiveValue(),\n"
+        "    'solution': {'x': solver.Value(x)},\n"
+        "}))\n",
+        encoding="utf-8",
+    )
+
+    result = run_cpsat_python_file(script)
+
+    assert result.status in VERIFIED_STATUSES
+    assert result.solution == {"x": 7}
