@@ -1,9 +1,10 @@
 from __future__ import annotations
 
+import math
 from pathlib import Path
 from typing import Any, Literal, cast
 
-from pydantic import BaseModel, Field, field_validator, model_validator
+from pydantic import BaseModel, Field, computed_field, field_validator, model_validator
 
 # ---------------------------------------------------------------------------
 # CP-SAT Python executor output models (moved from pyexec/core.py per D7 so
@@ -454,7 +455,9 @@ SaveStatus = Literal[
 # are fixed per role (model.mzn, data.dzn, checker.mzc.mzn, problem.md,
 # solve-result.json, .openconstraint-model.json), so the role — not the
 # filename — is the stable key clients branch on.
-SavedArtifactRole = Literal["model", "data", "checker", "problem", "solve_result", "manifest"]
+SavedArtifactRole = Literal[
+    "model", "data", "checker", "problem", "solve_result", "solution", "manifest"
+]
 
 
 class SavedModelArtifact(BaseModel):
@@ -612,3 +615,100 @@ class InstallConfig(BaseModel):
         if not value or not Path(value).is_absolute():
             raise ValueError("runtime_dir must be a non-empty absolute path")
         return value
+
+
+# ---------------------------------------------------------------------------
+# CP-SAT Python verification gate schemas
+# ---------------------------------------------------------------------------
+
+CpsatObjectiveSense = Literal["maximize", "minimize"]
+
+# The highest gate that passed during a save attempt. "none" means even the
+# reported gate failed (nothing was saved). The level never claims a save
+# happened — combine with `saved` for that.
+CpsatVerificationLevel = Literal["none", "reported", "expectation", "checked"]
+
+
+class CpsatExpectation(BaseModel):
+    """Caller-supplied objective threshold for a CP-SAT save gate.
+
+    A threshold gate is NOT an optimality proof — it only checks that the
+    script's reported objective meets the supplied bound. For satisfaction
+    problems (no objective), omit this and use a checker instead.
+    """
+
+    objective_sense: CpsatObjectiveSense
+    objective_threshold: float
+
+    @field_validator("objective_threshold", mode="before")
+    @classmethod
+    def _reject_bool(cls, value: object) -> object:
+        if isinstance(value, bool):
+            raise ValueError("objective_threshold must be a number, not a bool")
+        return value
+
+    @field_validator("objective_threshold", mode="after")
+    @classmethod
+    def _reject_non_finite(cls, value: float) -> float:
+        if not math.isfinite(value):
+            raise ValueError("objective_threshold must be a finite number (not NaN or ±inf)")
+        return value
+
+
+class CpsatCheckerReport(BaseModel):
+    """Result of running an optional checker script against the CP-SAT solution.
+
+    ``status`` is the normalized server verdict: ``accepted`` only when the
+    checker returned ``accepted`` with an empty ``errors`` list; ``rejected``
+    when the checker rejected; ``timeout`` on a wall-clock timeout;
+    ``error`` for malformed output, nonzero exit, truncation, or
+    ``accepted``+non-empty-errors (self-contradictory output).
+    ``stdout``, ``stderr``, and ``details`` are raw checker output and are
+    NOT persisted in the manifest (only the scalar summary is saved).
+    """
+
+    status: Literal["accepted", "rejected", "error", "timeout"]
+    errors: list[str]
+    details: dict | None = None
+    stdout: str
+    stderr: str
+    duration_ms: int
+    timed_out: bool
+    truncated: bool
+
+
+class SaveVerifiedPythonResult(BaseModel):
+    """Outcome of a save_verified_cpsat_python request.
+
+    ``saved`` is computed from ``reason``: True iff ``reason`` is None and
+    ``target_dir`` is set. ``verification_level`` is the highest gate that
+    passed — combine with ``saved`` to distinguish a successful save from a
+    failed gate at the same level.
+
+    Gate short-circuit order: reported → expectation → checker. Every gate
+    downstream of the first failure carries its None/False default.
+    """
+
+    status: CpsatStatus
+    target_dir: str | None
+    reason: str | None
+    solution: dict | None
+    objective: float | int | None
+    stdout: str
+    stderr: str
+    timed_out: bool
+    truncated: bool
+    duration_ms: int
+    files: list[SavedModelArtifact] = Field(default_factory=list)
+
+    # Verification gate summary — always present
+    verification_level: CpsatVerificationLevel = "none"
+    reported_passed: bool = False
+    expectation: CpsatExpectation | None = None
+    expectation_passed: bool | None = None
+    checker: CpsatCheckerReport | None = None
+
+    @computed_field  # type: ignore[prop-decorator]
+    @property
+    def saved(self) -> bool:
+        return self.reason is None and self.target_dir is not None

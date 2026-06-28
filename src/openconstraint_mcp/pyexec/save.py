@@ -12,8 +12,6 @@ import json
 from datetime import UTC, datetime
 from pathlib import Path
 
-from pydantic import BaseModel, computed_field
-
 from ..childproc import ChildProcessTracker
 from ..save_target import (
     MANIFEST_FILENAME,
@@ -21,7 +19,16 @@ from ..save_target import (
     validate_save_target,
 )
 from ..save_target import tool_version as _tool_version
-from ..schemas import CpsatPythonResult, CpsatStatus, SavedArtifactRole, SavedModelArtifact
+from ..schemas import (
+    CpsatCheckerReport,
+    CpsatExpectation,
+    CpsatPythonResult,
+    CpsatVerificationLevel,
+    SavedArtifactRole,
+    SavedModelArtifact,
+    SaveVerifiedPythonResult,
+)
+from .checker import run_checker
 from .core import (
     DEFAULT_PYEXEC_TIMEOUT_MS,
     VERIFIED_STATUSES,
@@ -30,29 +37,59 @@ from .core import (
 
 SCRIPT_FILENAME: str = "solution.py"
 PROBLEM_FILENAME: str = "problem.txt"
-
-
-class SaveVerifiedPythonResult(BaseModel):
-    status: CpsatStatus
-    target_dir: str | None
-    reason: str | None
-    solution: dict | None
-    objective: float | int | None
-    stdout: str
-    stderr: str
-    timed_out: bool
-    truncated: bool
-    duration_ms: int
-    files: list[SavedModelArtifact] = []
-
-    @computed_field  # type: ignore[prop-decorator]
-    @property
-    def saved(self) -> bool:
-        return self.reason is None and self.target_dir is not None
+CHECKER_FILENAME: str = "checker.py"
+SOLUTION_FILENAME: str = "solution.json"
 
 
 def _sha256_of(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def _expectation_passes(
+    run_result: CpsatPythonResult, expectation: CpsatExpectation
+) -> tuple[bool, str | None]:
+    """Check the objective threshold. Returns (passed, reason_if_failed)."""
+    obj = run_result.objective
+    if obj is None:
+        return False, "expectation requires a numeric objective but the script emitted none"
+    threshold = expectation.objective_threshold
+    if expectation.objective_sense == "maximize":
+        if obj >= threshold:
+            return True, None
+        return False, f"objective {obj} < threshold {threshold} (maximize)"
+    else:
+        if obj <= threshold:
+            return True, None
+        return False, f"objective {obj} > threshold {threshold} (minimize)"
+
+
+def _failure(
+    run_result: CpsatPythonResult,
+    *,
+    reason: str,
+    verification_level: CpsatVerificationLevel,
+    reported_passed: bool,
+    expectation: CpsatExpectation | None,
+    expectation_passed: bool | None,
+    checker: CpsatCheckerReport | None,
+) -> SaveVerifiedPythonResult:
+    return SaveVerifiedPythonResult(
+        status=run_result.status,
+        target_dir=None,
+        reason=reason,
+        solution=run_result.solution,
+        objective=run_result.objective,
+        stdout=run_result.stdout,
+        stderr=run_result.stderr,
+        timed_out=run_result.timed_out,
+        truncated=run_result.truncated,
+        duration_ms=run_result.duration_ms,
+        verification_level=verification_level,
+        reported_passed=reported_passed,
+        expectation=expectation,
+        expectation_passed=expectation_passed,
+        checker=checker,
+    )
 
 
 def _write_staged_artifacts(
@@ -60,11 +97,26 @@ def _write_staged_artifacts(
     *,
     source: str,
     problem: str | None,
+    checker: str | None,
     run_result: CpsatPythonResult,
+    verification_level: CpsatVerificationLevel,
+    expectation: CpsatExpectation | None,
+    expectation_passed: bool | None,
+    checker_report: CpsatCheckerReport | None,
 ) -> list[SavedModelArtifact]:
     texts: list[tuple[SavedArtifactRole, str, str]] = [("model", SCRIPT_FILENAME, source)]
     if problem is not None:
         texts.append(("problem", PROBLEM_FILENAME, problem))
+    if checker is not None:
+        texts.append(("checker", CHECKER_FILENAME, checker))
+    if checker_report is not None:
+        texts.append(
+            (
+                "solution",
+                SOLUTION_FILENAME,
+                json.dumps(run_result.solution or {}, indent=2) + "\n",
+            )
+        )
 
     artifacts: list[SavedModelArtifact] = []
     for role, filename, text in texts:
@@ -72,14 +124,32 @@ def _write_staged_artifacts(
         file_path.write_text(text, encoding="utf-8")
         artifacts.append(SavedModelArtifact(role=role, path=filename, sha256=_sha256_of(file_path)))
 
+    verification: dict = {
+        "level": verification_level,
+        "reported_status": run_result.status,
+        "objective": run_result.objective,
+    }
+    if expectation is not None:
+        verification["expectation"] = {
+            "objective_sense": expectation.objective_sense,
+            "objective_threshold": expectation.objective_threshold,
+            "passed": expectation_passed,
+        }
+    if checker_report is not None:
+        # Only scalar summary — no stdout/stderr/errors/details to avoid leakage.
+        verification["checker"] = {
+            "status": checker_report.status,
+            "error_count": len(checker_report.errors),
+            "duration_ms": checker_report.duration_ms,
+            "timed_out": checker_report.timed_out,
+            "truncated": checker_report.truncated,
+        }
+
     manifest = {
         "managed_by": "openconstraint-mcp",
         "tool_version": _tool_version(),
         "created_at": datetime.now(UTC).isoformat(),
-        "verification": {
-            "status": run_result.status,
-            "objective": run_result.objective,
-        },
+        "verification": verification,
         "artifacts": [artifact.model_dump(mode="json") for artifact in artifacts],
     }
     manifest_path = staging / MANIFEST_FILENAME
@@ -97,44 +167,107 @@ def save_verified_cpsat_python(
     *,
     target_dir: Path,
     problem: str | None = None,
+    expectation: CpsatExpectation | None = None,
+    checker: str | None = None,
+    checker_timeout_ms: int | None = None,
     timeout_ms: int = DEFAULT_PYEXEC_TIMEOUT_MS,
     overwrite: bool = False,
     tracker: ChildProcessTracker | None = None,
 ) -> SaveVerifiedPythonResult:
-    """Re-run ``source`` and persist it when it yields a verified solution.
+    """Re-run ``source`` and persist it when it passes all supplied save gates.
 
-    ``validate_save_target`` runs before the executor (fail-fast on bad paths)
-    and again immediately before commit (inside ``commit_staged_dir``). Returns
-    a ``SaveVerifiedPythonResult`` with ``saved=True`` and files on disk, or
-    ``saved=False`` with a ``reason`` when the run does not qualify. Writing
-    nothing on a non-verified run is guaranteed — the commit never starts.
+    Gates run in order (reported → expectation → checker) and short-circuit on
+    the first failure. Writing nothing on a non-passing run is guaranteed — the
+    commit never starts. Returns a ``SaveVerifiedPythonResult`` with ``saved=True``
+    and files on disk, or ``saved=False`` with a ``reason`` and the
+    ``verification_level`` of the highest gate that actually passed.
     """
+    if checker_timeout_ms is not None and checker is None:
+        raise ValueError("checker_timeout_ms supplied without checker: no checker will run")
+    if checker_timeout_ms is not None and checker_timeout_ms <= 0:
+        raise ValueError("checker_timeout_ms must be positive")
+    if checker is not None and not checker.strip():
+        raise ValueError("checker must be non-empty after stripping whitespace")
+
+    effective_checker_timeout = checker_timeout_ms if checker_timeout_ms is not None else timeout_ms
+
     target = validate_save_target(target_dir, overwrite=overwrite)
     run_result = run_cpsat_python(source, timeout_ms=timeout_ms, tracker=tracker)
 
-    if run_result.status not in VERIFIED_STATUSES or not run_result.solution:
+    # --- Reported gate ---
+    reported_passed = run_result.status in VERIFIED_STATUSES and bool(run_result.solution)
+    if not reported_passed:
         reason_parts = [f"status={run_result.status!r}"]
-        if not run_result.solution and run_result.status in VERIFIED_STATUSES:
+        if run_result.status in VERIFIED_STATUSES and not run_result.solution:
             reason_parts.append("solution is missing or empty")
-        return SaveVerifiedPythonResult(
-            status=run_result.status,
-            target_dir=None,
-            reason=f"CP-SAT run did not yield a verified solution: {', '.join(reason_parts)}",
-            solution=run_result.solution,
-            objective=run_result.objective,
-            stdout=run_result.stdout,
-            stderr=run_result.stderr,
-            timed_out=run_result.timed_out,
-            truncated=run_result.truncated,
-            duration_ms=run_result.duration_ms,
+        return _failure(
+            run_result,
+            reason=f"CP-SAT run did not pass the reported gate: {', '.join(reason_parts)}",
+            verification_level="none",
+            reported_passed=False,
+            expectation=expectation,
+            expectation_passed=None,
+            checker=None,
         )
+
+    # --- Expectation gate ---
+    exp_passed: bool | None = None
+    if expectation is not None:
+        passed, exp_reason = _expectation_passes(run_result, expectation)
+        exp_passed = passed
+        if not passed:
+            return _failure(
+                run_result,
+                reason=f"CP-SAT run did not pass the expectation gate: {exp_reason}",
+                verification_level="reported",
+                reported_passed=True,
+                expectation=expectation,
+                expectation_passed=False,
+                checker=None,
+            )
+
+    # --- Checker gate ---
+    checker_report: CpsatCheckerReport | None = None
+    if checker is not None:
+        _report: CpsatCheckerReport = run_checker(
+            checker=checker,
+            run_result=run_result,
+            problem=problem,
+            timeout_ms=effective_checker_timeout,
+            tracker=tracker,
+        )
+        if _report.status != "accepted":
+            return _failure(
+                run_result,
+                reason=(f"CP-SAT checker did not accept the solution: status={_report.status!r}"),
+                verification_level="expectation" if expectation is not None else "reported",
+                reported_passed=True,
+                expectation=expectation,
+                expectation_passed=exp_passed,
+                checker=_report,
+            )
+        checker_report = _report
+
+    # --- All gates passed: commit ---
+    final_level: CpsatVerificationLevel
+    if checker is not None:
+        final_level = "checked"
+    elif expectation is not None:
+        final_level = "expectation"
+    else:
+        final_level = "reported"
 
     def _writer(staging: Path) -> list[SavedModelArtifact]:
         return _write_staged_artifacts(
             staging,
             source=source,
             problem=problem,
+            checker=checker,
             run_result=run_result,
+            verification_level=final_level,
+            expectation=expectation,
+            expectation_passed=exp_passed,
+            checker_report=checker_report,
         )
 
     files, _ = commit_staged_dir(target, overwrite=overwrite, write_files=_writer)
@@ -150,4 +283,9 @@ def save_verified_cpsat_python(
         truncated=run_result.truncated,
         duration_ms=run_result.duration_ms,
         files=files,
+        verification_level=final_level,
+        reported_passed=True,
+        expectation=expectation,
+        expectation_passed=exp_passed,
+        checker=checker_report,
     )

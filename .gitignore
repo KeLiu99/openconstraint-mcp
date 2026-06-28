@@ -53,3 +53,4 @@ docs/*
 /examples/social_golfers/cpsat_24/.openconstraint-model.json
 /examples/social_golfers/cpsat_24/problem.txt
 /examples/social_golfers/cpsat_24/solution.py
+/examples/nonogram/python/

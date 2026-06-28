@@ -250,14 +250,45 @@ User problem:
    the script as `source`, the original problem text as `problem`, and the
    user's chosen save directory as an explicit absolute `target_dir`. You
    ask the user for that path; the server opens no file dialog. The server
-   re-runs the script to verify the result before writing anything.
+   re-runs the script to evaluate the save gate before writing anything.
    Replacing a previously saved directory needs `overwrite=true`.
 
+   Save gate options (in order of strictness):
+   a. Reported gate (always applied): `status` in `optimal`/`feasible` and
+      non-empty `solution`. This is the minimum required to save and is the
+      default when no `expectation` or `checker` is supplied.
+   b. Expectation gate (optional): supply `expectation` with
+      `objective_sense` ('maximize' or 'minimize') and a numeric
+      `objective_threshold`. The server checks whether the script's reported
+      objective meets this threshold. IMPORTANT: an expectation threshold is
+      a quality gate or regression bound — it does NOT prove that the
+      solution is globally optimal or that no better solution exists.
+   c. Checker gate (optional): supply `checker` (a complete Python script as
+      a source string) that independently validates the solution against
+      problem-specific constraints. The checker script must:
+      - Accept the payload JSON path as its FIRST positional argument
+        (`sys.argv[1]`), e.g.: `payload = json.load(open(sys.argv[1]))`
+      - The payload has keys: `problem` (str|null), `solution` (dict),
+        `objective` (float|int|null), `solver_status` (str).
+      - Print exactly ONE JSON object as its FINAL stdout line:
+        `{{"status": "accepted"|"rejected"|"error", "errors": [...], "details": {{...}}}}`
+      - `accepted` with an empty `errors` list is the only passing verdict.
+      - SAFETY: generate only validation code — no network access, no
+        file mutations, no subprocess spawning — unless the user explicitly
+        requested it. The server executes this code locally and does not
+        sandbox it.
+   Write a checker when the user asks for independent validation, when
+   the problem has structural constraints that cannot be inferred from
+   the reported `status` alone, or when the result will be reused and
+   higher confidence is valuable.
+
 Boundaries:
-- You write the CP-SAT Python script; openconstraint-mcp does not.
+- You write the CP-SAT Python script and any checker; openconstraint-mcp
+  does not.
 - openconstraint-mcp owns no LLM credentials and invokes no generative
   model.
 - All solving runs locally in a child process — no remote backends, no
   uploads, no hidden network calls. The server wrapper makes no network
-  calls; an LLM-generated script that reaches the network is user-directed.
+  calls; an LLM-generated script or checker that reaches the network is
+  user-directed.
 """

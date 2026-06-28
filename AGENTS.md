@@ -55,11 +55,11 @@ Plans must preserve explicit user requirements. If a plan intentionally deviates
 ```
 cli  ──►  server  ──►  minizinc  ──►  runtime  ──►  schemas
  │                 │
- │                 └──►  pyexec  (subprocess executor; imports proc + save_target; never minizinc/runtime)
+ │                 └──►  pyexec  (subprocess executor; imports proc, save_target, childproc, schemas; never minizinc/runtime)
  └─────►  runtime_install   (install-time only; imports no internal modules)
 ```
 
-A module may import any module to its right. Imports never flow leftward or between same-layer modules. The `pyexec` subtree is a parallel path from `server`: it executes user/LLM-provided OR-Tools CP-SAT Python in a child process (`sys.executable`), importing only the shared leaves `proc` (process-group launch + tree-kill) and `save_target` (manifest-gated save policy), never `minizinc` or `runtime`. `runtime_install` is a leaf used only by `cli` (lazily, so its `httpx`/`rich.progress` deps stay off the cold paths); it imports no internal modules, so it sits outside the left-to-right chain.
+A module may import any module to its right. Imports never flow leftward or between same-layer modules. The `pyexec` subtree is a parallel path from `server`: it executes user/LLM-provided OR-Tools CP-SAT Python in a child process (`sys.executable`), importing only the shared leaves `proc` (process-group launch + tree-kill), `save_target` (manifest-gated save policy), `childproc` (the `ChildProcessTracker` type), and `schemas` (the `CpsatPythonResult`/`CpsatStatus` return contract), never `minizinc` or `runtime`. `runtime_install` is a leaf used only by `cli` (lazily, so its `httpx`/`rich.progress` deps stay off the cold paths); it imports no internal modules, so it sits outside the left-to-right chain.
 
 ## Before You Run Commands
 

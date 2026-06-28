@@ -41,20 +41,18 @@ Canonical emit snippet (inlined in scripts, never imported from here):
 from __future__ import annotations
 
 import json
-import subprocess
-import sys
+import math
 import tempfile
-import time
 from collections.abc import Callable
 from pathlib import Path
 from subprocess import Popen
 
 from ..childproc import ChildProcessTracker
-from ..proc import popen_process_group, terminate_process_tree
 from ..schemas import CpsatPythonResult, CpsatStatus
+from .runner import ChildExecutionResult, execute_child
+from .runner import python_script_argv as _python_script_argv
 
 DEFAULT_PYEXEC_TIMEOUT_MS: int = 30_000
-MAX_OUTPUT_BYTES: int = 1 * 1024 * 1024  # 1 MiB
 
 VERIFIED_STATUSES: frozenset[CpsatStatus] = frozenset({"optimal", "feasible"})
 
@@ -64,10 +62,28 @@ _SCRIPT_STATUSES: frozenset[str] = frozenset(
     {"optimal", "feasible", "infeasible", "unknown", "error"}
 )
 
-_POLL_INTERVAL_S: float = 0.05
+
+def normalize_status(raw: object) -> CpsatStatus:
+    if isinstance(raw, str) and raw in _SCRIPT_STATUSES:
+        return raw  # type: ignore[return-value]
+    return "error"
 
 
-def _parse_last_json(text: str) -> dict | None:
+def normalize_objective(raw: object) -> float | int | None:
+    """Accept only a finite real number; bool, non-numeric, and non-finite become None.
+
+    ``int`` is always mathematically finite, so it is returned as-is — including
+    values too large to fit a float, which would overflow ``math.isfinite``. The
+    finiteness check applies only to ``float`` (rejecting ``nan``/``inf``).
+    """
+    if isinstance(raw, bool) or not isinstance(raw, (int, float)):
+        return None
+    if isinstance(raw, float) and not math.isfinite(raw):
+        return None
+    return raw
+
+
+def parse_last_json(text: str) -> dict | None:
     """Return the last top-level JSON object found in ``text``, or ``None``.
 
     Scans forward, decoding each top-level object with ``raw_decode`` so trailing
@@ -90,19 +106,6 @@ def _parse_last_json(text: str) -> dict | None:
     return found
 
 
-def _normalize_status(raw: object) -> CpsatStatus:
-    if isinstance(raw, str) and raw in _SCRIPT_STATUSES:
-        return raw  # type: ignore[return-value]
-    return "error"
-
-
-def _normalize_objective(raw: object) -> float | int | None:
-    """Accept only a real number; bool (an int subclass) and other types become None."""
-    if isinstance(raw, bool) or not isinstance(raw, (int, float)):
-        return None
-    return raw
-
-
 def _extract_solution_objective(parsed: dict) -> tuple[dict | None, float | int | None]:
     """Pull the solution dict and numeric objective out of a parsed result block.
 
@@ -110,26 +113,82 @@ def _extract_solution_objective(parsed: dict) -> tuple[dict | None, float | int 
     paths can never drift: ``solution`` must be a dict, ``objective`` a real number.
     """
     solution = parsed.get("solution") if isinstance(parsed.get("solution"), dict) else None
-    objective = _normalize_objective(parsed.get("objective"))
+    objective = normalize_objective(parsed.get("objective"))
     return solution, objective
 
 
-def _read_capped(path: Path) -> tuple[str, int]:
-    """Return capped text plus the file's byte length (from ``stat``, pre-cap).
+def _result_from_child(child: ChildExecutionResult) -> CpsatPythonResult:
+    """Parse a raw ``ChildExecutionResult`` into the CP-SAT result contract.
 
-    Reads at most ``MAX_OUTPUT_BYTES`` from the file, so a child that overran the
-    cap between poll checks cannot force the parent to materialize the whole file
-    in memory: the cap is applied at the read boundary, not after a full slurp.
-    The pre-cap length comes from ``stat`` because the truncation flag needs the
-    true on-disk size, which the capped read no longer reflects.
+    This is the CP-SAT protocol layer: the generic ``execute_child`` knows nothing
+    about ``status``/``objective``/``solution``; that parsing lives here so the
+    clean-exit, timeout, and truncation shapes are decided in one place.
     """
-    try:
-        size = path.stat().st_size
-        with path.open("rb") as f:
-            data = f.read(MAX_OUTPUT_BYTES)
-    except OSError:
-        return "", 0
-    return data.decode("utf-8", errors="replace"), size
+    if child.timed_out:
+        # Recover the best-so-far if the script emitted intermediate result blocks
+        # (e.g. one per improved solution from a CpSolverSolutionCallback). The
+        # last block wins; the unbuffered child (-u) is what lets it survive the
+        # kill. Status stays the executor-owned "timeout" — a partial is unproven,
+        # never "optimal".
+        partial = parse_last_json(child.stdout)
+        solution, objective = (
+            _extract_solution_objective(partial) if partial is not None else (None, None)
+        )
+        return CpsatPythonResult(
+            status="timeout",
+            solution=solution,
+            objective=objective,
+            stdout=child.stdout,
+            stderr=child.stderr,
+            # The child was killed; its exit code (SIGTERM -> -15 on POSIX) is not a
+            # real return code. Report null by contract — matching the MiniZinc-path
+            # tools — so clients don't misread a timeout as a child error.
+            return_code=None,
+            timed_out=True,
+            truncated=child.truncated,
+            duration_ms=child.duration_ms,
+        )
+
+    if child.truncated:
+        return CpsatPythonResult(
+            status="error",
+            solution=None,
+            objective=None,
+            stdout=child.stdout,
+            stderr=child.stderr,
+            return_code=child.return_code,
+            timed_out=False,
+            truncated=True,
+            duration_ms=child.duration_ms,
+        )
+
+    parsed = parse_last_json(child.stdout)
+    if parsed is None or child.return_code != 0:
+        return CpsatPythonResult(
+            status="error",
+            solution=None,
+            objective=None,
+            stdout=child.stdout,
+            stderr=child.stderr,
+            return_code=child.return_code,
+            timed_out=False,
+            truncated=False,
+            duration_ms=child.duration_ms,
+        )
+
+    status = normalize_status(parsed.get("status"))
+    solution, objective = _extract_solution_objective(parsed)
+    return CpsatPythonResult(
+        status=status,
+        solution=solution,
+        objective=objective,
+        stdout=child.stdout,
+        stderr=child.stderr,
+        return_code=child.return_code,
+        timed_out=False,
+        truncated=False,
+        duration_ms=child.duration_ms,
+    )
 
 
 def _validate_script_path(script_path: Path) -> Path:
@@ -152,9 +211,6 @@ def _validate_script_path(script_path: Path) -> Path:
     except UnicodeDecodeError as exc:
         raise ValueError(f"{script_path} is not valid UTF-8") from exc
     except OSError as exc:
-        # e.g. unreadable file (mode 000). Raise ValueError so the tool's
-        # @_as_mcp_error(ValueError, ...) wrapper turns it into an actionable
-        # message instead of leaking a raw OSError/traceback to the client.
         raise ValueError(f"script_path is not readable: {script_path} ({exc})") from exc
     if not text.strip():
         raise ValueError(f"script file is empty: {script_path}")
@@ -192,17 +248,14 @@ def run_cpsat_python(
         script = tmp / "script.py"
         script.write_text(source, encoding="utf-8")
         # Run from the temp dir: an inline snippet has no sibling files to find.
-        return _execute_cpsat(
+        child = execute_child(
             _python_script_argv(script),
             cwd=tmp,
             timeout_ms=timeout_ms,
             tracker=tracker,
             on_start=on_start,
         )
-
-
-def _python_script_argv(script: Path) -> list[str]:
-    return [sys.executable, "-u", str(script)]
+        return _result_from_child(child)
 
 
 def run_cpsat_python_file(
@@ -227,180 +280,11 @@ def run_cpsat_python_file(
     cap, timeout, and tree-kill as ``run_cpsat_python``.
     """
     resolved = _validate_script_path(script_path)
-    return _execute_cpsat(
+    child = execute_child(
         _python_script_argv(resolved),
         cwd=resolved.parent,
         timeout_ms=timeout_ms,
         tracker=tracker,
         on_start=on_start,
     )
-
-
-def _execute_cpsat(
-    argv: list[str],
-    cwd: Path,
-    *,
-    timeout_ms: int,
-    tracker: ChildProcessTracker | None,
-    on_start: Callable[[Popen[str]], None] | None = None,
-) -> CpsatPythonResult:
-    """Run a prepared CP-SAT child command, capturing bounded output.
-
-    Shared core of both entry points: ``run_cpsat_python`` writes source to a
-    temp script, ``run_cpsat_python_file`` uses an existing file; each builds
-    ``argv`` (``[sys.executable, "-u", <script>]``) and a ``cwd`` and delegates
-    here for the timeout / output-cap / tree-kill run loop, partial recovery, and
-    result parsing. Centralizing it keeps the two paths from drifting.
-
-    Raises ``ValueError`` on a non-positive ``timeout_ms`` — the single gate, so
-    a zero/negative cap is rejected before any child is spawned. ``tracker``
-    wiring (register for the run, unregister on every exit path) is handled here.
-    """
-    if timeout_ms <= 0:
-        raise ValueError("timeout_ms must be positive")
-    timeout_s = timeout_ms / 1000.0
-    start = time.monotonic()
-    timed_out = False
-    truncated = False
-
-    with tempfile.TemporaryDirectory() as tmp_dir:
-        tmp = Path(tmp_dir)
-        stdout_path = tmp / "stdout.txt"
-        stderr_path = tmp / "stderr.txt"
-
-        with (
-            stdout_path.open("w", encoding="utf-8") as stdout_f,
-            stderr_path.open("w", encoding="utf-8") as stderr_f,
-        ):
-            proc = popen_process_group(
-                # -u: unbuffered child stdout/stderr so prints reach the capture
-                # files as they happen (not on a full buffer) and a flushed
-                # intermediate result survives the timeout kill — see the partial
-                # recovery in the timeout branch below.
-                argv,
-                stdout=stdout_f,
-                stderr=stderr_f,
-                # No stdin: over stdio the server's stdin is the JSON-RPC channel, so
-                # a script that reads input()/sys.stdin would steal protocol bytes or
-                # block the server. DEVNULL gives the child an immediate EOF instead.
-                stdin=subprocess.DEVNULL,
-                cwd=str(cwd),
-            )
-
-            if tracker is not None:
-                tracker.register(proc)
-            try:
-                # on_start fires inside the reaping guard: if the callback raises
-                # (e.g. the job registry's cancel hook hits a transient OS error
-                # while terminating the child), the finally below still kills and
-                # reaps the process instead of orphaning a live child.
-                if on_start is not None:
-                    on_start(proc)
-                deadline = start + timeout_s
-                while proc.poll() is None:
-                    now = time.monotonic()
-                    if now >= deadline:
-                        terminate_process_tree(proc)
-                        timed_out = True
-                        break
-                    # Check combined output size to enforce cap
-                    try:
-                        combined = stdout_path.stat().st_size + stderr_path.stat().st_size
-                    except OSError:
-                        combined = 0
-                    if combined > MAX_OUTPUT_BYTES:
-                        terminate_process_tree(proc)
-                        truncated = True
-                        break
-                    time.sleep(_POLL_INTERVAL_S)
-
-                # Wait for process to be fully reaped after kill or natural exit
-                proc.wait()
-            finally:
-                # Guarantee the child is dead and reaped on every exit path,
-                # including an exception from on_start that skipped the loop.
-                if proc.poll() is None:
-                    terminate_process_tree(proc)
-                    proc.wait()
-                if tracker is not None:
-                    tracker.unregister(proc)
-
-        return_code = proc.returncode
-        elapsed_ms = max(int((time.monotonic() - start) * 1000), 0)
-
-        raw_stdout, stdout_len = _read_capped(stdout_path)
-        raw_stderr, stderr_len = _read_capped(stderr_path)
-
-    # A burst writer can overrun the cap before the poll loop observes it — on a
-    # clean exit, or on a timeout where the deadline (checked first) fires before
-    # the size check. Recompute from the on-disk size so ``truncated`` is reliable
-    # on both the clean-exit and timeout paths; ``_read_capped`` has already capped
-    # the returned text, so a False here would mislabel partial output as complete.
-    if stdout_len + stderr_len > MAX_OUTPUT_BYTES:
-        truncated = True
-
-    if timed_out:
-        # Recover the best-so-far if the script emitted intermediate result blocks
-        # (e.g. one per improved solution from a CpSolverSolutionCallback). The
-        # last block wins; -u above is what lets it survive the kill. Status stays
-        # the executor-owned "timeout" — a partial is unproven, never "optimal".
-        partial = _parse_last_json(raw_stdout)
-        solution, objective = (
-            _extract_solution_objective(partial) if partial is not None else (None, None)
-        )
-        return CpsatPythonResult(
-            status="timeout",
-            solution=solution,
-            objective=objective,
-            stdout=raw_stdout,
-            stderr=raw_stderr,
-            # The child was killed; its exit code (SIGTERM -> -15 on POSIX) is not a
-            # real return code. Report null to match the documented contract and the
-            # MiniZinc-path tools, so clients don't misread a timeout as a child error.
-            return_code=None,
-            timed_out=True,
-            truncated=truncated,
-            duration_ms=elapsed_ms,
-        )
-
-    if truncated:
-        return CpsatPythonResult(
-            status="error",
-            solution=None,
-            objective=None,
-            stdout=raw_stdout,
-            stderr=raw_stderr,
-            return_code=return_code,
-            timed_out=False,
-            truncated=True,
-            duration_ms=elapsed_ms,
-        )
-
-    parsed = _parse_last_json(raw_stdout)
-    if parsed is None or return_code != 0:
-        return CpsatPythonResult(
-            status="error",
-            solution=None,
-            objective=None,
-            stdout=raw_stdout,
-            stderr=raw_stderr,
-            return_code=return_code,
-            timed_out=False,
-            truncated=False,
-            duration_ms=elapsed_ms,
-        )
-
-    status = _normalize_status(parsed.get("status"))
-    solution, objective = _extract_solution_objective(parsed)
-
-    return CpsatPythonResult(
-        status=status,
-        solution=solution,
-        objective=objective,
-        stdout=raw_stdout,
-        stderr=raw_stderr,
-        return_code=return_code,
-        timed_out=False,
-        truncated=False,
-        duration_ms=elapsed_ms,
-    )
+    return _result_from_child(child)
