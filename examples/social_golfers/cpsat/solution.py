@@ -108,8 +108,7 @@ def solve_social_golfers(n_groups: int = 7, group_size: int = 3, n_weeks: int = 
     for week in range(n_weeks - 1):
         code = model.new_int_var(0, (len(permutations) ** 7) - 1, f"week_code_{week}")
         model.add(
-            code
-            == sum((len(permutations) ** point) * choices[week][point] for point in range(7))
+            code == sum((len(permutations) ** point) * choices[week][point] for point in range(7))
         )
         week_codes.append(code)
     for left_code, right_code in zip(week_codes, week_codes[1:], strict=False):
@@ -137,9 +136,7 @@ def solve_social_golfers(n_groups: int = 7, group_size: int = 3, n_weeks: int = 
         print(json.dumps({"status": "unknown", "objective": None, "solution": None}))
         return
 
-    schedule = [
-        [[3 * group + slot + 1 for slot in range(3)] for group in range(7)]
-    ]
+    schedule = [[[3 * group + slot + 1 for slot in range(3)] for group in range(7)]]
     for week in range(n_weeks - 1):
         groups = []
         for line_index, line in enumerate(FANO_LINES):

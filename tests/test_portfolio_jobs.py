@@ -15,7 +15,8 @@ from typing import Any
 
 import pytest
 
-from openconstraint_mcp.jobs import JobRegistry, JobRejectedError
+from openconstraint_mcp.job_errors import JobRejectedError
+from openconstraint_mcp.jobs import JobRegistry
 from openconstraint_mcp.portfolio_jobs import PortfolioJobRegistry
 from openconstraint_mcp.schemas import PortfolioSolveResult, SolveResult
 

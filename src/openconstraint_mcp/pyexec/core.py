@@ -45,18 +45,17 @@ import subprocess
 import sys
 import tempfile
 import time
+from collections.abc import Callable
 from pathlib import Path
-from typing import Literal
-
-from pydantic import BaseModel
+from subprocess import Popen
 
 from ..childproc import ChildProcessTracker
 from ..proc import popen_process_group, terminate_process_tree
+from ..schemas import CpsatPythonResult, CpsatStatus
 
 DEFAULT_PYEXEC_TIMEOUT_MS: int = 30_000
 MAX_OUTPUT_BYTES: int = 1 * 1024 * 1024  # 1 MiB
 
-CpsatStatus = Literal["optimal", "feasible", "infeasible", "unknown", "error", "timeout"]
 VERIFIED_STATUSES: frozenset[CpsatStatus] = frozenset({"optimal", "feasible"})
 
 # Statuses a script may legitimately report. "timeout" is executor-determined, so a
@@ -66,18 +65,6 @@ _SCRIPT_STATUSES: frozenset[str] = frozenset(
 )
 
 _POLL_INTERVAL_S: float = 0.05
-
-
-class CpsatPythonResult(BaseModel):
-    status: CpsatStatus
-    solution: dict | None
-    objective: float | int | None
-    stdout: str
-    stderr: str
-    return_code: int | None
-    timed_out: bool
-    truncated: bool
-    duration_ms: int
 
 
 def _parse_last_json(text: str) -> dict | None:
@@ -164,6 +151,11 @@ def _validate_script_path(script_path: Path) -> Path:
         text = script_path.read_text(encoding="utf-8")
     except UnicodeDecodeError as exc:
         raise ValueError(f"{script_path} is not valid UTF-8") from exc
+    except OSError as exc:
+        # e.g. unreadable file (mode 000). Raise ValueError so the tool's
+        # @_as_mcp_error(ValueError, ...) wrapper turns it into an actionable
+        # message instead of leaking a raw OSError/traceback to the client.
+        raise ValueError(f"script_path is not readable: {script_path} ({exc})") from exc
     if not text.strip():
         raise ValueError(f"script file is empty: {script_path}")
     return script_path
@@ -174,6 +166,7 @@ def run_cpsat_python(
     *,
     timeout_ms: int = DEFAULT_PYEXEC_TIMEOUT_MS,
     tracker: ChildProcessTracker | None = None,
+    on_start: Callable[[Popen[str]], None] | None = None,
 ) -> CpsatPythonResult:
     """Execute OR-Tools CP-SAT Python ``source`` in a child process.
 
@@ -204,6 +197,7 @@ def run_cpsat_python(
             cwd=tmp,
             timeout_ms=timeout_ms,
             tracker=tracker,
+            on_start=on_start,
         )
 
 
@@ -216,6 +210,7 @@ def run_cpsat_python_file(
     *,
     timeout_ms: int = DEFAULT_PYEXEC_TIMEOUT_MS,
     tracker: ChildProcessTracker | None = None,
+    on_start: Callable[[Popen[str]], None] | None = None,
 ) -> CpsatPythonResult:
     """Execute an existing OR-Tools CP-SAT Python file in its own directory.
 
@@ -237,6 +232,7 @@ def run_cpsat_python_file(
         cwd=resolved.parent,
         timeout_ms=timeout_ms,
         tracker=tracker,
+        on_start=on_start,
     )
 
 
@@ -246,6 +242,7 @@ def _execute_cpsat(
     *,
     timeout_ms: int,
     tracker: ChildProcessTracker | None,
+    on_start: Callable[[Popen[str]], None] | None = None,
 ) -> CpsatPythonResult:
     """Run a prepared CP-SAT child command, capturing bounded output.
 
@@ -293,6 +290,12 @@ def _execute_cpsat(
             if tracker is not None:
                 tracker.register(proc)
             try:
+                # on_start fires inside the reaping guard: if the callback raises
+                # (e.g. the job registry's cancel hook hits a transient OS error
+                # while terminating the child), the finally below still kills and
+                # reaps the process instead of orphaning a live child.
+                if on_start is not None:
+                    on_start(proc)
                 deadline = start + timeout_s
                 while proc.poll() is None:
                     now = time.monotonic()
@@ -314,6 +317,11 @@ def _execute_cpsat(
                 # Wait for process to be fully reaped after kill or natural exit
                 proc.wait()
             finally:
+                # Guarantee the child is dead and reaped on every exit path,
+                # including an exception from on_start that skipped the loop.
+                if proc.poll() is None:
+                    terminate_process_tree(proc)
+                    proc.wait()
                 if tracker is not None:
                     tracker.unregister(proc)
 

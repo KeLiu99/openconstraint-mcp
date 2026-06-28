@@ -6,6 +6,9 @@ from pydantic import ValidationError
 from openconstraint_mcp.schemas import (
     CheckerReport,
     CheckResult,
+    CpsatPythonJobStatus,
+    CpsatPythonResult,
+    CpsatStatus,
     PortfolioAttempt,
     PortfolioJobStatus,
     PortfolioSolveResult,
@@ -19,6 +22,7 @@ from openconstraint_mcp.schemas import (
     SolveStatus,
     UnsatCoreConstraint,
     UnsatCoreResult,
+    cpsat_job_state_for_result,
     job_state_for_result,
 )
 
@@ -798,3 +802,123 @@ def test_portfolio_job_status_rejects_unknown_state() -> None:
             per_attempt_timeout_ms=5000,
             submitted_at_ms=1,
         )
+
+
+# --- CpsatPythonJobStatus + cpsat_job_state_for_result ----------------------
+
+
+def _cpsat_result(status: CpsatStatus, *, timed_out: bool = False) -> CpsatPythonResult:
+    return CpsatPythonResult(
+        status=status,
+        solution={"x": 1} if status not in ("error", "infeasible", "unknown", "timeout") else None,
+        objective=None,
+        stdout="",
+        stderr="",
+        return_code=None if timed_out else 0,
+        timed_out=timed_out,
+        truncated=False,
+        duration_ms=10,
+    )
+
+
+@pytest.mark.parametrize(
+    ("status", "timed_out", "expected"),
+    [
+        ("optimal", False, "succeeded"),
+        ("feasible", False, "succeeded"),
+        ("infeasible", False, "succeeded"),
+        ("unknown", False, "succeeded"),
+        # The load-bearing case: error → succeeded (a structured verdict, not a
+        # job-machinery failure — D3 / schemas.py:144-159 analogue).
+        ("error", False, "succeeded"),
+        ("timeout", False, "timeout"),
+        # timed_out flag overrides status → always timeout
+        ("unknown", True, "timeout"),
+    ],
+)
+def test_cpsat_job_state_for_result_maps_every_status(
+    status: CpsatStatus, timed_out: bool, expected: str
+) -> None:
+    assert cpsat_job_state_for_result(_cpsat_result(status, timed_out=timed_out)) == expected
+
+
+def test_cpsat_job_state_for_result_error_maps_to_succeeded_not_failed() -> None:
+    # Explicit assertion for the D3 semantic: error → succeeded.
+    result = _cpsat_result("error")
+    assert cpsat_job_state_for_result(result) == "succeeded"
+
+
+def test_cpsat_job_state_for_result_timeout_maps_to_timeout() -> None:
+    result = _cpsat_result("timeout")
+    assert cpsat_job_state_for_result(result) == "timeout"
+
+
+def test_cpsat_python_job_status_succeeded_round_trips_with_result() -> None:
+    status = CpsatPythonJobStatus(
+        job_id="cj1",
+        state="succeeded",
+        timeout_ms=30000,
+        submitted_at_ms=1000,
+        started_at_ms=1001,
+        finished_at_ms=1050,
+        elapsed_ms=49,
+        result=_cpsat_result("optimal"),
+    )
+    dumped = status.model_dump(mode="json")
+    assert dumped["state"] == "succeeded"
+    assert dumped["result"]["status"] == "optimal"
+    assert dumped["message"] is None
+
+
+def test_cpsat_python_job_status_queued_serializes_without_result() -> None:
+    status = CpsatPythonJobStatus(
+        job_id="cj-q", state="queued", timeout_ms=30000, submitted_at_ms=5
+    )
+    dumped = status.model_dump(mode="json")
+    assert dumped["state"] == "queued"
+    assert dumped["result"] is None
+
+
+def test_cpsat_python_job_status_rejects_running_carrying_a_result() -> None:
+    with pytest.raises(ValidationError):
+        CpsatPythonJobStatus(
+            job_id="cj-bad",
+            state="running",
+            timeout_ms=30000,
+            submitted_at_ms=1,
+            result=_cpsat_result("optimal"),
+        )
+
+
+def test_cpsat_python_job_status_rejects_succeeded_without_a_result() -> None:
+    with pytest.raises(ValidationError):
+        CpsatPythonJobStatus(
+            job_id="cj-bad2",
+            state="succeeded",
+            timeout_ms=30000,
+            submitted_at_ms=1,
+        )
+
+
+def test_cpsat_python_job_status_timeout_carries_result() -> None:
+    status = CpsatPythonJobStatus(
+        job_id="cj-to",
+        state="timeout",
+        timeout_ms=5000,
+        submitted_at_ms=1,
+        result=_cpsat_result("timeout", timed_out=True),
+    )
+    assert status.result is not None
+    assert status.result.timed_out is True
+
+
+def test_cpsat_python_job_status_cancelled_has_no_result() -> None:
+    status = CpsatPythonJobStatus(
+        job_id="cj-c",
+        state="cancelled",
+        timeout_ms=5000,
+        submitted_at_ms=1,
+        message="Cancelled by client",
+    )
+    assert status.result is None
+    assert status.message == "Cancelled by client"

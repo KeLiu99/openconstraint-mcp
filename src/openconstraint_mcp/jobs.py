@@ -29,6 +29,8 @@ from subprocess import Popen
 from typing import cast
 from uuid import uuid4
 
+from .job_errors import JobRejectedError
+
 # jobs reuses core's internal solve helpers (validation, arg-building, process
 # teardown) rather than re-implementing them; they're package-internal, not a public API.
 # noinspection PyProtectedMember
@@ -59,10 +61,6 @@ from .schemas import (
 _TERMINAL_STATES: frozenset[JobState] = cast(
     "frozenset[JobState]", frozenset({"succeeded", "failed", "timeout", "cancelled"})
 )
-
-
-class JobRejectedError(RuntimeError):
-    """Raised when a submit would exceed the bounded running+queued capacity (D1.3)."""
 
 
 def _now_ms() -> int:

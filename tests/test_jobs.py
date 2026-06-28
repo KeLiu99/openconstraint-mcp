@@ -6,7 +6,8 @@ from typing import Any
 
 import pytest
 
-from openconstraint_mcp.jobs import JobRegistry, JobRejectedError, SolveRequest
+from openconstraint_mcp.job_errors import JobRejectedError
+from openconstraint_mcp.jobs import JobRegistry, SolveRequest
 from openconstraint_mcp.schemas import (
     SolverCapabilities,
     SolveResult,

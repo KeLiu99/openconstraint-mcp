@@ -21,12 +21,10 @@ from ..save_target import (
     validate_save_target,
 )
 from ..save_target import tool_version as _tool_version
-from ..schemas import SavedArtifactRole, SavedModelArtifact
+from ..schemas import CpsatPythonResult, CpsatStatus, SavedArtifactRole, SavedModelArtifact
 from .core import (
     DEFAULT_PYEXEC_TIMEOUT_MS,
     VERIFIED_STATUSES,
-    CpsatPythonResult,
-    CpsatStatus,
     run_cpsat_python,
 )
 

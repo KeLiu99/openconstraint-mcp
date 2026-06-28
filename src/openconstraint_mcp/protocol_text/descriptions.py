@@ -522,8 +522,7 @@ RUN_CPSAT_PYTHON_FILE_DESCRIPTION = (
     '(`{"status": "<status>", "objective": <float|null>, "solution": {<str: val>}}`), '
     "and the returned CpsatPythonResult has the identical shape (`status`, "
     "`solution`, `objective`, `stdout`, `stderr`, `return_code`, `timed_out`, "
-    "`truncated`, `duration_ms`), including `timeout` partial recovery. "
-    + _CPSAT_CHILD_POSTURE
+    "`truncated`, `duration_ms`), including `timeout` partial recovery. " + _CPSAT_CHILD_POSTURE
 )
 
 SOLVE_CONSTRAINT_PROBLEM_PROMPT_DESCRIPTION = (
@@ -570,4 +569,85 @@ SOLVE_CPSAT_PYTHON_PROMPT_DESCRIPTION = (
     "via run_cpsat_python. Use when the user's problem is better expressed "
     "in Python than in MiniZinc (custom data structures, imperative "
     "pre-processing, NumPy-style indexing)."
+)
+
+# --- CP-SAT background job descriptions -------------------------------------
+
+SUBMIT_CPSAT_PYTHON_JOB_DESCRIPTION = (
+    "Submit an OR-Tools CP-SAT Python INLINE SOURCE as a BACKGROUND JOB and return "
+    "immediately, so a long solve cannot hit a synchronous MCP client timeout. "
+    "Takes the same `source` and `timeout_ms` as `run_cpsat_python`. "
+    "The script must conform to the run_cpsat_python output contract: emit a single "
+    'JSON object to stdout as its last line (`{"status": "<status>", "objective": '
+    '<float|null>, "solution": {<str: val>}}`). '
+    "Returns a CpsatPythonJobStatus with a server-generated opaque `job_id` and "
+    "an initial `state` of `queued` or `running` (a very fast job may already be "
+    "terminal); poll with `get_cpsat_python_job(job_id)` and "
+    "stop with `cancel_cpsat_python_job(job_id)`. "
+    "Admission is BOUNDED: at most a fixed number of CP-SAT jobs run at once, "
+    "further submits sit `queued` up to a cap, and a submit beyond that is REJECTED "
+    "with an MCP error (retry once a running job finishes). "
+    + _REGISTRY_NOTE
+    + " "
+    + _returns_immediately_note("get_cpsat_python_job")
+    + _CPSAT_CHILD_POSTURE
+)
+
+SUBMIT_CPSAT_PYTHON_FILE_JOB_DESCRIPTION = (
+    "Submit a LOCAL OR-Tools CP-SAT Python SCRIPT FILE as a BACKGROUND JOB and "
+    "return immediately — the path-based counterpart to `submit_cpsat_python_job`. "
+    "Pass `script_path` (an absolute local path) instead of pasting source; the "
+    "script runs with its working directory set to the file's own directory so "
+    "relative imports and data-file opens resolve. "
+    "`script_path` is validated before admission: a missing path, a non-file, an "
+    "empty/whitespace-only script, or non-UTF-8 content is rejected with an "
+    "actionable MCP error and no job is created. "
+    "Same output contract as `run_cpsat_python_file`; same admission bounds, "
+    "polling (`get_cpsat_python_job`), and cancel (`cancel_cpsat_python_job`) as "
+    "`submit_cpsat_python_job` — the `job_id` is kind-agnostic. "
+    + _REGISTRY_NOTE
+    + " "
+    + _returns_immediately_note("get_cpsat_python_job")
+    + _CPSAT_CHILD_POSTURE
+)
+
+GET_CPSAT_PYTHON_JOB_DESCRIPTION = (
+    "Poll a background CP-SAT Python job by its `job_id` (from "
+    "`submit_cpsat_python_job` or `submit_cpsat_python_file_job`). "
+    "Returns a CpsatPythonJobStatus: `job_id`, `state`, `timeout_ms`, "
+    "`submitted_at_ms`, `started_at_ms`, `finished_at_ms`, `elapsed_ms`, an "
+    "optional `result` (the full CpsatPythonResult), and an optional `message`. "
+    "`state` is one of `queued`, `running`, `succeeded`, `failed`, `timeout`, "
+    "`cancelled`. CONTRACT: `result` is present exactly when `state` is "
+    "`succeeded` or `timeout`, absent for `queued`/`running`/`failed`/`cancelled` "
+    "— so branch on `state`, not on `result`. `failed` means the job machinery "
+    "itself raised (no result, see `message`); a script-level `error` verdict "
+    '(e.g. a crash or bad JSON) is a `succeeded` job whose `result.status == "error"`, '
+    "NOT `failed`. A `timeout` job carries its partial CpsatPythonResult "
+    "(`result.timed_out == True`, best-so-far `solution`/`objective`). While "
+    "`running`, only `state` + `elapsed_ms` advance. PACE polling against the "
+    "job's budget: a `running` job has roughly `timeout_ms - elapsed_ms` left; "
+    "wait a fraction of the remaining budget between polls rather than looping "
+    "tightly. On `succeeded` or `timeout`, present the result as "
+    "`run_cpsat_python` requires: lead with the plain-language status and the "
+    "solution in the user's terms. " + _UNKNOWN_JOB_ID_ERROR
+)
+
+CANCEL_CPSAT_PYTHON_JOB_DESCRIPTION = (
+    "Request cancellation of a background CP-SAT Python job by `job_id`. A job "
+    "still `queued` is dropped before it starts; a `running` job has its Python "
+    "child process tree terminated. "
+    + _cancellation_idempotent_note("`succeeded`/`failed`/`timeout`/`cancelled`")
+    + "Returns the CpsatPythonJobStatus; the job reaches `cancelled` (with "
+    "`result is None`) once the worker observes the request — poll "
+    "`get_cpsat_python_job` to confirm the terminal state. " + _UNKNOWN_JOB_ID_ERROR
+)
+
+LIST_CPSAT_PYTHON_JOBS_DESCRIPTION = (
+    "List the currently retained background CP-SAT Python jobs as "
+    "CpsatPythonJobStatus entries (one per job), covering every state from "
+    "`queued` to terminal. Works for both inline-source and file-based jobs. "
+    + _REGISTRY_NOTE
+    + " "
+    + _NO_ARGS_LIST_TOOL
 )

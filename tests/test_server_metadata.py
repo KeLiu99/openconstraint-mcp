@@ -11,6 +11,7 @@ import pytest
 from openconstraint_mcp.childproc import ChildProcessTracker
 from openconstraint_mcp.jobs import JobRegistry
 from openconstraint_mcp.proc import popen_process_group
+from openconstraint_mcp.pyexec.jobs import CpsatJobRegistry
 from openconstraint_mcp.server import (
     _homepage_url,
     _make_lifespan,
@@ -20,8 +21,8 @@ from openconstraint_mcp.server import (
 
 
 def _boot_lifespan() -> object:
-    """A wired lifespan over a fresh server-owned solve registry (boot tests)."""
-    return _make_lifespan(JobRegistry(), ChildProcessTracker())
+    """A wired lifespan over fresh server-owned registries (boot tests)."""
+    return _make_lifespan(JobRegistry(), CpsatJobRegistry(), ChildProcessTracker())
 
 
 @pytest.mark.integration
@@ -35,7 +36,7 @@ async def test_lifespan_teardown_terminates_in_flight_sync_child(
     tracker = ChildProcessTracker()
     child = popen_process_group([sys.executable, "-c", "import time; time.sleep(60)"])
     tracker.register(child)
-    lifespan = _make_lifespan(JobRegistry(), tracker)
+    lifespan = _make_lifespan(JobRegistry(), CpsatJobRegistry(), tracker)
 
     async with lifespan(create_mcp_server()):
         assert child.poll() is None  # still running within the server's lifetime
@@ -58,7 +59,7 @@ async def test_lifespan_teardown_reaps_sync_child_even_if_registry_shutdown_rais
     tracker = ChildProcessTracker()
     child = popen_process_group([sys.executable, "-c", "import time; time.sleep(60)"])
     tracker.register(child)
-    lifespan = _make_lifespan(_BoomRegistry(), tracker)  # type: ignore[arg-type]
+    lifespan = _make_lifespan(_BoomRegistry(), CpsatJobRegistry(), tracker)  # type: ignore[arg-type]
 
     with pytest.raises(RuntimeError, match="registry boom"):
         async with lifespan(create_mcp_server()):

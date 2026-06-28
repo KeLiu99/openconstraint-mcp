@@ -11,7 +11,8 @@ from typing import Any
 import pytest
 from mcp.types import CallToolResult
 
-from openconstraint_mcp.jobs import JobRegistry, JobRejectedError
+from openconstraint_mcp.job_errors import JobRejectedError
+from openconstraint_mcp.jobs import JobRegistry
 from openconstraint_mcp.schemas import (
     SolverCapabilities,
     SolveResult,
@@ -2525,7 +2526,7 @@ async def test_run_cpsat_python_tool_is_listed() -> None:
 async def test_run_cpsat_python_routes_to_cpsat_result(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from openconstraint_mcp.pyexec.core import CpsatPythonResult
+    from openconstraint_mcp.schemas import CpsatPythonResult
 
     fake_result = CpsatPythonResult(
         status="optimal",
@@ -2566,7 +2567,7 @@ async def test_run_cpsat_python_file_routes_path_to_cpsat_result(
 ) -> None:
     from pathlib import Path
 
-    from openconstraint_mcp.pyexec.core import CpsatPythonResult
+    from openconstraint_mcp.schemas import CpsatPythonResult
 
     fake_result = CpsatPythonResult(
         status="optimal",
@@ -2595,3 +2596,100 @@ async def test_run_cpsat_python_file_routes_path_to_cpsat_result(
     assert result["solution"] == {"x": 3}
     # The string path is wrapped in a Path before reaching the executor.
     assert seen["script_path"] == Path("/tmp/model.py")
+
+
+# --- CP-SAT background job tool smoke tests ---------------------------------
+
+
+def _fake_cpsat_result(status: str = "optimal") -> Any:
+    from openconstraint_mcp.schemas import CpsatPythonResult
+
+    return CpsatPythonResult(
+        status=status,  # type: ignore[arg-type]
+        solution={"x": 1},
+        objective=None,
+        stdout="",
+        stderr="",
+        return_code=0,
+        timed_out=False,
+        truncated=False,
+        duration_ms=10,
+    )
+
+
+@pytest.mark.asyncio
+async def test_submit_cpsat_python_job_returns_job_id_and_queued_or_running(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        "openconstraint_mcp.pyexec.jobs.run_cpsat_python",
+        lambda source, *, on_start, **kw: _fake_cpsat_result(),
+    )
+    mcp = create_mcp_server()
+    result = _structured(await mcp.call_tool("submit_cpsat_python_job", {"source": "x=1"}))
+    assert "job_id" in result
+    # A very fast job may already be terminal by the time submit reads status,
+    # matching the MiniZinc submit-job test convention.
+    assert result["state"] in {"queued", "running", "succeeded"}
+
+
+@pytest.mark.asyncio
+async def test_submit_cpsat_python_file_job_returns_job_id(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    script = tmp_path / "sol.py"
+    script.write_text("print('x')", encoding="utf-8")
+    monkeypatch.setattr(
+        "openconstraint_mcp.pyexec.jobs.run_cpsat_python_file",
+        lambda path, *, on_start, **kw: _fake_cpsat_result(),
+    )
+    mcp = create_mcp_server()
+    result = _structured(
+        await mcp.call_tool("submit_cpsat_python_file_job", {"script_path": str(script)})
+    )
+    assert "job_id" in result
+    # A very fast job may already be terminal by the time submit reads status,
+    # matching the MiniZinc submit-job test convention.
+    assert result["state"] in {"queued", "running", "succeeded"}
+
+
+@pytest.mark.asyncio
+async def test_get_cpsat_python_job_reflects_submitted_job(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        "openconstraint_mcp.pyexec.jobs.run_cpsat_python",
+        lambda source, *, on_start, **kw: _fake_cpsat_result(),
+    )
+    mcp = create_mcp_server()
+    submit_result = _structured(await mcp.call_tool("submit_cpsat_python_job", {"source": "x=1"}))
+    job_id = submit_result["job_id"]
+
+    get_result = _structured(await mcp.call_tool("get_cpsat_python_job", {"job_id": job_id}))
+    assert get_result["job_id"] == job_id
+
+
+@pytest.mark.asyncio
+async def test_list_cpsat_python_jobs_reflects_submitted_job(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        "openconstraint_mcp.pyexec.jobs.run_cpsat_python",
+        lambda source, *, on_start, **kw: _fake_cpsat_result(),
+    )
+    mcp = create_mcp_server()
+    submit_result = _structured(await mcp.call_tool("submit_cpsat_python_job", {"source": "x=1"}))
+    job_id = submit_result["job_id"]
+
+    list_data = _structured(await mcp.call_tool("list_cpsat_python_jobs", {}))["result"]
+    job_ids = [j["job_id"] for j in list_data]
+    assert job_id in job_ids
+
+
+@pytest.mark.asyncio
+async def test_get_cpsat_python_job_unknown_id_surfaces_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    mcp = create_mcp_server()
+    with pytest.raises(Exception, match="unknown job_id"):
+        await mcp.call_tool("get_cpsat_python_job", {"job_id": "no-such-id"})
