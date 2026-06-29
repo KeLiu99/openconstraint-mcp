@@ -54,6 +54,17 @@ from .runner import python_script_argv as _python_script_argv
 
 DEFAULT_PYEXEC_TIMEOUT_MS: int = 30_000
 
+# Environment variable the seed sweep (and seeded save replay) sets for the child,
+# carrying the per-attempt CP-SAT random seed. The client-generated script must read
+# it and assign ``solver.parameters.random_seed``; the server cannot force a seed
+# into arbitrary Python. One definition shared by the sweep and save replay paths.
+CPSAT_SEED_ENV_VAR: str = "OPENCONSTRAINT_MCP_CPSAT_SEED"
+
+# OR-Tools CP-SAT's random_seed parameter is a signed int32. Reject values outside
+# that range before they reach a child process.
+CPSAT_RANDOM_SEED_MIN: int = -2_147_483_648
+CPSAT_RANDOM_SEED_MAX: int = 2_147_483_647
+
 VERIFIED_STATUSES: frozenset[CpsatStatus] = frozenset({"optimal", "feasible"})
 
 # Statuses a script may legitimately report. "timeout" is executor-determined, so a
@@ -61,6 +72,36 @@ VERIFIED_STATUSES: frozenset[CpsatStatus] = frozenset({"optimal", "feasible"})
 _SCRIPT_STATUSES: frozenset[str] = frozenset(
     {"optimal", "feasible", "infeasible", "unknown", "error"}
 )
+
+
+def validate_checker_args(*, checker: str | None, checker_timeout_ms: int | None) -> None:
+    """Validate shared optional-checker arguments for CP-SAT Python tools."""
+    if checker_timeout_ms is not None and checker is None:
+        raise ValueError("checker_timeout_ms supplied without checker: no checker will run")
+    if checker_timeout_ms is not None and checker_timeout_ms <= 0:
+        raise ValueError("checker_timeout_ms must be positive")
+    if checker is not None and not checker.strip():
+        raise ValueError("checker must be non-empty after stripping whitespace")
+
+
+def effective_checker_timeout_ms(*, checker_timeout_ms: int | None, default_timeout_ms: int) -> int:
+    """Return the checker timeout after applying the tool's default timeout fallback."""
+    return checker_timeout_ms if checker_timeout_ms is not None else default_timeout_ms
+
+
+def validate_cpsat_random_seed(seed: object, *, label: str = "seed") -> int:
+    """Validate a seed for OR-Tools CP-SAT's ``random_seed`` parameter."""
+    if isinstance(seed, bool) or not isinstance(seed, int):
+        raise ValueError(
+            f"{label} must be a non-bool integer in the CP-SAT random_seed range "
+            f"{CPSAT_RANDOM_SEED_MIN}..{CPSAT_RANDOM_SEED_MAX}, got {seed!r}"
+        )
+    if not (CPSAT_RANDOM_SEED_MIN <= seed <= CPSAT_RANDOM_SEED_MAX):
+        raise ValueError(
+            f"{label} must be in the CP-SAT random_seed range "
+            f"{CPSAT_RANDOM_SEED_MIN}..{CPSAT_RANDOM_SEED_MAX}, got {seed!r}"
+        )
+    return seed
 
 
 def normalize_status(raw: object) -> CpsatStatus:
@@ -223,6 +264,7 @@ def run_cpsat_python(
     timeout_ms: int = DEFAULT_PYEXEC_TIMEOUT_MS,
     tracker: ChildProcessTracker | None = None,
     on_start: Callable[[Popen[str]], None] | None = None,
+    env: dict[str, str] | None = None,
 ) -> CpsatPythonResult:
     """Execute OR-Tools CP-SAT Python ``source`` in a child process.
 
@@ -240,6 +282,11 @@ def run_cpsat_python(
     can terminate it instead of orphaning it; it is unregistered on every exit
     path (clean, timeout-kill, or output-cap kill).
 
+    ``env`` is an INTERNAL environment overlay merged on top of the parent's
+    environment for the child (the only caller is the seed sweep / save replay,
+    which injects ``OPENCONSTRAINT_MCP_CPSAT_SEED``). It is NOT an MCP-facing
+    parameter — the server never exposes arbitrary environment variables.
+
     For an existing local file, use ``run_cpsat_python_file`` instead — it runs
     the script in its own directory so relative file/import references resolve.
     """
@@ -254,6 +301,7 @@ def run_cpsat_python(
             timeout_ms=timeout_ms,
             tracker=tracker,
             on_start=on_start,
+            env=env,
         )
         return _result_from_child(child)
 
@@ -264,6 +312,7 @@ def run_cpsat_python_file(
     timeout_ms: int = DEFAULT_PYEXEC_TIMEOUT_MS,
     tracker: ChildProcessTracker | None = None,
     on_start: Callable[[Popen[str]], None] | None = None,
+    env: dict[str, str] | None = None,
 ) -> CpsatPythonResult:
     """Execute an existing OR-Tools CP-SAT Python file in its own directory.
 
@@ -277,7 +326,8 @@ def run_cpsat_python_file(
 
     Validates the path (exists / regular file / non-empty / UTF-8) with a clear
     ``ValueError`` before any child is spawned. Same execution contract, output
-    cap, timeout, and tree-kill as ``run_cpsat_python``.
+    cap, timeout, tree-kill, and INTERNAL ``env`` overlay (see ``run_cpsat_python``)
+    as ``run_cpsat_python``.
     """
     resolved = _validate_script_path(script_path)
     child = execute_child(
@@ -286,5 +336,6 @@ def run_cpsat_python_file(
         timeout_ms=timeout_ms,
         tracker=tracker,
         on_start=on_start,
+        env=env,
     )
     return _result_from_child(child)

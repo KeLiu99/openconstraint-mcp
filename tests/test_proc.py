@@ -5,11 +5,18 @@ from __future__ import annotations
 import signal
 import subprocess
 import sys
+import time
 from typing import Any
 
 import pytest
 
-from openconstraint_mcp.proc import terminate_process_tree, terminate_process_tree_windows
+from openconstraint_mcp.proc import (
+    PROCESS_TREE_TERMINATE_GRACE_MS,
+    popen_process_group,
+    process_tree_terminate_worst_case_ms,
+    terminate_process_tree,
+    terminate_process_tree_windows,
+)
 
 
 class _FakePopen:
@@ -36,6 +43,47 @@ class _FakePopen:
 
     def terminate(self) -> None:
         self.terminate_calls += 1
+
+
+def test_process_tree_terminate_worst_case_ms_accounts_for_two_waits() -> None:
+    assert process_tree_terminate_worst_case_ms() == 2 * PROCESS_TREE_TERMINATE_GRACE_MS
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX process-group termination")
+def test_terminate_process_tree_escalates_real_sigterm_ignored_child() -> None:
+    script = (
+        "import signal, time\n"
+        "signal.signal(signal.SIGTERM, signal.SIG_IGN)\n"
+        "print('ready', flush=True)\n"
+        "time.sleep(60)\n"
+    )
+    proc = popen_process_group(
+        [sys.executable, "-c", script],
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    try:
+        assert proc.stdout is not None
+        assert proc.stdout.readline() == "ready\n"
+
+        grace_seconds = 0.05
+        started = time.monotonic()
+        terminate_process_tree(proc, grace_seconds=grace_seconds)
+        elapsed_seconds = time.monotonic() - started
+
+        assert proc.poll() == -signal.SIGKILL
+        assert elapsed_seconds >= grace_seconds
+        assert elapsed_seconds <= (2 * grace_seconds) + 1.0
+    finally:
+        terminate_process_tree(proc, grace_seconds=0.01)
+        try:
+            proc.communicate(timeout=1)
+        except subprocess.TimeoutExpired:
+            terminate_process_tree(proc, grace_seconds=0.01)
+            proc.kill()
+            proc.communicate(timeout=1)
 
 
 @pytest.mark.skipif(sys.platform == "win32", reason="POSIX process-group termination")

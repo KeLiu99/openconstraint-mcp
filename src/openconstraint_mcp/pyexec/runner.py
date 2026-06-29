@@ -17,6 +17,7 @@ Imports only: ``proc`` (process-group launch + tree-kill) and ``childproc``
 
 from __future__ import annotations
 
+import os
 import subprocess
 import sys
 import tempfile
@@ -86,6 +87,7 @@ def execute_child(
     timeout_ms: int,
     tracker: ChildProcessTracker | None,
     on_start: Callable[[Popen[str]], None] | None = None,
+    env: dict[str, str] | None = None,
 ) -> ChildExecutionResult:
     """Run a prepared child command, capturing bounded output.
 
@@ -97,9 +99,16 @@ def execute_child(
 
     ``tracker`` wiring (register then unregister on every exit path) is handled
     here, so callers never orphan a live child on an exception.
+
+    ``env`` is an optional overlay merged ON TOP of the parent's ``os.environ``
+    (the child still inherits the server's full environment, with these keys
+    overriding/adding). The sweep uses it to inject ``OPENCONSTRAINT_MCP_CPSAT_SEED``
+    without dropping the interpreter's existing environment; ``None`` leaves the
+    inherited environment untouched (the default subprocess behaviour).
     """
     if timeout_ms <= 0:
         raise ValueError("timeout_ms must be positive")
+    child_env = {**os.environ, **env} if env is not None else None
     timeout_s = timeout_ms / 1000.0
     start = time.monotonic()
     timed_out = False
@@ -123,6 +132,7 @@ def execute_child(
                 # block the server. DEVNULL gives the child an immediate EOF instead.
                 stdin=subprocess.DEVNULL,
                 cwd=str(cwd),
+                env=child_env,
             )
 
             if tracker is not None:

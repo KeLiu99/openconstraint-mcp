@@ -5,6 +5,7 @@ Runs standalone: python assignment.py
 """
 
 import json
+import os
 
 from ortools.sat.python import cp_model
 
@@ -26,7 +27,9 @@ total_cost = sum(x[t][a] * costs[a] for t in range(num_tasks) for a in range(num
 model.minimize(total_cost)
 
 solver = cp_model.CpSolver()
-solver.parameters.random_seed = 42
+# Seed-sweep protocol: read the seed the server injects (run_cpsat_python_sweep sets
+# OPENCONSTRAINT_MCP_CPSAT_SEED per attempt); fall back to 42 for a plain run.
+solver.parameters.random_seed = int(os.environ.get("OPENCONSTRAINT_MCP_CPSAT_SEED", "42"))
 solver.parameters.num_workers = 1
 status = solver.solve(model)
 

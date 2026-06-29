@@ -41,6 +41,12 @@ CPSAT_PYTHON_STAGES = (
     "Child finished; parsing result",
     "CP-SAT Python execution complete",
 )
+CPSAT_PYTHON_SWEEP_STAGES = (
+    "Validating sweep request and seed budget",
+    "Running CP-SAT Python once per seed (serial)",
+    "Sweep finished; selecting the best accepted result",
+    "CP-SAT Python sweep complete",
+)
 
 
 def cpsat_save_stages(with_checker: bool) -> tuple[str, str, str, str]:

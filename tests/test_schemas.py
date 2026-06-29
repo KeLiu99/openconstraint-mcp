@@ -10,6 +10,8 @@ from openconstraint_mcp.schemas import (
     CpsatExpectation,
     CpsatPythonJobStatus,
     CpsatPythonResult,
+    CpsatPythonSweepAttempt,
+    CpsatPythonSweepResult,
     CpsatStatus,
     PortfolioAttempt,
     PortfolioJobStatus,
@@ -1115,3 +1117,110 @@ def test_save_verified_python_result_with_expectation_echoed() -> None:
     assert result.expectation is not None
     assert result.expectation.objective_sense == "maximize"
     assert result.expectation_passed is True
+
+
+# --- CpsatPythonSweepResult --------------------------------------------------
+
+
+def _sweep_winner_result() -> CpsatPythonResult:
+    return CpsatPythonResult(
+        status="optimal",
+        solution={"x": 3},
+        objective=3,
+        stdout="",
+        stderr="",
+        return_code=0,
+        timed_out=False,
+        truncated=False,
+        duration_ms=5,
+    )
+
+
+def _sweep_attempt(seed: int, *, accepted: bool = True) -> CpsatPythonSweepAttempt:
+    return CpsatPythonSweepAttempt(
+        index=0,
+        seed=seed,
+        status="optimal",
+        objective=3,
+        accepted=accepted,
+        checker_status=None,
+        message=None,
+        timed_out=False,
+        truncated=False,
+        duration_ms=5,
+    )
+
+
+def test_cpsat_sweep_result_winner_round_trips() -> None:
+    result = CpsatPythonSweepResult(
+        status="winner",
+        winner_index=0,
+        winner_seed=7,
+        winner=_sweep_winner_result(),
+        attempts=[_sweep_attempt(7)],
+        elapsed_ms=10,
+        objective_sense="minimize",
+        selection_policy="best_objective_then_status_then_seed",
+        distinct_accepted_objectives=1,
+    )
+    dumped = result.model_dump(mode="json")
+    assert dumped["status"] == "winner"
+    assert dumped["winner_seed"] == 7
+    assert dumped["winner"]["objective"] == 3
+
+
+def test_cpsat_sweep_result_no_winner_round_trips() -> None:
+    result = CpsatPythonSweepResult(
+        status="no_winner",
+        attempts=[_sweep_attempt(1, accepted=False)],
+        elapsed_ms=10,
+        objective_sense="minimize",
+        selection_policy="best_objective_then_status_then_seed",
+        distinct_accepted_objectives=0,
+    )
+    assert result.winner_index is None
+    assert result.winner_seed is None
+    assert result.winner is None
+
+
+def test_cpsat_sweep_result_rejects_winner_status_without_winner_fields() -> None:
+    with pytest.raises(ValidationError):
+        CpsatPythonSweepResult(
+            status="winner",
+            attempts=[_sweep_attempt(1)],
+            elapsed_ms=10,
+            objective_sense="minimize",
+            selection_policy="best_objective_then_status_then_seed",
+            distinct_accepted_objectives=1,
+        )
+
+
+def test_cpsat_sweep_result_rejects_winner_seed_mismatch() -> None:
+    # winner_seed must equal attempts[winner_index].seed.
+    with pytest.raises(ValidationError):
+        CpsatPythonSweepResult(
+            status="winner",
+            winner_index=0,
+            winner_seed=99,
+            winner=_sweep_winner_result(),
+            attempts=[_sweep_attempt(7)],
+            elapsed_ms=10,
+            objective_sense="minimize",
+            selection_policy="best_objective_then_status_then_seed",
+            distinct_accepted_objectives=1,
+        )
+
+
+def test_cpsat_sweep_result_rejects_winner_index_out_of_range() -> None:
+    with pytest.raises(ValidationError):
+        CpsatPythonSweepResult(
+            status="winner",
+            winner_index=5,
+            winner_seed=7,
+            winner=_sweep_winner_result(),
+            attempts=[_sweep_attempt(7)],
+            elapsed_ms=10,
+            objective_sense="minimize",
+            selection_policy="best_objective_then_status_then_seed",
+            distinct_accepted_objectives=1,
+        )

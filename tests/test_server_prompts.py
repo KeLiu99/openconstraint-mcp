@@ -502,6 +502,17 @@ async def test_solve_cpsat_python_prompt_mentions_run_cpsat_python() -> None:
 
 
 @pytest.mark.asyncio
+async def test_solve_cpsat_python_prompt_teaches_seed_protocol() -> None:
+    # The client-facing protocol must not drift from the env-var contract the sweep
+    # relies on: read OPENCONSTRAINT_MCP_CPSAT_SEED, fall back to 42, single worker.
+    text = await _get_prompt_text("solve_cpsat_python", {"problem": SAMPLE_PROBLEM})
+    assert "OPENCONSTRAINT_MCP_CPSAT_SEED" in text
+    assert "42" in text
+    assert "num_workers = 1" in text
+    assert "run_cpsat_python_sweep" in text
+
+
+@pytest.mark.asyncio
 async def test_solve_cpsat_python_prompt_states_json_output_contract() -> None:
     text = await _get_prompt_text("solve_cpsat_python", {"problem": SAMPLE_PROBLEM})
     # Must describe the required JSON output format

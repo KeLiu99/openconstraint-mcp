@@ -30,9 +30,13 @@ from ..schemas import (
 )
 from .checker import run_checker
 from .core import (
+    CPSAT_SEED_ENV_VAR,
     DEFAULT_PYEXEC_TIMEOUT_MS,
     VERIFIED_STATUSES,
+    effective_checker_timeout_ms,
     run_cpsat_python,
+    validate_checker_args,
+    validate_cpsat_random_seed,
 )
 
 SCRIPT_FILENAME: str = "solution.py"
@@ -103,6 +107,7 @@ def _write_staged_artifacts(
     expectation: CpsatExpectation | None,
     expectation_passed: bool | None,
     checker_report: CpsatCheckerReport | None,
+    seed: int | None,
 ) -> list[SavedModelArtifact]:
     texts: list[tuple[SavedArtifactRole, str, str]] = [("model", SCRIPT_FILENAME, source)]
     if problem is not None:
@@ -129,6 +134,17 @@ def _write_staged_artifacts(
         "reported_status": run_result.status,
         "objective": run_result.objective,
     }
+    if seed is not None:
+        # The saved solution.py is byte-for-byte the client's script: the seed lives
+        # in the manifest, not the code. A manual re-run without the env var hits the
+        # script's own fallback and may not reproduce this incumbent.
+        verification["replay_seed"] = seed
+        verification["reproducibility_note"] = (
+            f"This result was verified with the replay seed above. The saved "
+            f"{SCRIPT_FILENAME} carries its own seed fallback, not this seed; to "
+            f"reproduce the saved incumbent, set {CPSAT_SEED_ENV_VAR}={seed} before "
+            f"running {SCRIPT_FILENAME} by hand."
+        )
     if expectation is not None:
         verification["expectation"] = {
             "objective_sense": expectation.objective_sense,
@@ -172,6 +188,7 @@ def save_verified_cpsat_python(
     checker_timeout_ms: int | None = None,
     timeout_ms: int = DEFAULT_PYEXEC_TIMEOUT_MS,
     overwrite: bool = False,
+    seed: int | None = None,
     tracker: ChildProcessTracker | None = None,
 ) -> SaveVerifiedPythonResult:
     """Re-run ``source`` and persist it when it passes all supplied save gates.
@@ -181,18 +198,25 @@ def save_verified_cpsat_python(
     commit never starts. Returns a ``SaveVerifiedPythonResult`` with ``saved=True``
     and files on disk, or ``saved=False`` with a ``reason`` and the
     ``verification_level`` of the highest gate that actually passed.
-    """
-    if checker_timeout_ms is not None and checker is None:
-        raise ValueError("checker_timeout_ms supplied without checker: no checker will run")
-    if checker_timeout_ms is not None and checker_timeout_ms <= 0:
-        raise ValueError("checker_timeout_ms must be positive")
-    if checker is not None and not checker.strip():
-        raise ValueError("checker must be non-empty after stripping whitespace")
 
-    effective_checker_timeout = checker_timeout_ms if checker_timeout_ms is not None else timeout_ms
+    When ``seed`` is supplied (e.g. to persist a sweep's winning seed), the re-run
+    sets ``OPENCONSTRAINT_MCP_CPSAT_SEED`` so a cooperating script replays that
+    seed, and the manifest records it. The save gates are UNCHANGED: the reported
+    gate still requires ``optimal``/``feasible``, so a ``timeout`` sweep winner is
+    NOT savable even with its seed replayed — re-run it with a larger budget first.
+    """
+    validate_checker_args(checker=checker, checker_timeout_ms=checker_timeout_ms)
+    if seed is not None:
+        seed = validate_cpsat_random_seed(seed)
+
+    effective_checker_timeout = effective_checker_timeout_ms(
+        checker_timeout_ms=checker_timeout_ms,
+        default_timeout_ms=timeout_ms,
+    )
+    seed_env = {CPSAT_SEED_ENV_VAR: str(seed)} if seed is not None else None
 
     target = validate_save_target(target_dir, overwrite=overwrite)
-    run_result = run_cpsat_python(source, timeout_ms=timeout_ms, tracker=tracker)
+    run_result = run_cpsat_python(source, timeout_ms=timeout_ms, tracker=tracker, env=seed_env)
 
     # --- Reported gate ---
     reported_passed = run_result.status in VERIFIED_STATUSES and bool(run_result.solution)
@@ -268,6 +292,7 @@ def save_verified_cpsat_python(
             expectation=expectation,
             expectation_passed=exp_passed,
             checker_report=checker_report,
+            seed=seed,
         )
 
     files, _ = commit_staged_dir(target, overwrite=overwrite, write_files=_writer)
