@@ -525,6 +525,72 @@ async def test_solve_cpsat_python_prompt_states_local_child_process_execution() 
     assert "child process" in lower or "subprocess" in lower or "local" in lower
 
 
+@pytest.mark.asyncio
+async def test_solve_cpsat_python_prompt_documents_save_gate_options() -> None:
+    text = await _get_prompt_text("solve_cpsat_python", {"problem": SAMPLE_PROBLEM})
+    # All three gates must be named in the save step
+    assert "reported" in text
+    assert "expectation" in text.lower()
+    assert "checker" in text.lower()
+    assert "save_verified_cpsat_python" in text
+
+
+@pytest.mark.asyncio
+async def test_solve_cpsat_python_prompt_expectation_gate_documents_no_optimality_proof() -> None:
+    text = await _get_prompt_text("solve_cpsat_python", {"problem": SAMPLE_PROBLEM})
+    lower = text.lower()
+    # The prompt must explicitly state the threshold is NOT a proof of global optimality.
+    assert "does not prove" in lower or "not prove" in lower or "not an optimality proof" in lower
+    # Must name both sense options
+    assert "maximize" in lower
+    assert "minimize" in lower
+
+
+@pytest.mark.asyncio
+async def test_solve_cpsat_python_prompt_checker_gate_documents_payload_format() -> None:
+    text = await _get_prompt_text("solve_cpsat_python", {"problem": SAMPLE_PROBLEM})
+    # Checker receives the payload path as sys.argv[1]
+    assert "sys.argv[1]" in text
+    # Payload keys that the checker must read
+    assert "solver_status" in text
+    assert "solution" in text
+
+
+@pytest.mark.asyncio
+async def test_solve_cpsat_python_prompt_checker_gate_documents_output_contract() -> None:
+    text = await _get_prompt_text("solve_cpsat_python", {"problem": SAMPLE_PROBLEM})
+    # Checker must emit JSON with status/errors/details
+    assert '"accepted"' in text or "accepted" in text
+    assert '"rejected"' in text or "rejected" in text
+    assert "errors" in text
+    # Only accepted + empty errors is the passing verdict
+    assert "empty" in text.lower()
+    assert "passing" in text.lower() or "only" in text.lower()
+
+
+@pytest.mark.asyncio
+async def test_solve_cpsat_python_prompt_checker_gate_safety_boundary() -> None:
+    text = await _get_prompt_text("solve_cpsat_python", {"problem": SAMPLE_PROBLEM})
+    lower = text.lower()
+    # The server executes the checker locally and does not sandbox it — this
+    # must be documented so the client knows to generate safe validation code.
+    assert "sandbox" in lower
+    assert "network" in lower
+    assert "local" in lower
+
+
+@pytest.mark.asyncio
+async def test_solve_cpsat_python_prompt_save_step_gated_on_user_request() -> None:
+    text = await _get_prompt_text("solve_cpsat_python", {"problem": SAMPLE_PROBLEM})
+    normalized = " ".join(text.split()).lower()
+    # Save is optional — the user must ask
+    assert "only if" in normalized or "if the user" in normalized
+    # Save must not be framed as a required solve-loop step
+    save_idx = text.index("save_verified_cpsat_python")
+    run_idx = text.index("run_cpsat_python")
+    assert save_idx > run_idx, "save step must appear after the run step"
+
+
 def test_solve_descriptions_state_checker_suffix_and_nested_report() -> None:
     # The protocol descriptions must state plainly that checking is a solve option,
     # requires a `.mzc`/`.mzc.mzn` checker on the path side, and returns the nested

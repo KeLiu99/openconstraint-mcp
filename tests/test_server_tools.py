@@ -2693,3 +2693,205 @@ async def test_get_cpsat_python_job_unknown_id_surfaces_error(
     mcp = create_mcp_server()
     with pytest.raises(Exception, match="unknown job_id"):
         await mcp.call_tool("get_cpsat_python_job", {"job_id": "no-such-id"})
+
+
+# --- save_verified_cpsat_python tool -----------------------------------------
+
+
+def _fake_cpsat_run_result(
+    *,
+    status: str = "optimal",
+    solution: dict | None = None,
+    objective: float | None = 3.0,
+    stdout: str = '{"status":"optimal","objective":3,"solution":{"x":3}}',
+    duration_ms: int = 10,
+) -> Any:
+    from openconstraint_mcp.schemas import CpsatPythonResult
+
+    return CpsatPythonResult(
+        status=status,  # type: ignore[arg-type]
+        solution=solution if solution is not None else {"x": 3},
+        objective=objective,
+        stdout=stdout,
+        stderr="",
+        return_code=0,
+        timed_out=False,
+        truncated=False,
+        duration_ms=duration_ms,
+    )
+
+
+def _fake_cpsat_save_result(
+    *,
+    status: str = "optimal",
+    saved: bool = True,
+    verification_level: str = "reported",
+) -> Any:
+    from openconstraint_mcp.schemas import SaveVerifiedPythonResult
+
+    return SaveVerifiedPythonResult(
+        status=status,  # type: ignore[arg-type]
+        target_dir="/tmp/s" if saved else None,
+        reason=None if saved else "status=infeasible",
+        solution={"x": 3} if saved else None,
+        objective=3.0 if saved else None,
+        stdout="",
+        stderr="",
+        timed_out=False,
+        truncated=False,
+        duration_ms=10,
+        verification_level=verification_level,  # type: ignore[arg-type]
+        reported_passed=saved,
+        expectation=None,
+        expectation_passed=None,
+        checker=None,
+    )
+
+
+@pytest.mark.asyncio
+async def test_save_verified_cpsat_python_tool_is_listed() -> None:
+    mcp = create_mcp_server()
+    tools = await mcp.list_tools()
+    names = {t.name for t in tools}
+    assert "save_verified_cpsat_python" in names
+
+
+@pytest.mark.asyncio
+async def test_save_verified_cpsat_python_tool_schema_includes_new_params() -> None:
+    mcp = create_mcp_server()
+    tools = await mcp.list_tools()
+    tool = next(t for t in tools if t.name == "save_verified_cpsat_python")
+    props = set(tool.inputSchema["properties"])
+    assert {"source", "target_dir", "expectation", "checker", "checker_timeout_ms"} <= props
+    assert "ctx" not in props
+    assert set(tool.inputSchema.get("required", [])) == {"source", "target_dir"}
+
+
+@pytest.mark.asyncio
+async def test_save_verified_cpsat_python_tool_routes_to_save(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setattr(
+        "openconstraint_mcp.pyexec.save.run_cpsat_python",
+        lambda source, **kw: _fake_cpsat_run_result(),
+    )
+    target = tmp_path / "save_target"
+    mcp = create_mcp_server()
+    result = _structured(
+        await mcp.call_tool(
+            "save_verified_cpsat_python",
+            {"source": "print('x')", "target_dir": str(target)},
+        )
+    )
+    assert result["saved"] is True
+    assert result["verification_level"] == "reported"
+
+
+@pytest.mark.asyncio
+async def test_save_verified_cpsat_python_tool_accepts_nested_expectation(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """FastMCP coerces nested `expectation` dict to CpsatExpectation."""
+    received: dict = {}
+    monkeypatch.setattr(
+        "openconstraint_mcp.pyexec.save.run_cpsat_python",
+        lambda source, **kw: _fake_cpsat_run_result(objective=10.0),
+    )
+
+    original_save = __import__(
+        "openconstraint_mcp.pyexec.save", fromlist=["save_verified_cpsat_python"]
+    ).save_verified_cpsat_python
+
+    def _spy(source, *, target_dir, expectation=None, **kw):
+        received["expectation"] = expectation
+        return original_save(source, target_dir=target_dir, expectation=expectation, **kw)
+
+    monkeypatch.setattr("openconstraint_mcp.pyexec.save.save_verified_cpsat_python", _spy)
+    monkeypatch.setattr("openconstraint_mcp.server.save_verified_cpsat_python", _spy)
+
+    target = tmp_path / "save_t"
+    mcp = create_mcp_server()
+    result = _structured(
+        await mcp.call_tool(
+            "save_verified_cpsat_python",
+            {
+                "source": "print('x')",
+                "target_dir": str(target),
+                "expectation": {"objective_sense": "maximize", "objective_threshold": 5.0},
+            },
+        )
+    )
+    exp = received.get("expectation")
+    assert exp is not None
+    assert exp.objective_sense == "maximize"
+    assert exp.objective_threshold == 5.0
+    assert result["expectation_passed"] is True
+
+
+@pytest.mark.asyncio
+async def test_save_verified_cpsat_python_tool_rejects_invalid_nested_threshold(
+    tmp_path: Path,
+) -> None:
+    """An invalid nested expectation (NaN threshold) is rejected by FastMCP at the tool boundary."""
+    mcp = create_mcp_server()
+    import math
+
+    with pytest.raises(Exception, match="finite"):
+        await mcp.call_tool(
+            "save_verified_cpsat_python",
+            {
+                "source": "print('x')",
+                "target_dir": str(tmp_path / "x"),
+                "expectation": {"objective_sense": "maximize", "objective_threshold": math.nan},
+            },
+        )
+
+
+@pytest.mark.asyncio
+async def test_save_verified_cpsat_python_tool_rejects_checker_timeout_without_checker(
+    tmp_path: Path,
+) -> None:
+    mcp = create_mcp_server()
+    with pytest.raises(Exception, match="checker_timeout_ms"):
+        await mcp.call_tool(
+            "save_verified_cpsat_python",
+            {
+                "source": "print('x')",
+                "target_dir": str(tmp_path / "x"),
+                "checker_timeout_ms": 5000,
+            },
+        )
+
+
+@pytest.mark.asyncio
+async def test_save_verified_cpsat_python_tool_rejects_empty_checker(
+    tmp_path: Path,
+) -> None:
+    mcp = create_mcp_server()
+    with pytest.raises(Exception, match="non-empty"):
+        await mcp.call_tool(
+            "save_verified_cpsat_python",
+            {
+                "source": "print('x')",
+                "target_dir": str(tmp_path / "x"),
+                "checker": "",
+            },
+        )
+
+
+@pytest.mark.asyncio
+async def test_save_verified_cpsat_python_tool_rejects_whitespace_only_checker(
+    tmp_path: Path,
+) -> None:
+    mcp = create_mcp_server()
+    with pytest.raises(Exception, match="non-empty"):
+        await mcp.call_tool(
+            "save_verified_cpsat_python",
+            {
+                "source": "print('x')",
+                "target_dir": str(tmp_path / "x"),
+                "checker": "  \n",
+            },
+        )

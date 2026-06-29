@@ -41,12 +41,24 @@ CPSAT_PYTHON_STAGES = (
     "Child finished; parsing result",
     "CP-SAT Python execution complete",
 )
-CPSAT_PYTHON_SAVE_STAGES = (
-    "Validating save request and CP-SAT Python source",
-    "Re-running CP-SAT Python to verify solution",
-    "Child finished; save decision made",
-    "Save complete",
-)
+
+
+def cpsat_save_stages(with_checker: bool) -> tuple[str, str, str, str]:
+    """Return the CP-SAT save milestone messages, checker-aware at stage 2."""
+    if with_checker:
+        return (
+            "Validating save request and CP-SAT Python source",
+            "Re-running CP-SAT Python and any configured checker "
+            "if earlier gates pass to evaluate the save gate",
+            "Child finished; save decision made",
+            "Save complete",
+        )
+    return (
+        "Validating save request and CP-SAT Python source",
+        "Re-running CP-SAT Python to evaluate the save gate",
+        "Child finished; save decision made",
+        "Save complete",
+    )
 
 
 def solve_stages(with_checker: bool) -> tuple[str, str, str, str]:

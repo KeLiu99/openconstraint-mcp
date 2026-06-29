@@ -6,6 +6,8 @@ from pydantic import ValidationError
 from openconstraint_mcp.schemas import (
     CheckerReport,
     CheckResult,
+    CpsatCheckerReport,
+    CpsatExpectation,
     CpsatPythonJobStatus,
     CpsatPythonResult,
     CpsatStatus,
@@ -14,6 +16,7 @@ from openconstraint_mcp.schemas import (
     PortfolioSolveResult,
     SavedModelArtifact,
     SaveVerifiedModelResult,
+    SaveVerifiedPythonResult,
     SolutionCheck,
     SolveJobStatus,
     SolverCapabilities,
@@ -922,3 +925,193 @@ def test_cpsat_python_job_status_cancelled_has_no_result() -> None:
     )
     assert status.result is None
     assert status.message == "Cancelled by client"
+
+
+# --- CpsatExpectation schemas -----------------------------------------------
+
+
+def test_cpsat_expectation_maximize_with_int_threshold() -> None:
+    exp = CpsatExpectation(objective_sense="maximize", objective_threshold=100)
+    assert exp.objective_sense == "maximize"
+    assert exp.objective_threshold == 100.0
+
+
+def test_cpsat_expectation_minimize_with_float_threshold() -> None:
+    exp = CpsatExpectation(objective_sense="minimize", objective_threshold=3.14)
+    assert exp.objective_sense == "minimize"
+    assert exp.objective_threshold == 3.14
+
+
+def test_cpsat_expectation_accepts_zero_threshold() -> None:
+    exp = CpsatExpectation(objective_sense="minimize", objective_threshold=0)
+    assert exp.objective_threshold == 0.0
+
+
+def test_cpsat_expectation_accepts_negative_threshold() -> None:
+    exp = CpsatExpectation(objective_sense="maximize", objective_threshold=-50)
+    assert exp.objective_threshold == -50.0
+
+
+def test_cpsat_expectation_rejects_true() -> None:
+    with pytest.raises(ValidationError, match="bool"):
+        CpsatExpectation(objective_sense="maximize", objective_threshold=True)  # type: ignore[arg-type]
+
+
+def test_cpsat_expectation_rejects_false() -> None:
+    with pytest.raises(ValidationError, match="bool"):
+        CpsatExpectation(objective_sense="minimize", objective_threshold=False)  # type: ignore[arg-type]
+
+
+def test_cpsat_expectation_rejects_nan() -> None:
+    import math
+
+    with pytest.raises(ValidationError, match="finite"):
+        CpsatExpectation(objective_sense="maximize", objective_threshold=math.nan)
+
+
+def test_cpsat_expectation_rejects_positive_inf() -> None:
+    import math
+
+    with pytest.raises(ValidationError, match="finite"):
+        CpsatExpectation(objective_sense="maximize", objective_threshold=math.inf)
+
+
+def test_cpsat_expectation_rejects_negative_inf() -> None:
+    import math
+
+    with pytest.raises(ValidationError, match="finite"):
+        CpsatExpectation(objective_sense="minimize", objective_threshold=-math.inf)
+
+
+def test_cpsat_expectation_rejects_unknown_sense() -> None:
+    with pytest.raises(ValidationError):
+        CpsatExpectation(objective_sense="unknown", objective_threshold=10.0)  # type: ignore[arg-type]
+
+
+def test_cpsat_expectation_rejects_missing_threshold() -> None:
+    with pytest.raises(ValidationError):
+        CpsatExpectation(objective_sense="maximize")  # type: ignore[call-arg]
+
+
+def test_cpsat_expectation_rejects_null_threshold() -> None:
+    with pytest.raises(ValidationError):
+        CpsatExpectation(objective_sense="maximize", objective_threshold=None)  # type: ignore[arg-type]
+
+
+# --- CpsatCheckerReport schemas ----------------------------------------------
+
+
+def _make_checker_report(**overrides: object) -> CpsatCheckerReport:
+    defaults: dict = {
+        "status": "accepted",
+        "errors": [],
+        "details": None,
+        "stdout": "",
+        "stderr": "",
+        "duration_ms": 42,
+        "timed_out": False,
+        "truncated": False,
+    }
+    defaults.update(overrides)
+    return CpsatCheckerReport(**defaults)  # type: ignore[arg-type]
+
+
+def test_cpsat_checker_report_accepted_round_trips() -> None:
+    report = _make_checker_report(status="accepted", errors=[])
+    dumped = report.model_dump()
+    assert dumped["status"] == "accepted"
+    assert dumped["errors"] == []
+    assert dumped["timed_out"] is False
+    assert dumped["truncated"] is False
+
+
+def test_cpsat_checker_report_rejected_with_errors_round_trips() -> None:
+    report = _make_checker_report(
+        status="rejected",
+        errors=["golfer 3 appears twice in week 1"],
+        duration_ms=15,
+    )
+    dumped = report.model_dump()
+    assert dumped["status"] == "rejected"
+    assert dumped["errors"] == ["golfer 3 appears twice in week 1"]
+
+
+def test_cpsat_checker_report_error_round_trips() -> None:
+    report = _make_checker_report(status="error", errors=["malformed checker output"])
+    assert report.status == "error"
+
+
+def test_cpsat_checker_report_timeout_round_trips() -> None:
+    report = _make_checker_report(status="timeout", errors=[], timed_out=True)
+    assert report.status == "timeout"
+    assert report.timed_out is True
+
+
+def test_cpsat_checker_report_rejects_unknown_status() -> None:
+    with pytest.raises(ValidationError):
+        _make_checker_report(status="passed")  # type: ignore[arg-type]
+
+
+def test_cpsat_checker_report_with_details_round_trips() -> None:
+    report = _make_checker_report(
+        status="rejected",
+        errors=["constraint violated"],
+        details={"week": 1, "pair": [1, 2]},
+    )
+    assert report.details == {"week": 1, "pair": [1, 2]}
+
+
+# --- SaveVerifiedPythonResult schemas ----------------------------------------
+
+
+def _make_save_python_result(**overrides: object) -> SaveVerifiedPythonResult:
+    defaults: dict = {
+        "status": "optimal",
+        "target_dir": None,
+        "reason": "status=infeasible",
+        "solution": None,
+        "objective": None,
+        "stdout": "",
+        "stderr": "",
+        "timed_out": False,
+        "truncated": False,
+        "duration_ms": 10,
+    }
+    defaults.update(overrides)
+    return SaveVerifiedPythonResult(**defaults)  # type: ignore[arg-type]
+
+
+def test_save_verified_python_result_defaults_to_none_verification() -> None:
+    result = _make_save_python_result()
+    assert result.verification_level == "none"
+    assert result.reported_passed is False
+    assert result.expectation is None
+    assert result.expectation_passed is None
+    assert result.checker is None
+
+
+def test_save_verified_python_result_saved_computed_from_reason_and_dir() -> None:
+    saved = _make_save_python_result(
+        target_dir="/tmp/x",
+        reason=None,
+        verification_level="reported",
+        reported_passed=True,
+    )
+    not_saved = _make_save_python_result(target_dir=None, reason="status=infeasible")
+    assert saved.saved is True
+    assert not_saved.saved is False
+
+
+def test_save_verified_python_result_with_expectation_echoed() -> None:
+    exp = CpsatExpectation(objective_sense="maximize", objective_threshold=100.0)
+    result = _make_save_python_result(
+        target_dir="/tmp/x",
+        reason=None,
+        verification_level="expectation",
+        reported_passed=True,
+        expectation=exp,
+        expectation_passed=True,
+    )
+    assert result.expectation is not None
+    assert result.expectation.objective_sense == "maximize"
+    assert result.expectation_passed is True

@@ -84,16 +84,18 @@ from .pyexec.core import (
     run_cpsat_python_file,
 )
 from .pyexec.jobs import CpsatJobRegistry
-from .pyexec.save import SaveVerifiedPythonResult, save_verified_cpsat_python
+from .pyexec.save import save_verified_cpsat_python
 from .runtime import RuntimeMissingError, get_runtime_status
 from .schemas import (
     CheckResult,
+    CpsatExpectation,
     CpsatPythonJobStatus,
     CpsatPythonResult,
     ModelInspectionResult,
     PortfolioJobStatus,
     RuntimeStatus,
     SaveVerifiedModelResult,
+    SaveVerifiedPythonResult,
     SolveJobStatus,
     SolveResult,
     SolverList,
@@ -952,23 +954,30 @@ def create_mcp_server() -> FastMCP:
         source: str,
         target_dir: str,
         problem: str | None = None,
+        expectation: CpsatExpectation | None = None,
+        checker: str | None = None,
+        checker_timeout_ms: int | None = None,
         timeout_ms: int = DEFAULT_PYEXEC_TIMEOUT_MS,
         overwrite: bool = False,
         ctx: Context | None = None,
     ) -> SaveVerifiedPythonResult:
-        await _status_starting(ctx, status.CPSAT_PYTHON_SAVE_STAGES)
+        stages = status.cpsat_save_stages(with_checker=checker is not None)
+        await _status_starting(ctx, stages)
         result = await _run_blocking(
             functools.partial(
                 save_verified_cpsat_python,
                 source,
                 target_dir=Path(target_dir),
                 problem=problem,
+                expectation=expectation,
+                checker=checker,
+                checker_timeout_ms=checker_timeout_ms,
                 timeout_ms=timeout_ms,
                 overwrite=overwrite,
                 tracker=child_tracker,
             )
         )
-        await _status_finished(ctx, status.CPSAT_PYTHON_SAVE_STAGES)
+        await _status_finished(ctx, stages)
         return result
 
     @mcp.prompt(
