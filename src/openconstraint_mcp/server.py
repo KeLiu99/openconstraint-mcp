@@ -13,6 +13,7 @@ from typing import Annotated, Any, ParamSpec, TypeVar, cast
 from anyio import to_thread
 from mcp.server.fastmcp import Context, FastMCP
 from mcp.types import CallToolResult, TextContent
+from pydantic import StrictInt
 
 from .childproc import ChildProcessTracker
 from .job_errors import JobRejectedError
@@ -58,6 +59,7 @@ from .protocol_text.descriptions import (
     MCP_SERVER_INSTRUCTIONS,
     RUN_CPSAT_PYTHON_DESCRIPTION,
     RUN_CPSAT_PYTHON_FILE_DESCRIPTION,
+    RUN_CPSAT_PYTHON_SWEEP_DESCRIPTION,
     SAVE_VERIFIED_CPSAT_PYTHON_DESCRIPTION,
     SAVE_VERIFIED_MINIZINC_MODEL_DESCRIPTION,
     SOLVE_CONSTRAINT_PROBLEM_PROMPT_DESCRIPTION,
@@ -85,12 +87,15 @@ from .pyexec.core import (
 )
 from .pyexec.jobs import CpsatJobRegistry
 from .pyexec.save import save_verified_cpsat_python
+from .pyexec.sweep import run_cpsat_python_sweep
 from .runtime import RuntimeMissingError, get_runtime_status
 from .schemas import (
     CheckResult,
     CpsatExpectation,
+    CpsatObjectiveSense,
     CpsatPythonJobStatus,
     CpsatPythonResult,
+    CpsatPythonSweepResult,
     ModelInspectionResult,
     PortfolioJobStatus,
     RuntimeStatus,
@@ -243,6 +248,60 @@ def _wrap_save_result(result: SaveVerifiedModelResult) -> CallToolResult:
     """Wrap a SaveVerifiedModelResult as concise text plus full structured output."""
     return CallToolResult(
         content=[TextContent(type="text", text=_format_save_result_content(result))],
+        structuredContent=result.model_dump(mode="json"),
+    )
+
+
+def _format_cpsat_sweep_content(result: CpsatPythonSweepResult) -> str:
+    """Return model-visible sweep output: winner first, then the attempt table.
+
+    Concise — the full per-attempt ``CpsatPythonResult`` winner and metadata ride in
+    ``structuredContent``. Notes when a ``timeout`` winner is not savable, and
+    appends any seed-variation hint computed by the sweep engine.
+    """
+    if result.status == "winner":
+        assert result.winner is not None  # guaranteed by CpsatPythonSweepResult's status invariant
+        lines = [
+            f"Sweep status: winner (seed {result.winner_seed}, "
+            f"objective {result.winner.objective}, status {result.winner.status})",
+        ]
+        if result.winner.status == "timeout":
+            lines.append(
+                "Note: the winner is a best-so-far incumbent (status=timeout) and is "
+                "NOT savable as-is — save_verified_cpsat_python requires "
+                "optimal/feasible. Re-run this seed with a larger per_run_timeout_ms "
+                "until it reports optimal/feasible, then save it (passing that seed)."
+            )
+    else:
+        lines = ["Sweep status: no_winner (no attempt was accepted)"]
+
+    lines.extend(
+        [
+            "",
+            f"Objective sense: {result.objective_sense}",
+            f"Selection policy: {result.selection_policy}",
+            "",
+            "Attempts:",
+        ]
+    )
+    for attempt in result.attempts:
+        verdict = "accepted" if attempt.accepted else "rejected"
+        checker = f", checker={attempt.checker_status}" if attempt.checker_status else ""
+        reason = f" — {attempt.message}" if attempt.message and not attempt.accepted else ""
+        lines.append(
+            f"- seed {attempt.seed}: status={attempt.status}, "
+            f"objective={attempt.objective}, {verdict}{checker}{reason}"
+        )
+
+    if result.seed_variation_hint is not None:
+        lines.extend(["", f"Hint: {result.seed_variation_hint}"])
+    return "\n".join(lines)
+
+
+def _wrap_cpsat_sweep_result(result: CpsatPythonSweepResult) -> CallToolResult:
+    """Wrap a CpsatPythonSweepResult as concise text plus full structured output."""
+    return CallToolResult(
+        content=[TextContent(type="text", text=_format_cpsat_sweep_content(result))],
         structuredContent=result.model_dump(mode="json"),
     )
 
@@ -948,6 +1007,35 @@ def create_mcp_server() -> FastMCP:
         await _status_finished(ctx, status.CPSAT_PYTHON_STAGES)
         return result
 
+    @mcp.tool(name="run_cpsat_python_sweep", description=RUN_CPSAT_PYTHON_SWEEP_DESCRIPTION)
+    @_as_mcp_error(ValueError)
+    async def run_cpsat_python_sweep_tool(
+        source: str,
+        seeds: list[StrictInt],
+        objective_sense: CpsatObjectiveSense,
+        per_run_timeout_ms: int = DEFAULT_PYEXEC_TIMEOUT_MS,
+        problem: str | None = None,
+        checker: str | None = None,
+        checker_timeout_ms: int | None = None,
+        ctx: Context | None = None,
+    ) -> Annotated[CallToolResult, CpsatPythonSweepResult]:
+        await _status_starting(ctx, status.CPSAT_PYTHON_SWEEP_STAGES)
+        result = await _run_blocking(
+            functools.partial(
+                run_cpsat_python_sweep,
+                source,
+                seeds=seeds,
+                objective_sense=objective_sense,
+                per_run_timeout_ms=per_run_timeout_ms,
+                problem=problem,
+                checker=checker,
+                checker_timeout_ms=checker_timeout_ms,
+                tracker=child_tracker,
+            )
+        )
+        await _status_finished(ctx, status.CPSAT_PYTHON_SWEEP_STAGES)
+        return _wrap_cpsat_sweep_result(result)
+
     @mcp.tool(name="save_verified_cpsat_python", description=SAVE_VERIFIED_CPSAT_PYTHON_DESCRIPTION)
     @_as_mcp_error(ValueError)
     async def save_verified_cpsat_python_tool(
@@ -959,6 +1047,7 @@ def create_mcp_server() -> FastMCP:
         checker_timeout_ms: int | None = None,
         timeout_ms: int = DEFAULT_PYEXEC_TIMEOUT_MS,
         overwrite: bool = False,
+        seed: StrictInt | None = None,
         ctx: Context | None = None,
     ) -> SaveVerifiedPythonResult:
         stages = status.cpsat_save_stages(with_checker=checker is not None)
@@ -974,6 +1063,7 @@ def create_mcp_server() -> FastMCP:
                 checker_timeout_ms=checker_timeout_ms,
                 timeout_ms=timeout_ms,
                 overwrite=overwrite,
+                seed=seed,
                 tracker=child_tracker,
             )
         )

@@ -13,11 +13,14 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from openconstraint_mcp.pyexec.core import (
-    normalize_objective as _normalize_objective,
-)
-from openconstraint_mcp.pyexec.core import (
+    effective_checker_timeout_ms,
     run_cpsat_python,
     run_cpsat_python_file,
+    validate_checker_args,
+    validate_cpsat_random_seed,
+)
+from openconstraint_mcp.pyexec.core import (
+    normalize_objective as _normalize_objective,
 )
 from openconstraint_mcp.pyexec.runner import MAX_OUTPUT_BYTES, _read_capped
 from openconstraint_mcp.schemas import CpsatPythonResult
@@ -143,6 +146,50 @@ class _SpyTracker:
 
     def unregister(self, proc: Any) -> None:
         self.events.append(("unregister", proc))
+
+
+# --- shared validation helpers ----------------------------------------------
+
+
+def test_validate_checker_args_accepts_valid_checker_timeout_pair() -> None:
+    validate_checker_args(checker="print('ok')", checker_timeout_ms=100)
+
+
+def test_validate_checker_args_rejects_timeout_without_checker() -> None:
+    with pytest.raises(ValueError, match="checker_timeout_ms supplied without checker"):
+        validate_checker_args(checker=None, checker_timeout_ms=100)
+
+
+def test_validate_checker_args_rejects_non_positive_timeout() -> None:
+    with pytest.raises(ValueError, match="checker_timeout_ms must be positive"):
+        validate_checker_args(checker="print('ok')", checker_timeout_ms=0)
+
+
+def test_validate_checker_args_rejects_blank_checker() -> None:
+    with pytest.raises(ValueError, match="checker must be non-empty"):
+        validate_checker_args(checker="   ", checker_timeout_ms=None)
+
+
+def test_effective_checker_timeout_uses_explicit_value_or_default() -> None:
+    assert effective_checker_timeout_ms(checker_timeout_ms=250, default_timeout_ms=1000) == 250
+    assert effective_checker_timeout_ms(checker_timeout_ms=None, default_timeout_ms=1000) == 1000
+
+
+@pytest.mark.parametrize("seed", [-2_147_483_648, -1, 0, 2_147_483_647])
+def test_validate_cpsat_random_seed_accepts_signed_int32(seed: int) -> None:
+    assert validate_cpsat_random_seed(seed) == seed
+
+
+@pytest.mark.parametrize("seed", [True, False, 1.5, "7"])
+def test_validate_cpsat_random_seed_rejects_non_integer_values(seed: object) -> None:
+    with pytest.raises(ValueError, match="non-bool integer"):
+        validate_cpsat_random_seed(seed)
+
+
+@pytest.mark.parametrize("seed", [-2_147_483_649, 2_147_483_648])
+def test_validate_cpsat_random_seed_rejects_out_of_signed_int32_range(seed: int) -> None:
+    with pytest.raises(ValueError, match="CP-SAT random_seed range"):
+        validate_cpsat_random_seed(seed)
 
 
 def test_run_cpsat_python_registers_then_unregisters_child_with_tracker() -> None:
@@ -455,6 +502,7 @@ def _run_file_with_mocked_proc(
     returncode: int = 0,
     timeout_ms: int = 5000,
     tracker: Any = None,
+    env: dict[str, str] | None = None,
 ) -> tuple[CpsatPythonResult, dict[str, Any]]:
     """Run run_cpsat_python_file with popen patched; capture the popen call."""
     captured: dict[str, Any] = {}
@@ -480,7 +528,7 @@ def _run_file_with_mocked_proc(
         ),
         patch("openconstraint_mcp.pyexec.runner.terminate_process_tree"),
     ):
-        result = run_cpsat_python_file(script_path, timeout_ms=timeout_ms, tracker=tracker)
+        result = run_cpsat_python_file(script_path, timeout_ms=timeout_ms, tracker=tracker, env=env)
     return result, captured
 
 
@@ -854,3 +902,54 @@ def test_normalize_objective_accepts_huge_int_without_overflow() -> None:
     # (math.isfinite would raise OverflowError); the exact int is preserved.
     big = 10**400
     assert _normalize_objective(big) == big
+
+
+# --- internal env overlay ----------------------------------------------------
+
+
+def _capture_popen_env(source: str, *, env: dict[str, str] | None) -> dict[str, str] | None:
+    """Run run_cpsat_python with a fake Popen and return the env kwarg it received."""
+    captured: dict[str, Any] = {}
+
+    def _fake_popen(cmd: list[str], **kwargs: Any) -> MagicMock:
+        captured["env"] = kwargs.get("env")
+        fake = MagicMock()
+        fake.pid = 1234
+        fake.returncode = 0
+        fake.poll = lambda: 0
+        fake.wait.return_value = 0
+        return fake
+
+    with (
+        patch("openconstraint_mcp.pyexec.runner.popen_process_group", side_effect=_fake_popen),
+        patch("openconstraint_mcp.pyexec.runner.terminate_process_tree"),
+    ):
+        run_cpsat_python(source, timeout_ms=1000, env=env)
+    return captured["env"]
+
+
+def test_env_overlay_merged_on_top_of_parent_environment() -> None:
+    env = _capture_popen_env("print('x')", env={"OPENCONSTRAINT_MCP_CPSAT_SEED": "7"})
+    assert env is not None
+    assert env["OPENCONSTRAINT_MCP_CPSAT_SEED"] == "7"
+    # The child still inherits the parent's environment (overlay, not replacement).
+    assert "PATH" in env
+
+
+def test_no_env_overlay_leaves_child_environment_inherited() -> None:
+    # env=None must pass env=None to Popen so the child inherits os.environ as before.
+    assert _capture_popen_env("print('x')", env=None) is None
+
+
+def test_run_cpsat_python_file_forwards_env_overlay(tmp_path: Path) -> None:
+    # run_cpsat_python_file mirrors run_cpsat_python's env overlay: same execute_child,
+    # so the same OPENCONSTRAINT_MCP_CPSAT_SEED-style overlay must reach the child here too.
+    script = tmp_path / "model.py"
+    script.write_text("print('ignored by mock')", encoding="utf-8")
+
+    _, captured = _run_file_with_mocked_proc(
+        script, env={"OPENCONSTRAINT_MCP_CPSAT_SEED": "7"}
+    )
+
+    assert captured["env"]["OPENCONSTRAINT_MCP_CPSAT_SEED"] == "7"
+    assert "PATH" in captured["env"]

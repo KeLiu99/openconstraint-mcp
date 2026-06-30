@@ -33,6 +33,23 @@ else:
 # Grace period between SIGTERM and an escalated SIGKILL when terminating a tree.
 _TERMINATE_GRACE_SECONDS: float = 3.0
 
+# Public milliseconds view of the same SIGTERM→SIGKILL grace, for callers that must
+# account for the time a timed-out child can spend being terminated (the CP-SAT
+# sweep admission gate budgets two waits — once after SIGTERM, once after SIGKILL —
+# per timed-out child). Exposed so those callers never import the private
+# ``_TERMINATE_GRACE_SECONDS``.
+PROCESS_TREE_TERMINATE_GRACE_MS: int = int(_TERMINATE_GRACE_SECONDS * 1000)
+
+
+def process_tree_terminate_worst_case_ms() -> int:
+    """Return the conservative termination wait budget for one timed-out tree.
+
+    POSIX termination can wait once after SIGTERM and once after SIGKILL. Windows
+    cleanup is different but this remains a safe upper budget for callers that
+    need pre-flight admission estimates.
+    """
+    return 2 * PROCESS_TREE_TERMINATE_GRACE_MS
+
 
 def popen_process_group(cmd: list[str], **kwargs: Any) -> subprocess.Popen[Any]:
     """Launch ``cmd`` as the leader of its own process group.

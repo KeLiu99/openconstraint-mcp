@@ -185,10 +185,15 @@ User problem:
    - Build the model with `cp_model.CpModel()`, declare variables, add
      constraints, set the objective.
    - Create a solver: `solver = cp_model.CpSolver()`.
-   - For a REPRODUCIBLE saved artifact, set a fixed seed and prefer a
-     single search worker:
-       `solver.parameters.random_seed = 42`
+   - For a REPRODUCIBLE saved artifact, and to cooperate with the seed-sweep
+     tool, READ the seed from the environment (falling back to 42) and prefer
+     a single search worker:
+       `import os`
+       `solver.parameters.random_seed = int(os.environ.get("OPENCONSTRAINT_MCP_CPSAT_SEED", "42"))`
        `solver.parameters.num_workers = 1`
+     `run_cpsat_python_sweep` sets `OPENCONSTRAINT_MCP_CPSAT_SEED` per attempt;
+     a script that hardcodes the seed instead of reading this env var silently
+     ignores the sweep. The server cannot force a seed into arbitrary Python.
    - Solve: `status_code = solver.Solve(model)`.
    - Emit exactly ONE JSON object as the LAST line of stdout:
      ```
@@ -246,12 +251,49 @@ User problem:
    - Describe the solution in the user's own terms (task names, variable
      semantics), not as a raw JSON dump.
 
+5a. Optional seed sweep. When an optimization model may find better incumbents
+   under different random seeds within a fixed per-run budget, call
+   `run_cpsat_python_sweep` with the SAME `source`, a list of unique `seeds`,
+   and `objective_sense` ('maximize' or 'minimize'). The script must read
+   `OPENCONSTRAINT_MCP_CPSAT_SEED` (see step 3) — otherwise every attempt runs
+   the same seed and the sweep is pointless.
+   - Attempts run SERIALLY, one child per seed. The server returns the best
+     ACCEPTED result plus a per-attempt table; partial failures (errors, no
+     solution, non-numeric objective, checker rejections) are recorded but never
+     discard the successful attempts.
+   - Acceptance: base acceptance (status optimal/feasible/timeout, a non-empty
+     solution, a finite numeric objective), then an optional `checker` gate
+     (same checker protocol as the save tool, run only on base-eligible
+     attempts). A checker rejection removes an otherwise-best candidate.
+   - The sweep is a QUALITY improvement across runs, NOT a new optimality proof:
+     the winner's own `status` stays authoritative. Equal objective values alone
+     do not prove the seed was ignored; if the result includes
+     `seed_variation_hint`, relay it as a conditional check of the script's seed
+     handling.
+   - The sweep is rejected UP FRONT when its projected wall-clock budget
+     (per-seed run and checker budgets plus per-child kill overhead) exceeds the
+     fixed cap, or when the seed count exceeds 8. These two gates are
+     independent: at the default per_run_timeout_ms, the wall-clock budget binds
+     well before 8 seeds (only a handful fit). Reaching the full 8-seed cap
+     requires a correspondingly smaller per_run_timeout_ms (and
+     checker_timeout_ms, if checking — checked sweeps cost roughly twice as much
+     per seed).
+   - A `timeout` winner is reportable but NOT directly savable (see step 6):
+     re-run its seed with a larger `per_run_timeout_ms` until it reports
+     optimal/feasible, then save.
+
 6. Persist only if the user asks. Call `save_verified_cpsat_python` with
    the script as `source`, the original problem text as `problem`, and the
    user's chosen save directory as an explicit absolute `target_dir`. You
    ask the user for that path; the server opens no file dialog. The server
    re-runs the script to evaluate the save gate before writing anything.
    Replacing a previously saved directory needs `overwrite=true`.
+   To persist a `run_cpsat_python_sweep` winner, pass its `winner_seed` as the
+   `seed` argument: the re-run replays that seed and the manifest records it.
+   The save gates are UNCHANGED, so a `timeout` winner still fails the reported
+   gate — re-run it to optimal/feasible first. A saved seeded model reproduces
+   by hand only when you set `OPENCONSTRAINT_MCP_CPSAT_SEED` to the recorded
+   seed; the saved `solution.py` carries only its own seed fallback.
 
    Save gate options (in order of strictness):
    a. Reported gate (always applied): `status` in `optimal`/`feasible` and

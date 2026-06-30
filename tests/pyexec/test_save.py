@@ -766,3 +766,142 @@ def test_save_verified_cpsat_python_integration(tmp_path: Path) -> None:
     assert result.saved is True
     assert (target / "solution.py").is_file()
     assert (target / MANIFEST_FILENAME).is_file()
+
+
+# --- seed replay -------------------------------------------------------------
+
+
+_TIMEOUT_RESULT = CpsatPythonResult(
+    status="timeout",
+    solution={"x": 3},
+    objective=3.0,
+    stdout="",
+    stderr="",
+    return_code=None,
+    timed_out=True,
+    truncated=False,
+    duration_ms=99,
+)
+
+
+def test_save_with_seed_reruns_with_seed_env_and_records_it(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from openconstraint_mcp.pyexec.save import save_verified_cpsat_python
+
+    captured: dict = {}
+
+    def _spy(source: str, **kw: object) -> CpsatPythonResult:
+        captured["env"] = kw.get("env")
+        return _OPTIMAL_RESULT
+
+    monkeypatch.setattr("openconstraint_mcp.pyexec.save.run_cpsat_python", _spy)
+    target = tmp_path / "seeded"
+
+    result = save_verified_cpsat_python(_SCRIPT, target_dir=target, seed=7)
+
+    assert result.saved is True
+    assert captured["env"] == {"OPENCONSTRAINT_MCP_CPSAT_SEED": "7"}
+
+    manifest = json.loads((target / MANIFEST_FILENAME).read_text())
+    verification = manifest["verification"]
+    assert verification["replay_seed"] == 7
+    # The reproducibility note tells a manual re-runner to set the env var.
+    assert "OPENCONSTRAINT_MCP_CPSAT_SEED" in verification["reproducibility_note"]
+
+
+def test_save_without_seed_passes_no_env_and_omits_seed_from_manifest(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from openconstraint_mcp.pyexec.save import save_verified_cpsat_python
+
+    captured: dict = {}
+
+    def _spy(source: str, **kw: object) -> CpsatPythonResult:
+        captured["env"] = kw.get("env")
+        return _OPTIMAL_RESULT
+
+    monkeypatch.setattr("openconstraint_mcp.pyexec.save.run_cpsat_python", _spy)
+    target = tmp_path / "unseeded"
+
+    save_verified_cpsat_python(_SCRIPT, target_dir=target)
+
+    assert captured["env"] is None
+    manifest = json.loads((target / MANIFEST_FILENAME).read_text())
+    assert "replay_seed" not in manifest["verification"]
+
+
+def test_save_with_seed_timeout_winner_still_fails_reported_gate(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from openconstraint_mcp.pyexec.save import save_verified_cpsat_python
+
+    _patch_executor(monkeypatch, _TIMEOUT_RESULT)
+    target = tmp_path / "timeout_seeded"
+
+    result = save_verified_cpsat_python(_SCRIPT, target_dir=target, seed=7)
+
+    # A timeout sweep winner is unproven: replaying its seed does not make it savable.
+    assert result.saved is False
+    assert result.verification_level == "none"
+    assert not target.exists()
+
+
+def test_save_with_bool_seed_is_rejected(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from openconstraint_mcp.pyexec.save import save_verified_cpsat_python
+
+    _patch_executor(monkeypatch, _OPTIMAL_RESULT)
+    with pytest.raises(ValueError, match="seed must be a non-bool integer"):
+        save_verified_cpsat_python(_SCRIPT, target_dir=tmp_path / "x", seed=True)
+
+
+def test_save_with_negative_seed_reruns_with_seed_env_and_records_it(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from openconstraint_mcp.pyexec.save import save_verified_cpsat_python
+
+    captured: dict = {}
+
+    def _spy(source: str, **kw: object) -> CpsatPythonResult:
+        captured["env"] = kw.get("env")
+        return _OPTIMAL_RESULT
+
+    monkeypatch.setattr("openconstraint_mcp.pyexec.save.run_cpsat_python", _spy)
+    target = tmp_path / "negative_seeded"
+
+    result = save_verified_cpsat_python(_SCRIPT, target_dir=target, seed=-1)
+
+    assert result.saved is True
+    assert captured["env"] == {"OPENCONSTRAINT_MCP_CPSAT_SEED": "-1"}
+
+    manifest = json.loads((target / MANIFEST_FILENAME).read_text())
+    assert manifest["verification"]["replay_seed"] == -1
+
+
+def test_save_with_seed_below_int32_is_rejected(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from openconstraint_mcp.pyexec.save import save_verified_cpsat_python
+
+    _patch_executor(monkeypatch, _OPTIMAL_RESULT)
+    with pytest.raises(ValueError, match="CP-SAT random_seed range"):
+        save_verified_cpsat_python(_SCRIPT, target_dir=tmp_path / "x", seed=-2_147_483_649)
+
+
+def test_save_with_seed_above_int32_is_rejected(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from openconstraint_mcp.pyexec.save import save_verified_cpsat_python
+
+    _patch_executor(monkeypatch, _OPTIMAL_RESULT)
+    with pytest.raises(ValueError, match="CP-SAT random_seed range"):
+        save_verified_cpsat_python(_SCRIPT, target_dir=tmp_path / "x", seed=2_147_483_648)
