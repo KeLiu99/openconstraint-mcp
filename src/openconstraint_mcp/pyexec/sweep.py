@@ -10,8 +10,9 @@ processes itself (``run_cpsat_python``/``run_checker`` do), makes no network
 calls, and runs attempts serially. The synchronous tool is bounded by a
 pre-flight wall-clock *budget* (admission gate), not a runtime timer.
 
-Imports only the dependency-light leaves (``childproc``, ``proc``, ``schemas``)
-and the pyexec siblings ``core``/``checker``; never ``minizinc`` or ``runtime``.
+Imports only the dependency-light leaves (``childproc``, ``proc``, ``save_target``,
+``schemas``) and the pyexec siblings ``core``/``checker``; never ``minizinc`` or
+``runtime``.
 """
 
 from __future__ import annotations
@@ -22,6 +23,7 @@ from typing import cast
 
 from ..childproc import ChildProcessTracker
 from ..proc import process_tree_terminate_worst_case_ms
+from ..save_target import text_sha256
 from ..schemas import (
     CpsatObjectiveSense,
     CpsatPythonResult,
@@ -197,6 +199,10 @@ def _build_sweep_result(
     distinct_accepted_objectives: int,
     seed_variation_hint: str | None,
     winner: tuple[int, CpsatPythonResult] | None,
+    source_sha256: str,
+    per_run_timeout_ms: int,
+    checker_sha256: str | None,
+    problem_sha256: str | None,
 ) -> CpsatPythonSweepResult:
     status: CpsatSweepStatus = "no_winner"
     winner_index: int | None = None
@@ -218,6 +224,10 @@ def _build_sweep_result(
         selection_policy="best_objective_then_status_then_seed",
         distinct_accepted_objectives=distinct_accepted_objectives,
         seed_variation_hint=seed_variation_hint,
+        source_sha256=source_sha256,
+        per_run_timeout_ms=per_run_timeout_ms,
+        checker_sha256=checker_sha256,
+        problem_sha256=problem_sha256,
     )
 
 
@@ -254,6 +264,10 @@ def run_cpsat_python_sweep(
 
     Raises ``ValueError`` for an invalid request — including a projected budget over
     ``MAX_SWEEP_WALL_CLOCK_MS`` — before any child is spawned.
+
+    The returned result's ``source_sha256``/``checker_sha256``/``problem_sha256``
+    are the sha256 hex digests of the exact ``source``/``checker``/``problem`` text
+    this call ran against (provenance only — see ``CpsatPythonSweepResult``).
     """
     validated_objective_sense, effective_checker_timeout = _validate_sweep_request(
         seeds=seeds,
@@ -262,6 +276,9 @@ def run_cpsat_python_sweep(
         checker=checker,
         checker_timeout_ms=checker_timeout_ms,
     )
+    source_sha256 = text_sha256(source)
+    checker_sha256 = text_sha256(checker) if checker is not None else None
+    problem_sha256 = text_sha256(problem) if problem is not None else None
 
     start = time.monotonic()
     attempts: list[CpsatPythonSweepAttempt] = []
@@ -329,6 +346,10 @@ def run_cpsat_python_sweep(
         distinct_accepted_objectives=distinct_accepted_objectives,
         seed_variation_hint=seed_variation_hint,
         winner=winner,
+        source_sha256=source_sha256,
+        per_run_timeout_ms=per_run_timeout_ms,
+        checker_sha256=checker_sha256,
+        problem_sha256=problem_sha256,
     )
 
 

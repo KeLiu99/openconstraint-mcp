@@ -1162,6 +1162,8 @@ def test_cpsat_sweep_result_winner_round_trips() -> None:
         objective_sense="minimize",
         selection_policy="best_objective_then_status_then_seed",
         distinct_accepted_objectives=1,
+        source_sha256="a" * 64,
+        per_run_timeout_ms=5000,
     )
     dumped = result.model_dump(mode="json")
     assert dumped["status"] == "winner"
@@ -1177,6 +1179,8 @@ def test_cpsat_sweep_result_no_winner_round_trips() -> None:
         objective_sense="minimize",
         selection_policy="best_objective_then_status_then_seed",
         distinct_accepted_objectives=0,
+        source_sha256="a" * 64,
+        per_run_timeout_ms=5000,
     )
     assert result.winner_index is None
     assert result.winner_seed is None
@@ -1192,6 +1196,8 @@ def test_cpsat_sweep_result_rejects_winner_status_without_winner_fields() -> Non
             objective_sense="minimize",
             selection_policy="best_objective_then_status_then_seed",
             distinct_accepted_objectives=1,
+            source_sha256="a" * 64,
+            per_run_timeout_ms=5000,
         )
 
 
@@ -1208,6 +1214,8 @@ def test_cpsat_sweep_result_rejects_winner_seed_mismatch() -> None:
             objective_sense="minimize",
             selection_policy="best_objective_then_status_then_seed",
             distinct_accepted_objectives=1,
+            source_sha256="a" * 64,
+            per_run_timeout_ms=5000,
         )
 
 
@@ -1223,4 +1231,6 @@ def test_cpsat_sweep_result_rejects_winner_index_out_of_range() -> None:
             objective_sense="minimize",
             selection_policy="best_objective_then_status_then_seed",
             distinct_accepted_objectives=1,
+            source_sha256="a" * 64,
+            per_run_timeout_ms=5000,
         )

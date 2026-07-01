@@ -456,7 +456,14 @@ SaveStatus = Literal[
 # solve-result.json, .openconstraint-model.json), so the role — not the
 # filename — is the stable key clients branch on.
 SavedArtifactRole = Literal[
-    "model", "data", "checker", "problem", "solve_result", "solution", "manifest"
+    "model",
+    "data",
+    "checker",
+    "problem",
+    "solve_result",
+    "solution",
+    "manifest",
+    "experiment_log",
 ]
 
 
@@ -782,6 +789,16 @@ class CpsatPythonSweepResult(BaseModel):
     repeated accepted incumbents that ran to completion (``optimal``/``feasible``)
     with the same objective and solution; it is a conditional prompt to verify seed
     handling, not a proof that the script ignored the seed.
+
+    ``source_sha256``/``checker_sha256``/``problem_sha256`` are provenance: the
+    sha256 hex digest of the exact ``source``/``checker``/``problem`` text the
+    sweep ran against (``None`` for ``checker``/``problem`` when that input was not
+    supplied). They let a later "save with sweep_result" flow verify the sweep ran
+    against the exact same script/checker/problem it is being asked to save, and
+    let a persisted experiment log stay self-describing after it leaves the
+    original request. ``per_run_timeout_ms`` records the per-attempt timeout budget
+    the sweep ran under. This task only computes and records these fields — no
+    gating on them happens here.
     """
 
     status: CpsatSweepStatus
@@ -794,6 +811,10 @@ class CpsatPythonSweepResult(BaseModel):
     selection_policy: CpsatSweepSelectionPolicy
     distinct_accepted_objectives: int
     seed_variation_hint: str | None = None
+    source_sha256: str
+    per_run_timeout_ms: int
+    checker_sha256: str | None = None
+    problem_sha256: str | None = None
 
     @model_validator(mode="after")
     def _winner_presence_matches_status(self) -> CpsatPythonSweepResult:

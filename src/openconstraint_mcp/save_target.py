@@ -6,6 +6,7 @@ Dependencies: stdlib + Pydantic + schemas only. Never imports minizinc.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import shutil
 import uuid
@@ -29,6 +30,20 @@ def tool_version() -> str:
         return metadata.version(_PACKAGE_NAME)
     except metadata.PackageNotFoundError:
         return "unknown"
+
+
+def text_sha256(text: str) -> str:
+    """Return the sha256 hex digest of ``text``, encoded as UTF-8.
+
+    Deliberately no newline normalization and no trimming — ``text`` is hashed
+    exactly as given. This is distinct from the ``_sha256_of(path)`` helpers in
+    ``pyexec/save.py``/``minizinc/artifacts.py``, which hash file bytes read back
+    from disk; this helper hashes an in-memory string directly, so a caller that
+    hashes a request's ``source``/``checker``/``problem`` text and a later save-path
+    consistency check that hashes the same string are guaranteed to agree — a file
+    write can alter line endings per platform, but this helper never touches a file.
+    """
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()
 
 
 def _prior_manifest_filenames(target: Path) -> list[str] | None:

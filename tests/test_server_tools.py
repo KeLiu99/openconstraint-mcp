@@ -2934,6 +2934,8 @@ def _fake_sweep_result(*, status: str = "winner", attempts: Any = None, **kw: An
         "selection_policy": "best_objective_then_status_then_seed",
         "distinct_accepted_objectives": kw.get("distinct_accepted_objectives", 1),
         "seed_variation_hint": kw.get("seed_variation_hint"),
+        "source_sha256": "a" * 64,
+        "per_run_timeout_ms": 5000,
     }
     if status == "no_winner":
         return CpsatPythonSweepResult(status="no_winner", **common)

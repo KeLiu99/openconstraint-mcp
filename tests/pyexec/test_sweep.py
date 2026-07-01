@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import math
 from typing import Any
 
@@ -493,6 +494,49 @@ def test_tracker_forwarded_to_runner_and_checker(monkeypatch: pytest.MonkeyPatch
 
     assert all(c["tracker"] is sentinel for c in run_calls)
     assert all(c["tracker"] is sentinel for c in checker_calls)
+
+
+# --- provenance hashes --------------------------------------------------------
+
+
+def test_provenance_fields_populated_with_checker_and_problem(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _patch_runner(monkeypatch, {1: _result(objective=3)})
+    _patch_checker(monkeypatch, "accepted")
+    source = "src"
+    checker = "print('x')"
+    problem = "my problem"
+
+    result = run_cpsat_python_sweep(
+        source,
+        seeds=[1],
+        objective_sense="minimize",
+        checker=checker,
+        problem=problem,
+        per_run_timeout_ms=4321,
+    )
+
+    assert result.source_sha256 == hashlib.sha256(source.encode("utf-8")).hexdigest()
+    assert result.checker_sha256 == hashlib.sha256(checker.encode("utf-8")).hexdigest()
+    assert result.problem_sha256 == hashlib.sha256(problem.encode("utf-8")).hexdigest()
+    assert result.per_run_timeout_ms == 4321
+
+
+def test_provenance_checker_and_problem_hashes_none_when_not_supplied(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _patch_runner(monkeypatch, {1: _result(objective=3)})
+    source = "src"
+
+    result = run_cpsat_python_sweep(
+        source, seeds=[1], objective_sense="minimize", per_run_timeout_ms=1500
+    )
+
+    assert result.source_sha256 == hashlib.sha256(source.encode("utf-8")).hexdigest()
+    assert result.checker_sha256 is None
+    assert result.problem_sha256 is None
+    assert result.per_run_timeout_ms == 1500
 
 
 # --- validation --------------------------------------------------------------
