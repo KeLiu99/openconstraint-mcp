@@ -180,7 +180,12 @@ SOLVE_MINIZINC_MODEL_DESCRIPTION = (
     "NOT interpreted by the server — only a nested UNSATISFIABLE sets "
     "`violation`. The checker validates each solution but never proves "
     "optimality — `status` remains the proof of completeness/optimality. "
-    "`structuredContent` carries the complete SolveResult."
+    "`structuredContent` carries the complete SolveResult. For a HARD "
+    "instance — status is unknown/timeout, or the best formulation/solver/seed "
+    "choice is unclear — consider `submit_portfolio_job` to race multiple "
+    "formulations, solvers, and seeds instead of one run; for an especially "
+    "hard instance, also consider the OR-Tools CP-SAT Python path "
+    "(`run_cpsat_python`/`run_cpsat_python_sweep`) for the same problem."
 )
 
 CHECK_MINIZINC_MODEL_DESCRIPTION = (
@@ -521,7 +526,12 @@ RUN_CPSAT_PYTHON_DESCRIPTION = (
     "`stderr`/`stdout`. Output beyond 1 MB is truncated and the child killed. "
     "On `timeout`, `solution`/`objective` carry the last intermediate result "
     "block the script printed (the child runs unbuffered, so a best-so-far "
-    "emitted from a CpSolverSolutionCallback survives), else null. " + _CPSAT_CHILD_POSTURE
+    "emitted from a CpSolverSolutionCallback survives), else null. For a HARD "
+    "instance — status is unknown/timeout, or incumbent quality across seeds "
+    "is unclear — consider `run_cpsat_python_sweep` to try multiple seeds "
+    "under a fixed per-run budget instead of one run; for an especially hard "
+    "instance, also consider the MiniZinc portfolio path "
+    "(`submit_portfolio_job`) for the same problem. " + _CPSAT_CHILD_POSTURE
 )
 
 RUN_CPSAT_PYTHON_FILE_DESCRIPTION = (
