@@ -179,7 +179,7 @@ class PortfolioJobRegistry:
                 start=admission.start,
                 attempt_job_ids=list(admission.job_ids),
                 plan=list(admission.plan),
-                models_sha256=admission.models_sha256,
+                models_sha256=list(admission.models_sha256),
                 data_sha256=admission.data_sha256,
                 checker_sha256=admission.checker_sha256,
             )

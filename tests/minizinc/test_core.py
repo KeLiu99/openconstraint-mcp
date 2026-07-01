@@ -2258,6 +2258,7 @@ def _portfolio_attempt(
     solver: str = DEFAULT_SOLVER,
     seed: int | None = None,
     result_status: str = "optimal",
+    checker_status: str | None = None,
 ) -> PortfolioAttempt:
     return PortfolioAttempt(
         index=0,
@@ -2271,6 +2272,7 @@ def _portfolio_attempt(
         result_status=result_status,
         objective=None,
         elapsed_ms=100,
+        checker_status=checker_status,
     )
 
 
@@ -2280,6 +2282,7 @@ def _portfolio_result(
     solver: str = DEFAULT_SOLVER,
     seed: int | None = None,
     result_status: str = "optimal",
+    checker_status: str | None = None,
     models_sha256: list[str] | None = None,
     data_sha256: str | None = None,
     checker_sha256: str | None = None,
@@ -2296,7 +2299,14 @@ def _portfolio_result(
         status="winner",
         winner_index=0,
         winner=_portfolio_winner_solve_result(status=result_status),
-        attempts=[_portfolio_attempt(solver=solver, seed=seed, result_status=result_status)],
+        attempts=[
+            _portfolio_attempt(
+                solver=solver,
+                seed=seed,
+                result_status=result_status,
+                checker_status=checker_status,
+            )
+        ],
         elapsed_ms=150,
         selection_policy="first-decisive-result",
         models_sha256=models_sha256 if models_sha256 is not None else [text_sha256(model)],
@@ -2380,6 +2390,29 @@ def test_save_verified_model_portfolio_result_log_hashes_match_saved_artifacts(
         "elapsed_ms": 100,
         "message": None,
     }
+
+
+def test_save_verified_model_portfolio_result_log_row_surfaces_checker_status(
+    fake_minizinc_binary: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    # A checker-rejected attempt is purely observational (see PortfolioAttempt's
+    # docstring) — it does not affect winner selection — but its verdict must
+    # still make it into the persisted experiment-log.json row, not just onto
+    # the in-memory PortfolioAttempt (see test_portfolio_attempt_surfaces_checker_status).
+    _fake_check_then_solve(
+        monkeypatch,
+        check=FakeCompletedProcess(stdout="", stderr="", returncode=0),
+        solve=FakeCompletedProcess(stdout=STREAM_SATISFY, stderr="", returncode=0),
+    )
+    target = tmp_path / "project"
+    portfolio_result = _portfolio_result(checker_status="violation")
+
+    save_verified_model(_SAVE_MODEL, target_dir=target, portfolio_result=portfolio_result)
+
+    log = json.loads((target / EXPERIMENT_LOG_FILENAME).read_text())
+    assert log["attempts"][0]["checker_status"] == "violation"
 
 
 def test_save_verified_model_portfolio_result_failed_save_writes_nothing(
@@ -2478,7 +2511,7 @@ def test_save_verified_model_portfolio_result_seed_mismatch_raises_before_runtim
     _fail_if_solve_runs(monkeypatch)
     portfolio_result = _portfolio_result(seed=7)
 
-    with pytest.raises(ValueError, match="seed"):
+    with pytest.raises(ValueError, match="winning attempt's seed"):
         save_verified_model(
             _SAVE_MODEL,
             target_dir=tmp_path / "project",

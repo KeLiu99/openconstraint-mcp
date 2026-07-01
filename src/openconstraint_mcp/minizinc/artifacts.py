@@ -159,7 +159,7 @@ def _write_staged_artifacts(
         file_path.write_text(text, encoding="utf-8")
         artifacts.append(SavedModelArtifact(role=role, path=filename, sha256=_sha256_of(file_path)))
 
-    verification: dict = {
+    verification: dict[str, Any] = {
         "check_status": check.status,
         "solve_status": solve.status,
         "checker_status": solve.checker.status if solve.checker is not None else None,

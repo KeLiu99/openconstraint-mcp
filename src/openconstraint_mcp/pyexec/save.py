@@ -11,6 +11,7 @@ import hashlib
 import json
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import Any
 
 from ..childproc import ChildProcessTracker
 from ..save_target import (
@@ -219,7 +220,7 @@ def _write_staged_artifacts(
         file_path.write_text(text, encoding="utf-8")
         artifacts.append(SavedModelArtifact(role=role, path=filename, sha256=_sha256_of(file_path)))
 
-    verification: dict = {
+    verification: dict[str, Any] = {
         "level": verification_level,
         "reported_status": run_result.status,
         "objective": run_result.objective,
