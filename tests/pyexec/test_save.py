@@ -8,8 +8,14 @@ from pathlib import Path
 import pytest
 
 from openconstraint_mcp.pyexec.core import VERIFIED_STATUSES
-from openconstraint_mcp.save_target import MANIFEST_FILENAME
-from openconstraint_mcp.schemas import CpsatCheckerReport, CpsatExpectation, CpsatPythonResult
+from openconstraint_mcp.save_target import MANIFEST_FILENAME, text_sha256
+from openconstraint_mcp.schemas import (
+    CpsatCheckerReport,
+    CpsatExpectation,
+    CpsatPythonResult,
+    CpsatPythonSweepAttempt,
+    CpsatPythonSweepResult,
+)
 
 _SCRIPT = "print('hi')"
 _OPTIMAL_RESULT = CpsatPythonResult(
@@ -51,6 +57,78 @@ def _patch_executor(monkeypatch: pytest.MonkeyPatch, result: CpsatPythonResult) 
     monkeypatch.setattr(
         "openconstraint_mcp.pyexec.save.run_cpsat_python",
         lambda source, **kw: result,
+    )
+
+
+def _patch_executor_counting(
+    monkeypatch: pytest.MonkeyPatch, result: CpsatPythonResult
+) -> list[bool]:
+    """Like ``_patch_executor``, but returns a list that grows on every call."""
+    calls: list[bool] = []
+    monkeypatch.setattr(
+        "openconstraint_mcp.pyexec.save.run_cpsat_python",
+        lambda source, **kw: calls.append(True) or result,
+    )
+    return calls
+
+
+def _sweep_attempt(
+    *,
+    index: int = 0,
+    seed: int = 7,
+    status: str = "optimal",
+    objective: float | int | None = 3,
+    accepted: bool = True,
+) -> CpsatPythonSweepAttempt:
+    return CpsatPythonSweepAttempt(
+        index=index,
+        seed=seed,
+        status=status,
+        objective=objective,
+        accepted=accepted,
+        checker_status=None,
+        message=None,
+        timed_out=False,
+        truncated=False,
+        duration_ms=5,
+    )
+
+
+def _sweep_result(
+    *,
+    source: str = _SCRIPT,
+    seed: int = 7,
+    winner_status: str = "optimal",
+    checker_sha256: str | None = None,
+    problem_sha256: str | None = None,
+    source_sha256: str | None = None,
+) -> CpsatPythonSweepResult:
+    """Build a minimal, self-consistent winning ``CpsatPythonSweepResult``."""
+    winner = CpsatPythonResult(
+        status=winner_status,
+        solution={"x": 3},
+        objective=3.0,
+        stdout="",
+        stderr="",
+        return_code=0,
+        timed_out=winner_status == "timeout",
+        truncated=False,
+        duration_ms=5,
+    )
+    return CpsatPythonSweepResult(
+        status="winner",
+        winner_index=0,
+        winner_seed=seed,
+        winner=winner,
+        attempts=[_sweep_attempt(seed=seed, status=winner_status)],
+        elapsed_ms=10,
+        objective_sense="minimize",
+        selection_policy="best_objective_then_status_then_seed",
+        distinct_accepted_objectives=1,
+        source_sha256=source_sha256 if source_sha256 is not None else text_sha256(source),
+        per_run_timeout_ms=5000,
+        checker_sha256=checker_sha256,
+        problem_sha256=problem_sha256,
     )
 
 
@@ -905,3 +983,206 @@ def test_save_with_seed_above_int32_is_rejected(
     _patch_executor(monkeypatch, _OPTIMAL_RESULT)
     with pytest.raises(ValueError, match="CP-SAT random_seed range"):
         save_verified_cpsat_python(_SCRIPT, target_dir=tmp_path / "x", seed=2_147_483_648)
+
+
+# --- sweep_result --------------------------------------------------------
+
+
+def test_save_with_sweep_result_writes_experiment_log(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from openconstraint_mcp.pyexec.save import EXPERIMENT_LOG_FILENAME, save_verified_cpsat_python
+
+    _patch_executor(monkeypatch, _OPTIMAL_RESULT)
+    target = tmp_path / "swept"
+    sweep = _sweep_result(seed=7)
+
+    result = save_verified_cpsat_python(_SCRIPT, target_dir=target, seed=7, sweep_result=sweep)
+
+    assert result.saved is True
+    log_path = target / EXPERIMENT_LOG_FILENAME
+    assert log_path.is_file()
+
+    manifest = json.loads((target / MANIFEST_FILENAME).read_text())
+    artifact_roles = {a["role"]: a["path"] for a in manifest["artifacts"]}
+    assert artifact_roles["experiment_log"] == EXPERIMENT_LOG_FILENAME
+
+    summary = manifest["verification"]["experiment_log"]
+    assert summary["exploration_type"] == "cpsat_python_sweep"
+    assert summary["winner_index"] == 0
+    assert summary["winner_seed"] == 7
+    assert summary["attempt_count"] == 1
+    assert summary["accepted_attempt_count"] == 1
+    assert summary["statuses_seen"] == ["optimal"]
+    assert summary["selection_policy"] == "best_objective_then_status_then_seed"
+
+
+def test_save_with_sweep_result_log_content_matches_source_and_hashes(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from openconstraint_mcp.pyexec.save import EXPERIMENT_LOG_FILENAME, save_verified_cpsat_python
+
+    _patch_executor(monkeypatch, _OPTIMAL_RESULT)
+    target = tmp_path / "swept"
+    sweep = _sweep_result(seed=7, checker_sha256="c" * 64, problem_sha256="p" * 64)
+
+    save_verified_cpsat_python(_SCRIPT, target_dir=target, seed=7, sweep_result=sweep)
+
+    log = json.loads((target / EXPERIMENT_LOG_FILENAME).read_text())
+    assert log["managed_by"] == "openconstraint-mcp"
+    assert log["exploration_type"] == "cpsat_python_sweep"
+    assert log["source_sha256"] == text_sha256(_SCRIPT)
+    assert log["checker_sha256"] == "c" * 64
+    assert log["problem_sha256"] == "p" * 64
+    assert log["winner_index"] == 0
+    assert log["winner_seed"] == 7
+    assert log["objective_sense"] == "minimize"
+    assert log["selection_policy"] == "best_objective_then_status_then_seed"
+    assert len(log["attempts"]) == 1
+    attempt = log["attempts"][0]
+    assert attempt == {
+        "index": 0,
+        "seed": 7,
+        "status": "optimal",
+        "objective": 3,
+        "accepted": True,
+        "checker_status": None,
+        "message": None,
+        "timed_out": False,
+        "truncated": False,
+        "duration_ms": 5,
+    }
+
+
+def test_save_failure_with_sweep_result_writes_nothing(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A fresh re-run that fails the reported gate writes nothing, sweep_result or not."""
+    from openconstraint_mcp.pyexec.save import save_verified_cpsat_python
+
+    _patch_executor(monkeypatch, _INFEASIBLE_RESULT)
+    target = tmp_path / "swept_fail"
+    sweep = _sweep_result(seed=7)
+
+    result = save_verified_cpsat_python(_SCRIPT, target_dir=target, seed=7, sweep_result=sweep)
+
+    assert result.saved is False
+    assert not target.exists()
+
+
+def test_save_sweep_result_no_winner_raises_before_executor_runs(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from openconstraint_mcp.pyexec.save import save_verified_cpsat_python
+
+    calls = _patch_executor_counting(monkeypatch, _OPTIMAL_RESULT)
+    sweep = CpsatPythonSweepResult(
+        status="no_winner",
+        attempts=[_sweep_attempt(accepted=False)],
+        elapsed_ms=10,
+        objective_sense="minimize",
+        selection_policy="best_objective_then_status_then_seed",
+        distinct_accepted_objectives=0,
+        source_sha256=text_sha256(_SCRIPT),
+        per_run_timeout_ms=5000,
+    )
+
+    with pytest.raises(ValueError, match="no_winner"):
+        save_verified_cpsat_python(_SCRIPT, target_dir=Path("/tmp/x"), seed=7, sweep_result=sweep)
+
+    assert not calls, "executor must not be called before sweep_result validation"
+
+
+def test_save_sweep_result_with_seed_none_raises_before_executor_runs(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from openconstraint_mcp.pyexec.save import save_verified_cpsat_python
+
+    calls = _patch_executor_counting(monkeypatch, _OPTIMAL_RESULT)
+    sweep = _sweep_result(seed=7)
+
+    with pytest.raises(ValueError, match="seed"):
+        save_verified_cpsat_python(_SCRIPT, target_dir=Path("/tmp/x"), sweep_result=sweep)
+
+    assert not calls, "executor must not be called before sweep_result validation"
+
+
+def test_save_sweep_result_seed_mismatch_raises_before_executor_runs(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from openconstraint_mcp.pyexec.save import save_verified_cpsat_python
+
+    calls = _patch_executor_counting(monkeypatch, _OPTIMAL_RESULT)
+    sweep = _sweep_result(seed=7)
+
+    with pytest.raises(ValueError, match="winner_seed"):
+        save_verified_cpsat_python(_SCRIPT, target_dir=Path("/tmp/x"), seed=8, sweep_result=sweep)
+
+    assert not calls, "executor must not be called before sweep_result validation"
+
+
+def test_save_sweep_result_source_hash_mismatch_raises_before_executor_runs(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from openconstraint_mcp.pyexec.save import save_verified_cpsat_python
+
+    calls = _patch_executor_counting(monkeypatch, _OPTIMAL_RESULT)
+    sweep = _sweep_result(seed=7, source_sha256="deadbeef" * 8)
+
+    with pytest.raises(ValueError, match="source_sha256"):
+        save_verified_cpsat_python(_SCRIPT, target_dir=Path("/tmp/x"), seed=7, sweep_result=sweep)
+
+    assert not calls, "executor must not be called before sweep_result validation"
+
+
+def test_save_sweep_result_timeout_winner_does_not_bypass_reported_gate(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A timeout sweep winner is eagerly consistent (correct seed, correct source hash)
+    but the fresh re-run reports timeout too, so the save must still fail — proving
+    the gate decision never consults sweep_result.winner.status."""
+    from openconstraint_mcp.pyexec.save import save_verified_cpsat_python
+
+    _patch_executor(monkeypatch, _TIMEOUT_RESULT)
+    target = tmp_path / "swept_timeout"
+    sweep = _sweep_result(seed=7, winner_status="timeout")
+
+    result = save_verified_cpsat_python(_SCRIPT, target_dir=target, seed=7, sweep_result=sweep)
+
+    assert result.saved is False
+    assert result.verification_level == "none"
+    assert not target.exists()
+
+
+def test_save_sweep_result_checker_and_problem_hash_mismatch_is_not_rejected(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """checker_sha256/problem_sha256 mismatches are informational-only: the fresh
+    checker gate — not sweep_result — decides, so a save can still succeed."""
+    from openconstraint_mcp.pyexec.save import save_verified_cpsat_python
+
+    _patch_executor(monkeypatch, _OPTIMAL_RESULT)
+    _patch_checker(monkeypatch, _accepted_report())
+    target = tmp_path / "swept_checked"
+    sweep = _sweep_result(
+        seed=7,
+        checker_sha256="mismatched-checker-hash".ljust(64, "0"),
+        problem_sha256="mismatched-problem-hash".ljust(64, "0"),
+    )
+
+    result = save_verified_cpsat_python(
+        _SCRIPT,
+        target_dir=target,
+        seed=7,
+        sweep_result=sweep,
+        checker=_CHECKER_SOURCE,
+        problem="a different problem than the sweep saw",
+    )
+
+    assert result.saved is True
+    assert result.verification_level == "checked"
