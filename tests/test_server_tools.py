@@ -1948,6 +1948,7 @@ async def test_save_verified_minizinc_model_is_listed_with_expected_schema() -> 
         "all_solutions",
         "num_solutions",
         "overwrite",
+        "portfolio_result",
     } <= properties
     # The trailing Context parameter is server plumbing, never client schema.
     assert "ctx" not in properties
@@ -2020,6 +2021,78 @@ async def test_save_verified_minizinc_model_not_verified_is_normal_result(
     assert structured["files"] == []
     assert "nothing was written" in _content_text(result)
     assert not target.exists()
+
+
+@pytest.mark.asyncio
+async def test_save_verified_minizinc_model_with_portfolio_result_writes_experiment_log(
+    fake_minizinc_binary: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A self-consistent `portfolio_result` reaches the core save and is persisted."""
+    from openconstraint_mcp.save_target import text_sha256
+    from openconstraint_mcp.schemas import PortfolioAttempt, PortfolioSolveResult
+
+    _fake_save_subprocess(
+        monkeypatch,
+        check=FakeCompletedProcess(stdout="", stderr="", returncode=0),
+        solve=FakeCompletedProcess(
+            stdout=stream(solution_obj("x=3\n", {"x": 3})), stderr="", returncode=0
+        ),
+    )
+    target = tmp_path / "saved-project-portfolio"
+    winner_solve = SolveResult(
+        status="satisfied",
+        solver="cp-sat",
+        return_code=0,
+        timed_out=False,
+        stdout="x = 3;\n",
+        stderr="",
+        elapsed_ms=5,
+        solution={"x": 3},
+        solutions=[{"x": 3}],
+        objective=None,
+    )
+    portfolio_result = PortfolioSolveResult(
+        status="winner",
+        winner_index=0,
+        winner=winner_solve,
+        attempts=[
+            PortfolioAttempt(
+                index=0,
+                model_index=0,
+                solver="cp-sat",
+                seed=None,
+                timeout_ms=5000,
+                state="succeeded",
+                job_id="job-0",
+                job_state="succeeded",
+                result_status="satisfied",
+                objective=None,
+                elapsed_ms=5,
+            )
+        ],
+        elapsed_ms=10,
+        selection_policy="first-decisive-result",
+        models_sha256=[text_sha256(_SAVE_TOOL_MODEL)],
+        data_sha256=None,
+        checker_sha256=None,
+    )
+
+    mcp = create_mcp_server()
+    result = await mcp.call_tool(
+        "save_verified_minizinc_model",
+        {
+            "model": _SAVE_TOOL_MODEL,
+            "target_dir": str(target),
+            "portfolio_result": portfolio_result.model_dump(mode="json"),
+        },
+    )
+
+    structured = _structured(result)
+    assert structured["status"] == "saved"
+    assert "experiment_log" in {entry["role"] for entry in structured["files"]}
+    assert (target / "experiment-log.json").is_file()
 
 
 # --- background solve jobs (submit / get / cancel / list) -------------------
@@ -2762,7 +2835,14 @@ async def test_save_verified_cpsat_python_tool_schema_includes_new_params() -> N
     tools = await mcp.list_tools()
     tool = next(t for t in tools if t.name == "save_verified_cpsat_python")
     props = set(tool.inputSchema["properties"])
-    assert {"source", "target_dir", "expectation", "checker", "checker_timeout_ms"} <= props
+    assert {
+        "source",
+        "target_dir",
+        "expectation",
+        "checker",
+        "checker_timeout_ms",
+        "sweep_result",
+    } <= props
     assert "ctx" not in props
     assert set(tool.inputSchema.get("required", [])) == {"source", "target_dir"}
 
@@ -2895,6 +2975,83 @@ async def test_save_verified_cpsat_python_tool_rejects_whitespace_only_checker(
                 "checker": "  \n",
             },
         )
+
+
+@pytest.mark.asyncio
+async def test_save_verified_cpsat_python_tool_with_sweep_result_writes_experiment_log(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A self-consistent `sweep_result` reaches the core save and is persisted."""
+    from openconstraint_mcp.save_target import text_sha256
+    from openconstraint_mcp.schemas import (
+        CpsatPythonResult,
+        CpsatPythonSweepAttempt,
+        CpsatPythonSweepResult,
+    )
+
+    source = "print('x')"
+    monkeypatch.setattr(
+        "openconstraint_mcp.pyexec.save.run_cpsat_python",
+        lambda source, **kw: _fake_cpsat_run_result(),
+    )
+    sweep_result = CpsatPythonSweepResult(
+        status="winner",
+        winner_index=0,
+        winner_seed=7,
+        winner=CpsatPythonResult(
+            status="optimal",
+            solution={"x": 3},
+            objective=3.0,
+            stdout="",
+            stderr="",
+            return_code=0,
+            timed_out=False,
+            truncated=False,
+            duration_ms=10,
+        ),
+        attempts=[
+            CpsatPythonSweepAttempt(
+                index=0,
+                seed=7,
+                status="optimal",
+                objective=3.0,
+                accepted=True,
+                checker_status=None,
+                message=None,
+                timed_out=False,
+                truncated=False,
+                duration_ms=10,
+            )
+        ],
+        elapsed_ms=10,
+        objective_sense="minimize",
+        selection_policy="best_objective_then_status_then_seed",
+        distinct_accepted_objectives=1,
+        seed_variation_hint=None,
+        source_sha256=text_sha256(source),
+        per_run_timeout_ms=5000,
+        checker_sha256=None,
+        problem_sha256=None,
+    )
+
+    target = tmp_path / "save_target_sweep"
+    mcp = create_mcp_server()
+    result = _structured(
+        await mcp.call_tool(
+            "save_verified_cpsat_python",
+            {
+                "source": source,
+                "target_dir": str(target),
+                "seed": 7,
+                "sweep_result": sweep_result.model_dump(mode="json"),
+            },
+        )
+    )
+
+    assert result["saved"] is True
+    assert "experiment_log" in {entry["role"] for entry in result["files"]}
+    assert (target / "experiment-log.json").is_file()
 
 
 # --- run_cpsat_python_sweep tool ---------------------------------------------
