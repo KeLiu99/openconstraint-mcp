@@ -692,7 +692,7 @@ generic `solver_options`, `extra_args`, or raw MiniZinc flag passthrough.
     supplied) content-bind the race to the exact formulations/data/checker it
     ran. Pass this whole `PortfolioSolveResult` as `portfolio_result` to
     `save_verified_minizinc_model` (below) to persist the race's full attempt
-    table alongside a saved model — see Edit 3 below in this same file.
+    table alongside a saved model.
 
 ### Background portfolio jobs
 
