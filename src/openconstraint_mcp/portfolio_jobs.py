@@ -55,7 +55,10 @@ class _PortfolioRecord:
 
     Holds only metadata: the admitted ``attempt_job_ids`` (so ``cancel`` can stop
     them and ``get`` can read them), the ``plan`` and monotonic ``start`` needed to
-    build the aggregate, and — once terminal — the cached ``result``/``message``.
+    build the aggregate, the ``models_sha256``/``data_sha256``/``checker_sha256``
+    provenance hashes ``_admit_portfolio`` computed while the original request
+    strings were still in scope, and — once terminal — the cached ``result``/
+    ``message``.
     """
 
     job_id: str
@@ -65,6 +68,9 @@ class _PortfolioRecord:
     start: float
     attempt_job_ids: list[str]
     plan: list[tuple[int, str, int | None]]
+    models_sha256: list[str]
+    data_sha256: str | None
+    checker_sha256: str | None
     state: PortfolioJobState = "running"
     finished_at_ms: int | None = None
     elapsed_ms: int | None = None
@@ -147,7 +153,7 @@ class PortfolioJobRegistry:
                     f"Too many running portfolio jobs (max {self._max_running}). Poll "
                     "or cancel a running portfolio before submitting another."
                 )
-        start, job_ids, plan = _admit_portfolio(
+        admission = _admit_portfolio(
             self._registry,
             models=models,
             solvers=solvers,
@@ -170,15 +176,18 @@ class PortfolioJobRegistry:
                 submitted_at_ms=now,
                 started_at_ms=now,
                 per_attempt_timeout_ms=per_attempt_timeout_ms,
-                start=start,
-                attempt_job_ids=list(job_ids),
-                plan=list(plan),
+                start=admission.start,
+                attempt_job_ids=list(admission.job_ids),
+                plan=list(admission.plan),
+                models_sha256=admission.models_sha256,
+                data_sha256=admission.data_sha256,
+                checker_sha256=admission.checker_sha256,
             )
             with self._lock:
                 self._records[job_id] = record
             return job_id
         except Exception:
-            self._registry.release_pins(job_ids)
+            self._registry.release_pins(admission.job_ids)
             raise
 
     def get(self, job_id: str) -> PortfolioJobStatus:
@@ -198,7 +207,13 @@ class PortfolioJobRegistry:
             if record.state != "running":
                 return self._to_status(record)
             outcome = _select_portfolio_outcome(
-                self._registry, record.attempt_job_ids, record.plan, record.start
+                self._registry,
+                record.attempt_job_ids,
+                record.plan,
+                record.start,
+                record.models_sha256,
+                record.data_sha256,
+                record.checker_sha256,
             )
             if outcome is None:
                 return self._to_status(record)

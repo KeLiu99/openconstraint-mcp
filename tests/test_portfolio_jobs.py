@@ -404,6 +404,9 @@ def test_list_does_not_observe_partially_finalized_record(
             attempts=[],
             elapsed_ms=1,
             selection_policy="first-decisive-result",
+            models_sha256=[],
+            data_sha256=None,
+            checker_sha256=None,
         )
         listed: list[Any] = []
         errors: list[BaseException] = []

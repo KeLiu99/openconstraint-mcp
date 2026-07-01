@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import time
 from collections.abc import Sequence
+from typing import NamedTuple
 
 # portfolio consumes the registry (provider) and reuses its terminal-state set
 # (one definition, two call sites) plus core's capability resolver/validator. These
@@ -35,6 +36,7 @@ from .minizinc.core import (
     _resolve_capability_map,
     _validate_solver_capabilities,
 )
+from .save_target import text_sha256
 from .schemas import (
     JobState,
     PortfolioAttempt,
@@ -68,6 +70,25 @@ _JOB_TO_ATTEMPT_STATE: dict[JobState, PortfolioAttemptState] = {
 }
 
 
+class _PortfolioAdmission(NamedTuple):
+    """``_admit_portfolio``'s return: the admitted plan plus its provenance hashes.
+
+    ``models_sha256``/``data_sha256``/``checker_sha256`` are computed here — while
+    the caller's ``models``/``data``/``checker`` strings are still in scope — because
+    by the time ``_select_portfolio_outcome``/``_build_portfolio_result`` run
+    (potentially on a much later poll, via the background ``PortfolioJobRegistry``)
+    those original strings are out of scope. They must be threaded through
+    unchanged to the eventual ``PortfolioSolveResult``.
+    """
+
+    start: float
+    job_ids: list[str]
+    plan: list[tuple[int, str, int | None]]
+    models_sha256: list[str]
+    data_sha256: str | None
+    checker_sha256: str | None
+
+
 def _admit_portfolio(
     registry: JobRegistry,
     *,
@@ -83,8 +104,8 @@ def _admit_portfolio(
     num_solutions: int | None,
     seeds: list[int] | None = None,
     pin_attempts: bool = False,
-) -> tuple[float, list[str], list[tuple[int, str, int | None]]]:
-    """Validate the plan and admit its attempts atomically; return ``(start, job_ids, plan)``.
+) -> _PortfolioAdmission:
+    """Validate the plan and admit its attempts atomically; return a ``_PortfolioAdmission``.
 
     The synchronous, fail-fast half of a portfolio: every ``ValueError`` (empty
     ``models``/``solvers``, bad control), capability rejection, and the
@@ -92,7 +113,10 @@ def _admit_portfolio(
     attempt runs — so ``PortfolioJobRegistry.submit`` fails fast on a bad plan or a
     full queue instead of recording a background job that instantly fails. On return
     the attempts are already admitted to ``registry`` (running or queued);
-    ``_select_portfolio_outcome`` polls them to a winner.
+    ``_select_portfolio_outcome`` polls them to a winner. The returned
+    ``models_sha256``/``data_sha256``/``checker_sha256`` are provenance hashes of the
+    exact ``models``/``data``/``checker`` text this call admitted (see
+    ``PortfolioSolveResult``).
     """
     start = time.monotonic()
     if not models:
@@ -138,7 +162,17 @@ def _admit_portfolio(
         for m_idx, solver, seed in plan
     ]
     job_ids = registry.submit_many(requests, pin=pin_attempts)
-    return start, job_ids, plan
+    models_sha256 = [text_sha256(model) for model in models]
+    data_sha256 = text_sha256(data) if data is not None else None
+    checker_sha256 = text_sha256(checker) if checker is not None else None
+    return _PortfolioAdmission(
+        start=start,
+        job_ids=job_ids,
+        plan=plan,
+        models_sha256=models_sha256,
+        data_sha256=data_sha256,
+        checker_sha256=checker_sha256,
+    )
 
 
 def _resolve_plan_seeds(
@@ -166,6 +200,9 @@ def _select_portfolio_outcome(
     job_ids: Sequence[str],
     plan: Sequence[tuple[int, str, int | None]],
     start: float,
+    models_sha256: list[str],
+    data_sha256: str | None,
+    checker_sha256: str | None,
 ) -> PortfolioSolveResult | None:
     """One non-blocking selection pass over the admitted attempts (collect-on-poll).
 
@@ -176,6 +213,9 @@ def _select_portfolio_outcome(
     if every attempt is terminal without a decisive verdict, returns the
     best-available (or ``no_winner``) result. This is the background portfolio job's
     whole engine — driven by client polling, it needs no worker thread of its own.
+    ``models_sha256``/``data_sha256``/``checker_sha256`` are the provenance hashes
+    ``_admit_portfolio`` computed at admission time; they are threaded through
+    unchanged to ``_build_portfolio_result``.
     """
     statuses = [registry.get(job_id) for job_id in job_ids]
     winner_index = _first_decisive_index(statuses)
@@ -186,7 +226,9 @@ def _select_portfolio_outcome(
             if status.state not in _TERMINAL_STATES:
                 registry.cancel(job_id)
         statuses = _await_all_terminal(registry, job_ids)
-    return _build_portfolio_result(plan, statuses, winner_index, start)
+    return _build_portfolio_result(
+        plan, statuses, winner_index, start, models_sha256, data_sha256, checker_sha256
+    )
 
 
 def _build_portfolio_result(
@@ -194,13 +236,18 @@ def _build_portfolio_result(
     statuses: Sequence[SolveJobStatus],
     winner_index: int | None,
     start: float,
+    models_sha256: list[str],
+    data_sha256: str | None,
+    checker_sha256: str | None,
 ) -> PortfolioSolveResult:
     """Build the winner-led ``PortfolioSolveResult`` from a terminal attempt snapshot.
 
     Called by ``_select_portfolio_outcome`` once the race is decided. With no
     decisive ``winner_index``, falls back to the best available terminal attempt (or
     ``no_winner`` when none produced a usable result); the model enforces
-    ``winner present ⇔ status=="winner"``.
+    ``winner present ⇔ status=="winner"``. ``models_sha256``/``data_sha256``/
+    ``checker_sha256`` are recorded on the result verbatim — provenance of what the
+    race actually ran, not a race-time decision (see ``PortfolioSolveResult``).
     """
     if winner_index is None:
         winner_index = _best_available_index(statuses)
@@ -220,6 +267,9 @@ def _build_portfolio_result(
         attempts=attempts,
         elapsed_ms=max(int((time.monotonic() - start) * 1000), 0),
         selection_policy=_SELECTION_POLICY,
+        models_sha256=models_sha256,
+        data_sha256=data_sha256,
+        checker_sha256=checker_sha256,
     )
 
 
@@ -340,4 +390,7 @@ def _to_attempt(
         objective=result.objective if result is not None else None,
         elapsed_ms=status.elapsed_ms,
         message=status.message,
+        checker_status=(
+            result.checker.status if result is not None and result.checker is not None else None
+        ),
     )

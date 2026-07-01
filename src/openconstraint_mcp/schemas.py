@@ -328,6 +328,10 @@ class PortfolioAttempt(BaseModel):
     ``SolveResult`` was produced — the `result_status` and `objective`. `message`
     carries failure/cancel detail; `job_id` is the registry handle (``None`` when
     not admitted). The winning formulation is `models[attempts[winner_index].model_index]`.
+    `checker_status` is the attempt's own checker verdict (``None`` when no checker
+    was supplied to the race, or the attempt never produced a result) — purely
+    observational: it does not affect winner selection, so a checker-violated
+    attempt can still win the race.
     """
 
     index: int
@@ -342,6 +346,7 @@ class PortfolioAttempt(BaseModel):
     objective: int | float | None = None
     elapsed_ms: int | None = None
     message: str | None = None
+    checker_status: CheckerStatus | None = None
 
 
 class PortfolioSolveResult(BaseModel):
@@ -355,6 +360,23 @@ class PortfolioSolveResult(BaseModel):
     final state (the winner plus the cancelled/terminal losers) so the loser fates
     are visible without polling child jobs. `selection_policy` documents how the
     winner was chosen (e.g. ``"first-decisive-result"``).
+
+    ``models_sha256``/``data_sha256``/``checker_sha256`` are provenance: sha256 hex
+    digests of the exact ``models``/``data``/``checker`` text the race was admitted
+    with, computed once at admission time (before any attempt ran) rather than at
+    save time, since a later save-time input is untrusted client round-trip data —
+    the binding must reflect what actually ran. ``models_sha256`` is one digest per
+    formulation, index-aligned with the caller's ``models`` list (so
+    ``models_sha256[attempt.model_index]`` names the exact text an attempt ran);
+    ``data_sha256``/``checker_sha256`` are ``None`` iff the race ran with no
+    ``data``/``checker`` supplied (an empty-string input, if ever accepted, still
+    hashes to ``sha256("")`` — never ``None``). They let a later save-with-result
+    flow verify the race ran against the exact same text it is being asked to save,
+    and let a persisted experiment log stay self-describing after it leaves the
+    original request. This task only computes and records these fields — no gating
+    on them happens here: a checker-hash mismatch between race and save is not a
+    rejection, the fresh save-time checker decides, and the recorded hash only lets
+    a log say which checker gated the race.
     """
 
     status: PortfolioStatus
@@ -363,6 +385,9 @@ class PortfolioSolveResult(BaseModel):
     attempts: list[PortfolioAttempt] = Field(default_factory=list)
     elapsed_ms: int
     selection_policy: str
+    models_sha256: list[str]
+    data_sha256: str | None
+    checker_sha256: str | None
 
     @model_validator(mode="after")
     def _winner_presence_matches_status(self) -> PortfolioSolveResult:
@@ -374,6 +399,17 @@ class PortfolioSolveResult(BaseModel):
                 "PortfolioSolveResult requires winner, winner_index, and "
                 "status=='winner' to agree (all present together or all absent)"
             )
+        return self
+
+    @model_validator(mode="after")
+    def _attempt_model_indices_in_range(self) -> PortfolioSolveResult:
+        for attempt in self.attempts:
+            if not (0 <= attempt.model_index < len(self.models_sha256)):
+                raise ValueError(
+                    f"attempt index={attempt.index} has model_index="
+                    f"{attempt.model_index}, out of range for {len(self.models_sha256)} "
+                    "models_sha256 entries"
+                )
         return self
 
 

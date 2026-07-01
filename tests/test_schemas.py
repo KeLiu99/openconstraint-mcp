@@ -1,8 +1,11 @@
 from __future__ import annotations
 
+import hashlib
+
 import pytest
 from pydantic import ValidationError
 
+from openconstraint_mcp.save_target import text_sha256
 from openconstraint_mcp.schemas import (
     CheckerReport,
     CheckResult,
@@ -567,6 +570,7 @@ def test_portfolio_attempt_round_trips() -> None:
         "objective": None,
         "elapsed_ms": 80,
         "message": None,
+        "checker_status": None,
     }
 
 
@@ -606,6 +610,9 @@ def test_portfolio_solve_result_winner_with_cancelled_loser_round_trips() -> Non
         ],
         elapsed_ms=130,
         selection_policy="first-decisive-result",
+        models_sha256=["m0-hash"],
+        data_sha256=None,
+        checker_sha256=None,
     )
     dumped = result.model_dump(mode="json")
     assert dumped["status"] == "winner"
@@ -650,6 +657,9 @@ def test_portfolio_solve_result_timeout_with_incumbent_is_a_winner() -> None:
         ],
         elapsed_ms=5010,
         selection_policy="first-decisive-result",
+        models_sha256=["m0-hash"],
+        data_sha256=None,
+        checker_sha256=None,
     )
     assert result.winner is not None
     assert result.winner.status == "timeout"
@@ -676,6 +686,9 @@ def test_portfolio_solve_result_all_failed_has_no_winner() -> None:
         ],
         elapsed_ms=42,
         selection_policy="first-decisive-result",
+        models_sha256=["m0-hash"],
+        data_sha256=None,
+        checker_sha256=None,
     )
     dumped = result.model_dump(mode="json")
     assert dumped["status"] == "no_winner"
@@ -692,6 +705,9 @@ def test_portfolio_solve_result_rejects_winner_status_without_a_winner() -> None
             attempts=[],
             elapsed_ms=1,
             selection_policy="first-decisive-result",
+            models_sha256=[],
+            data_sha256=None,
+            checker_sha256=None,
         )
 
 
@@ -704,7 +720,50 @@ def test_portfolio_solve_result_rejects_no_winner_carrying_a_winner() -> None:
             attempts=[],
             elapsed_ms=1,
             selection_policy="first-decisive-result",
+            models_sha256=[],
+            data_sha256=None,
+            checker_sha256=None,
         )
+
+
+def test_portfolio_solve_result_rejects_attempt_model_index_out_of_range() -> None:
+    # The winner's attempt is one of `self.attempts`, so validating every attempt
+    # automatically covers the winner too. Here the sole attempt (and winner)
+    # claims model_index=1, but models_sha256 has only one entry (valid index 0).
+    with pytest.raises(ValidationError, match="model_index"):
+        PortfolioSolveResult(
+            status="winner",
+            winner_index=0,
+            winner=_portfolio_winner_result(),
+            attempts=[
+                PortfolioAttempt(
+                    index=0,
+                    model_index=1,
+                    solver="org.chuffed.chuffed",
+                    timeout_ms=5000,
+                    state="succeeded",
+                    job_id="job-0",
+                    job_state="succeeded",
+                    result_status="optimal",
+                    objective=22,
+                )
+            ],
+            elapsed_ms=130,
+            selection_policy="first-decisive-result",
+            models_sha256=["m0-hash"],
+            data_sha256=None,
+            checker_sha256=None,
+        )
+
+
+def test_empty_string_data_hashes_distinctly_from_none() -> None:
+    # PortfolioSolveResult.data_sha256/checker_sha256 are None iff the race ran
+    # with no data/checker supplied. An empty-string input, if the solve path ever
+    # accepts one, must still hash to sha256("") — a real digest, never collapsing
+    # to the None sentinel used for "not supplied".
+    empty_hash = text_sha256("")
+    assert empty_hash == hashlib.sha256(b"").hexdigest()
+    assert empty_hash is not None
 
 
 def _portfolio_job_result() -> PortfolioSolveResult:
@@ -727,6 +786,9 @@ def _portfolio_job_result() -> PortfolioSolveResult:
         ],
         elapsed_ms=130,
         selection_policy="first-decisive-result",
+        models_sha256=["m0-hash"],
+        data_sha256=None,
+        checker_sha256=None,
     )
 
 
