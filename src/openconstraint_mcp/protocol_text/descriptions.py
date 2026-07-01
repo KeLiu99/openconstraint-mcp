@@ -634,7 +634,7 @@ SAVE_VERIFIED_CPSAT_PYTHON_DESCRIPTION = (
     "Optional `sweep_result` (a CpsatPythonSweepResult from "
     "`run_cpsat_python_sweep`) attaches that sweep's attempt table as PROVENANCE "
     "ONLY — never verification evidence; the save still re-runs `source` fresh "
-    "and gates on that alone. Eagerly rejected (ValueError, before any run) "
+    "and gates on that alone. Eagerly rejected (MCP error, before any run) "
     "when: `sweep_result.status != 'winner'`; `seed` is not supplied; "
     "`sweep_result.winner_seed != seed`; or `sweep_result.source_sha256` does "
     "not match the sha256 of `source`. A `checker_sha256`/`problem_sha256` "
