@@ -1074,6 +1074,7 @@ def test_save_failure_with_sweep_result_writes_nothing(
 
 
 def test_save_sweep_result_no_winner_raises_before_executor_runs(
+    tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     from openconstraint_mcp.pyexec.save import save_verified_cpsat_python
@@ -1091,12 +1092,15 @@ def test_save_sweep_result_no_winner_raises_before_executor_runs(
     )
 
     with pytest.raises(ValueError, match="no_winner"):
-        save_verified_cpsat_python(_SCRIPT, target_dir=Path("/tmp/x"), seed=7, sweep_result=sweep)
+        save_verified_cpsat_python(
+            _SCRIPT, target_dir=tmp_path / "x", seed=7, sweep_result=sweep
+        )
 
     assert not calls, "executor must not be called before sweep_result validation"
 
 
 def test_save_sweep_result_with_seed_none_raises_before_executor_runs(
+    tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     from openconstraint_mcp.pyexec.save import save_verified_cpsat_python
@@ -1105,12 +1109,13 @@ def test_save_sweep_result_with_seed_none_raises_before_executor_runs(
     sweep = _sweep_result(seed=7)
 
     with pytest.raises(ValueError, match="seed"):
-        save_verified_cpsat_python(_SCRIPT, target_dir=Path("/tmp/x"), sweep_result=sweep)
+        save_verified_cpsat_python(_SCRIPT, target_dir=tmp_path / "x", sweep_result=sweep)
 
     assert not calls, "executor must not be called before sweep_result validation"
 
 
 def test_save_sweep_result_seed_mismatch_raises_before_executor_runs(
+    tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     from openconstraint_mcp.pyexec.save import save_verified_cpsat_python
@@ -1119,12 +1124,15 @@ def test_save_sweep_result_seed_mismatch_raises_before_executor_runs(
     sweep = _sweep_result(seed=7)
 
     with pytest.raises(ValueError, match="winner_seed"):
-        save_verified_cpsat_python(_SCRIPT, target_dir=Path("/tmp/x"), seed=8, sweep_result=sweep)
+        save_verified_cpsat_python(
+            _SCRIPT, target_dir=tmp_path / "x", seed=8, sweep_result=sweep
+        )
 
     assert not calls, "executor must not be called before sweep_result validation"
 
 
 def test_save_sweep_result_source_hash_mismatch_raises_before_executor_runs(
+    tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     from openconstraint_mcp.pyexec.save import save_verified_cpsat_python
@@ -1133,7 +1141,9 @@ def test_save_sweep_result_source_hash_mismatch_raises_before_executor_runs(
     sweep = _sweep_result(seed=7, source_sha256="deadbeef" * 8)
 
     with pytest.raises(ValueError, match="source_sha256"):
-        save_verified_cpsat_python(_SCRIPT, target_dir=Path("/tmp/x"), seed=7, sweep_result=sweep)
+        save_verified_cpsat_python(
+            _SCRIPT, target_dir=tmp_path / "x", seed=7, sweep_result=sweep
+        )
 
     assert not calls, "executor must not be called before sweep_result validation"
 
@@ -1150,6 +1160,29 @@ def test_save_sweep_result_timeout_winner_does_not_bypass_reported_gate(
     _patch_executor(monkeypatch, _TIMEOUT_RESULT)
     target = tmp_path / "swept_timeout"
     sweep = _sweep_result(seed=7, winner_status="timeout")
+
+    result = save_verified_cpsat_python(_SCRIPT, target_dir=target, seed=7, sweep_result=sweep)
+
+    assert result.saved is False
+    assert result.verification_level == "none"
+    assert not target.exists()
+
+
+def test_save_sweep_result_optimal_winner_does_not_bypass_fresh_timeout_gate(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """sweep_result.winner.status is 'optimal' (and eagerly self-consistent: matching
+    seed and source hash), but the fresh re-run this call triggers reports timeout.
+    If the gate ever read sweep_result.winner.status instead of the fresh run_result,
+    this save would incorrectly succeed — so this is the case that actually proves
+    the gate reads the fresh result, unlike the timeout/timeout case above where
+    both sources agree and either implementation would pass."""
+    from openconstraint_mcp.pyexec.save import save_verified_cpsat_python
+
+    _patch_executor(monkeypatch, _TIMEOUT_RESULT)
+    target = tmp_path / "swept_optimal_winner_fresh_timeout"
+    sweep = _sweep_result(seed=7, winner_status="optimal")
 
     result = save_verified_cpsat_python(_SCRIPT, target_dir=target, seed=7, sweep_result=sweep)
 

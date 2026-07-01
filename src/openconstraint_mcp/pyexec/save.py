@@ -107,7 +107,7 @@ def _validate_sweep_result_consistency(
         )
 
 
-def _build_experiment_log(sweep_result: CpsatPythonSweepResult) -> dict:
+def _build_experiment_log(sweep_result: CpsatPythonSweepResult) -> dict[str, object]:
     """Build the ``experiment-log.json`` content for a sweep_result.
 
     Deliberately not a ``model_dump`` passthrough of ``CpsatPythonSweepResult``
