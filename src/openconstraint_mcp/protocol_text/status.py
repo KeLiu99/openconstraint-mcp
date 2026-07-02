@@ -29,6 +29,8 @@ UNSAT_CORE_STAGES = (
 # The save family re-verifies (check, then solve) and commits inside one
 # blocking call, so stage 2 spans the whole pipeline and stages 3-4 are honest
 # for both outcomes — a committed save and a not_verified refusal.
+# The optional experiment-log write rides inside this same commit step; it
+# gets no stage of its own.
 SAVE_STAGES = (
     "Validating save request",
     "MiniZinc verification (check, then solve) and save are running",
@@ -50,7 +52,11 @@ CPSAT_PYTHON_SWEEP_STAGES = (
 
 
 def cpsat_save_stages(with_checker: bool) -> tuple[str, str, str, str]:
-    """Return the CP-SAT save milestone messages, checker-aware at stage 2."""
+    """Return the CP-SAT save milestone messages, checker-aware at stage 2.
+
+    The optional experiment-log write rides inside this same commit step; it
+    gets no stage of its own.
+    """
     if with_checker:
         return (
             "Validating save request and CP-SAT Python source",

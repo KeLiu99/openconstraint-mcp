@@ -17,13 +17,22 @@ from pathlib import Path
 from typing import Any
 
 from ..save_target import (
+    EXPERIMENT_LOG_FILENAME,
     MANIFEST_FILENAME,
     commit_staged_dir,
 )
 from ..save_target import (
     tool_version as _tool_version,
 )
-from ..schemas import CheckResult, SavedArtifactRole, SavedModelArtifact, SolveResult
+from ..schemas import (
+    PORTFOLIO_ATTEMPT_TERMINAL_STATES,
+    CheckResult,
+    PortfolioAttempt,
+    PortfolioSolveResult,
+    SavedArtifactRole,
+    SavedModelArtifact,
+    SolveResult,
+)
 
 
 def _sha256_of(path: Path) -> str:
@@ -39,6 +48,76 @@ PROBLEM_FILENAME: str = "problem.md"
 SOLVE_RESULT_FILENAME: str = "solve-result.json"
 
 
+def _winning_attempt(portfolio_result: PortfolioSolveResult) -> PortfolioAttempt:
+    """Return ``portfolio_result``'s winning attempt, narrowing ``winner_index``.
+
+    Both invariants this relies on are already enforced before a
+    ``portfolio_result`` reaches this module: ``status == "winner"`` implies
+    ``winner_index is not None`` (``PortfolioSolveResult``'s own model
+    validator), and ``winner_index`` indexes into ``attempts`` (checked
+    eagerly by ``core._validate_portfolio_result_consistency``, run by
+    ``save_verified_model`` before the fresh check/solve, let alone this write
+    step). This helper only narrows the type for its two call sites below; it
+    re-checks nothing.
+    """
+    winner_index = portfolio_result.winner_index
+    assert winner_index is not None
+    return portfolio_result.attempts[winner_index]
+
+
+def _build_experiment_log(portfolio_result: PortfolioSolveResult) -> dict[str, object]:
+    """Build the ``experiment-log.json`` content for a ``portfolio_result``.
+
+    Deliberately not a ``model_dump`` passthrough of ``PortfolioSolveResult`` —
+    the log is a considered export shape, not an implementation detail of the
+    portfolio schema, so it is built explicitly field by field (mirroring
+    ``pyexec.save._build_experiment_log``'s approach for the CP-SAT sweep
+    side). MiniZinc's ``PortfolioSolveResult`` has no top-level
+    ``objective_sense`` or per-run-budget field (CP-SAT-sweep-only concepts,
+    each attempt row already carries its own ``timeout_ms``) and no top-level
+    ``winner_seed`` (read instead off the winning attempt).
+    """
+    winner = _winning_attempt(portfolio_result)
+    return {
+        "managed_by": "openconstraint-mcp",
+        "tool_version": _tool_version(),
+        "created_at": datetime.now(UTC).isoformat(),
+        "exploration_type": "minizinc_portfolio",
+        "models_sha256": portfolio_result.models_sha256,
+        "data_sha256": portfolio_result.data_sha256,
+        "checker_sha256": portfolio_result.checker_sha256,
+        "solve_controls": {
+            "free_search": portfolio_result.solve_controls.free_search,
+            "parallel": portfolio_result.solve_controls.parallel,
+            "all_solutions": portfolio_result.solve_controls.all_solutions,
+            "num_solutions": portfolio_result.solve_controls.num_solutions,
+        },
+        "selection_policy": portfolio_result.selection_policy,
+        "winner_index": portfolio_result.winner_index,
+        "winner_seed": winner.seed,
+        "winner_solver": winner.solver,
+        "winner_model_index": winner.model_index,
+        "elapsed_ms": portfolio_result.elapsed_ms,
+        "attempts": [
+            {
+                "index": attempt.index,
+                "model_index": attempt.model_index,
+                "solver": attempt.solver,
+                "seed": attempt.seed,
+                "timeout_ms": attempt.timeout_ms,
+                "state": attempt.state,
+                "job_state": attempt.job_state,
+                "result_status": attempt.result_status,
+                "checker_status": attempt.checker_status,
+                "objective": attempt.objective,
+                "elapsed_ms": attempt.elapsed_ms,
+                "message": attempt.message,
+            }
+            for attempt in portfolio_result.attempts
+        ],
+    }
+
+
 def _write_staged_artifacts(
     staging: Path,
     *,
@@ -49,6 +128,7 @@ def _write_staged_artifacts(
     check: CheckResult,
     solve: SolveResult,
     solve_controls: dict[str, Any],
+    portfolio_result: PortfolioSolveResult | None,
 ) -> list[SavedModelArtifact]:
     """Write every artifact into ``staging`` and return the saved-file list.
 
@@ -71,6 +151,14 @@ def _write_staged_artifacts(
             json.dumps(solve.model_dump(mode="json"), indent=2) + "\n",
         )
     )
+    if portfolio_result is not None:
+        texts.append(
+            (
+                "experiment_log",
+                EXPERIMENT_LOG_FILENAME,
+                json.dumps(_build_experiment_log(portfolio_result), indent=2) + "\n",
+            )
+        )
 
     artifacts: list[SavedModelArtifact] = []
     for role, filename, text in texts:
@@ -78,17 +166,42 @@ def _write_staged_artifacts(
         file_path.write_text(text, encoding="utf-8")
         artifacts.append(SavedModelArtifact(role=role, path=filename, sha256=_sha256_of(file_path)))
 
+    verification: dict[str, Any] = {
+        "check_status": check.status,
+        "solve_status": solve.status,
+        "checker_status": solve.checker.status if solve.checker is not None else None,
+    }
+    if portfolio_result is not None:
+        # Compact summary only — the full attempt table lives in
+        # experiment-log.json, not duplicated here, so the manifest stays
+        # skimmable.
+        winner = _winning_attempt(portfolio_result)
+        verification["experiment_log"] = {
+            "exploration_type": "minizinc_portfolio",
+            "winner_index": portfolio_result.winner_index,
+            "winner_seed": winner.seed,
+            "winner_solver": winner.solver,
+            "winner_model_index": winner.model_index,
+            "attempt_count": len(portfolio_result.attempts),
+            "terminal_attempt_count": sum(
+                1
+                for attempt in portfolio_result.attempts
+                if attempt.state in PORTFOLIO_ATTEMPT_TERMINAL_STATES
+            ),
+            "cancelled_attempt_count": sum(
+                1 for attempt in portfolio_result.attempts if attempt.state == "cancelled"
+            ),
+            "statuses_seen": sorted({attempt.state for attempt in portfolio_result.attempts}),
+            "selection_policy": portfolio_result.selection_policy,
+        }
+
     manifest = {
         "managed_by": "openconstraint-mcp",
         "tool_version": _tool_version(),
         "created_at": datetime.now(UTC).isoformat(),
         "solver": solve.solver,
         "solve_controls": solve_controls,
-        "verification": {
-            "check_status": check.status,
-            "solve_status": solve.status,
-            "checker_status": solve.checker.status if solve.checker is not None else None,
-        },
+        "verification": verification,
         "artifacts": [artifact.model_dump(mode="json") for artifact in artifacts],
     }
     manifest_path = staging / MANIFEST_FILENAME
@@ -112,6 +225,7 @@ def write_verified_model_dir(
     solve: SolveResult,
     solve_controls: dict[str, Any],
     overwrite: bool,
+    portfolio_result: PortfolioSolveResult | None = None,
 ) -> tuple[list[SavedModelArtifact], str | None]:
     """Stage, re-gate, and commit a verified-model directory at ``target``.
 
@@ -119,6 +233,13 @@ def write_verified_model_dir(
     returned. Delegates the generic staging/commit to ``commit_staged_dir``
     from ``save_target``; supplies the MiniZinc-specific file writer.
     Returns the saved artifact list and an optional post-commit cleanup warning.
+
+    ``portfolio_result``, when supplied, is copied into ``experiment-log.json``
+    (see ``_build_experiment_log``) and summarized in the manifest's
+    ``verification.experiment_log``; the caller (``core.save_verified_model``)
+    has already validated it is self-consistent with this save and has no say
+    over whether the save happens — it is only ever passed here after the
+    fresh verification gate has already passed.
     """
 
     def _writer(staging: Path) -> list[SavedModelArtifact]:
@@ -131,6 +252,7 @@ def write_verified_model_dir(
             check=check,
             solve=solve,
             solve_controls=solve_controls,
+            portfolio_result=portfolio_result,
         )
 
     return commit_staged_dir(target, overwrite=overwrite, write_files=_writer)

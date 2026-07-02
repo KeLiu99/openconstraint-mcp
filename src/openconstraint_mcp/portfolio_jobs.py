@@ -42,7 +42,12 @@ from .minizinc.core import DEFAULT_SOLVE_TIMEOUT_MS
 # helpers, not a public API.
 # noinspection PyProtectedMember
 from .portfolio import _admit_portfolio, _select_portfolio_outcome
-from .schemas import PortfolioJobState, PortfolioJobStatus, PortfolioSolveResult
+from .schemas import (
+    PortfolioJobState,
+    PortfolioJobStatus,
+    PortfolioSolveControls,
+    PortfolioSolveResult,
+)
 
 
 def _now_ms() -> int:
@@ -55,7 +60,10 @@ class _PortfolioRecord:
 
     Holds only metadata: the admitted ``attempt_job_ids`` (so ``cancel`` can stop
     them and ``get`` can read them), the ``plan`` and monotonic ``start`` needed to
-    build the aggregate, and — once terminal — the cached ``result``/``message``.
+    build the aggregate, the ``models_sha256``/``data_sha256``/``checker_sha256``/
+    ``solve_controls`` provenance ``_admit_portfolio`` captured while the original
+    request was still in scope, and — once terminal — the cached ``result``/
+    ``message``.
     """
 
     job_id: str
@@ -65,6 +73,10 @@ class _PortfolioRecord:
     start: float
     attempt_job_ids: list[str]
     plan: list[tuple[int, str, int | None]]
+    models_sha256: list[str]
+    data_sha256: str | None
+    checker_sha256: str | None
+    solve_controls: PortfolioSolveControls
     state: PortfolioJobState = "running"
     finished_at_ms: int | None = None
     elapsed_ms: int | None = None
@@ -75,6 +87,27 @@ class _PortfolioRecord:
 
 
 type _EvictedPortfolioRecords = list[_PortfolioRecord]
+
+
+def _to_status(record: _PortfolioRecord) -> PortfolioJobStatus:
+    # `result` lives only on a succeeded record, so it already satisfies the
+    # PortfolioJobStatus invariant. `elapsed_ms` is frozen at finalize for a
+    # terminal job; a `running` job derives it from `started_at_ms` so it advances.
+    if record.state != "running":
+        elapsed_ms = record.elapsed_ms
+    else:
+        elapsed_ms = max(_now_ms() - record.started_at_ms, 0)
+    return PortfolioJobStatus(
+        job_id=record.job_id,
+        state=record.state,
+        per_attempt_timeout_ms=record.per_attempt_timeout_ms,
+        submitted_at_ms=record.submitted_at_ms,
+        started_at_ms=record.started_at_ms,
+        finished_at_ms=record.finished_at_ms,
+        elapsed_ms=elapsed_ms,
+        result=record.result,
+        message=record.message,
+    )
 
 
 class PortfolioJobRegistry:
@@ -147,7 +180,7 @@ class PortfolioJobRegistry:
                     f"Too many running portfolio jobs (max {self._max_running}). Poll "
                     "or cancel a running portfolio before submitting another."
                 )
-        start, job_ids, plan = _admit_portfolio(
+        admission = _admit_portfolio(
             self._registry,
             models=models,
             solvers=solvers,
@@ -170,15 +203,19 @@ class PortfolioJobRegistry:
                 submitted_at_ms=now,
                 started_at_ms=now,
                 per_attempt_timeout_ms=per_attempt_timeout_ms,
-                start=start,
-                attempt_job_ids=list(job_ids),
-                plan=list(plan),
+                start=admission.start,
+                attempt_job_ids=list(admission.job_ids),
+                plan=list(admission.plan),
+                models_sha256=list(admission.models_sha256),
+                data_sha256=admission.data_sha256,
+                checker_sha256=admission.checker_sha256,
+                solve_controls=admission.solve_controls,
             )
             with self._lock:
                 self._records[job_id] = record
             return job_id
         except Exception:
-            self._registry.release_pins(job_ids)
+            self._registry.release_pins(admission.job_ids)
             raise
 
     def get(self, job_id: str) -> PortfolioJobStatus:
@@ -196,14 +233,21 @@ class PortfolioJobRegistry:
         # not both cancel/settle; the registry lock is free meanwhile.
         with record.lock:
             if record.state != "running":
-                return self._to_status(record)
+                return _to_status(record)
             outcome = _select_portfolio_outcome(
-                self._registry, record.attempt_job_ids, record.plan, record.start
+                self._registry,
+                record.attempt_job_ids,
+                record.plan,
+                record.start,
+                record.models_sha256,
+                record.data_sha256,
+                record.checker_sha256,
+                record.solve_controls,
             )
             if outcome is None:
-                return self._to_status(record)
+                return _to_status(record)
             self._finalize(record, "succeeded", outcome, None)
-            return self._to_status(record)
+            return _to_status(record)
 
     def cancel(self, job_id: str) -> PortfolioJobStatus:
         """Stop a running portfolio race and its attempts; a no-op once terminal.
@@ -216,11 +260,11 @@ class PortfolioJobRegistry:
             record = self._require_record(job_id)
         with record.lock:
             if record.state != "running":
-                return self._to_status(record)
+                return _to_status(record)
             for attempt_id in record.attempt_job_ids:
                 self._registry.cancel(attempt_id)
             self._finalize(record, "cancelled", None, "Cancelled by client")
-            return self._to_status(record)
+            return _to_status(record)
 
     def list(self) -> list[PortfolioJobStatus]:
         # Snapshot the record set under the registry lock, then read each record
@@ -234,7 +278,7 @@ class PortfolioJobRegistry:
         statuses: list[PortfolioJobStatus] = []
         for record in records:
             with record.lock:
-                statuses.append(self._to_status(record))
+                statuses.append(_to_status(record))
         return statuses
 
     # --- internals -------------------------------------------------------------
@@ -245,26 +289,6 @@ class PortfolioJobRegistry:
         if record is None:
             raise ValueError(f"unknown portfolio job_id: {job_id}")
         return record
-
-    def _to_status(self, record: _PortfolioRecord) -> PortfolioJobStatus:
-        # `result` lives only on a succeeded record, so it already satisfies the
-        # PortfolioJobStatus invariant. `elapsed_ms` is frozen at finalize for a
-        # terminal job; a `running` job derives it from `started_at_ms` so it advances.
-        if record.state != "running":
-            elapsed_ms = record.elapsed_ms
-        else:
-            elapsed_ms = max(_now_ms() - record.started_at_ms, 0)
-        return PortfolioJobStatus(
-            job_id=record.job_id,
-            state=record.state,
-            per_attempt_timeout_ms=record.per_attempt_timeout_ms,
-            submitted_at_ms=record.submitted_at_ms,
-            started_at_ms=record.started_at_ms,
-            finished_at_ms=record.finished_at_ms,
-            elapsed_ms=elapsed_ms,
-            result=record.result,
-            message=record.message,
-        )
 
     def _finalize(
         self,

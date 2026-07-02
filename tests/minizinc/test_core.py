@@ -37,9 +37,13 @@ from openconstraint_mcp.minizinc.core import (
     solver_supports_num_solutions,
 )
 from openconstraint_mcp.runtime import RuntimeMissingError
+from openconstraint_mcp.save_target import EXPERIMENT_LOG_FILENAME, text_sha256
 from openconstraint_mcp.schemas import (
     CheckResult,
     ModelInspectionResult,
+    PortfolioAttempt,
+    PortfolioSolveControls,
+    PortfolioSolveResult,
     SolverCapabilities,
     SolveResult,
     SolverInfo,
@@ -2229,6 +2233,504 @@ def test_save_verified_model_rejects_gated_num_solutions_before_any_subprocess(
     _fail_if_subprocess_called(monkeypatch)
     with pytest.raises(ValueError, match="num_solutions"):
         save_verified_model(_SAVE_MODEL, target_dir=tmp_path / "project", num_solutions=2)
+
+
+# --- save_verified_model(portfolio_result=...) ------------------------------
+
+
+def _portfolio_winner_solve_result(*, status: str = "optimal") -> SolveResult:
+    return SolveResult(
+        status=status,
+        solver=DEFAULT_SOLVER,
+        return_code=0,
+        timed_out=status == "timeout",
+        stdout="",
+        stderr="",
+        elapsed_ms=100,
+        solution={"x": 3},
+        solutions=[{"x": 3}],
+        objective=None,
+    )
+
+
+def _portfolio_attempt(
+    *,
+    solver: str = DEFAULT_SOLVER,
+    seed: int | None = None,
+    result_status: str = "optimal",
+    checker_status: str | None = None,
+) -> PortfolioAttempt:
+    return PortfolioAttempt(
+        index=0,
+        model_index=0,
+        solver=solver,
+        seed=seed,
+        timeout_ms=5000,
+        state="succeeded",
+        job_id="job-0",
+        job_state="succeeded",
+        result_status=result_status,
+        objective=None,
+        elapsed_ms=100,
+        checker_status=checker_status,
+    )
+
+
+# The shared solve controls save_verified_model defaults to; a race with these
+# controls is eagerly consistent with a default save call.
+_DEFAULT_PORTFOLIO_CONTROLS = PortfolioSolveControls(
+    free_search=False, parallel=None, all_solutions=False, num_solutions=None
+)
+
+
+def _portfolio_result(
+    *,
+    model: str = _SAVE_MODEL,
+    solver: str = DEFAULT_SOLVER,
+    seed: int | None = None,
+    result_status: str = "optimal",
+    checker_status: str | None = None,
+    models_sha256: list[str] | None = None,
+    data_sha256: str | None = None,
+    checker_sha256: str | None = None,
+    solve_controls: PortfolioSolveControls | None = None,
+) -> PortfolioSolveResult:
+    """Build a minimal, self-consistent winning ``PortfolioSolveResult``.
+
+    The sole attempt (index 0, model_index 0) is eagerly consistent with a
+    save of ``model`` using ``solver``/``seed`` by default; pass
+    ``data_sha256=text_sha256(data)`` to match a save that also supplies
+    ``data`` (the default ``None`` matches a dataless save). Callers force a
+    specific mismatch by overriding the corresponding keyword.
+    """
+    return PortfolioSolveResult(
+        status="winner",
+        winner_index=0,
+        winner=_portfolio_winner_solve_result(status=result_status),
+        attempts=[
+            _portfolio_attempt(
+                solver=solver,
+                seed=seed,
+                result_status=result_status,
+                checker_status=checker_status,
+            )
+        ],
+        elapsed_ms=150,
+        selection_policy="first-decisive-result",
+        models_sha256=models_sha256 if models_sha256 is not None else [text_sha256(model)],
+        data_sha256=data_sha256,
+        checker_sha256=checker_sha256,
+        solve_controls=(
+            solve_controls if solve_controls is not None else _DEFAULT_PORTFOLIO_CONTROLS
+        ),
+    )
+
+
+def test_save_verified_model_with_portfolio_result_writes_experiment_log(
+    fake_minizinc_binary: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    _fake_check_then_solve(
+        monkeypatch,
+        check=FakeCompletedProcess(stdout="", stderr="", returncode=0),
+        solve=FakeCompletedProcess(stdout=STREAM_SATISFY, stderr="", returncode=0),
+    )
+    target = tmp_path / "project"
+    portfolio_result = _portfolio_result()
+
+    result = save_verified_model(_SAVE_MODEL, target_dir=target, portfolio_result=portfolio_result)
+
+    assert result.status == "saved"
+    log_path = target / EXPERIMENT_LOG_FILENAME
+    assert log_path.is_file()
+
+    manifest = json.loads((target / MANIFEST_FILENAME).read_text())
+    artifact_roles = {a["role"]: a["path"] for a in manifest["artifacts"]}
+    assert artifact_roles["experiment_log"] == EXPERIMENT_LOG_FILENAME
+
+    summary = manifest["verification"]["experiment_log"]
+    assert summary["exploration_type"] == "minizinc_portfolio"
+    assert summary["winner_index"] == 0
+    assert summary["winner_seed"] is None
+    assert summary["winner_solver"] == DEFAULT_SOLVER
+    assert summary["winner_model_index"] == 0
+    assert summary["attempt_count"] == 1
+    assert summary["terminal_attempt_count"] == 1
+    assert summary["cancelled_attempt_count"] == 0
+    assert summary["statuses_seen"] == ["succeeded"]
+    assert summary["selection_policy"] == "first-decisive-result"
+
+
+def test_save_verified_model_portfolio_result_rejected_attempt_counts_as_terminal(
+    fake_minizinc_binary: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    # A `rejected` attempt was never admitted, so it is final — the manifest
+    # summary must count it in `terminal_attempt_count` alongside the registry's
+    # terminal states (see PORTFOLIO_ATTEMPT_TERMINAL_STATES).
+    _fake_check_then_solve(
+        monkeypatch,
+        check=FakeCompletedProcess(stdout="", stderr="", returncode=0),
+        solve=FakeCompletedProcess(stdout=STREAM_SATISFY, stderr="", returncode=0),
+    )
+    target = tmp_path / "project"
+    rejected_attempt = PortfolioAttempt(
+        index=1,
+        model_index=0,
+        solver=DEFAULT_SOLVER,
+        timeout_ms=5000,
+        state="rejected",
+    )
+    portfolio_result = PortfolioSolveResult(
+        status="winner",
+        winner_index=0,
+        winner=_portfolio_winner_solve_result(),
+        attempts=[_portfolio_attempt(), rejected_attempt],
+        elapsed_ms=150,
+        selection_policy="first-decisive-result",
+        models_sha256=[text_sha256(_SAVE_MODEL)],
+        data_sha256=None,
+        checker_sha256=None,
+        solve_controls=_DEFAULT_PORTFOLIO_CONTROLS,
+    )
+
+    save_verified_model(_SAVE_MODEL, target_dir=target, portfolio_result=portfolio_result)
+
+    manifest = json.loads((target / MANIFEST_FILENAME).read_text())
+    assert manifest["verification"]["experiment_log"]["terminal_attempt_count"] == 2
+
+
+def test_save_verified_model_portfolio_result_log_hashes_match_saved_artifacts(
+    fake_minizinc_binary: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    _fake_check_then_solve(
+        monkeypatch,
+        check=FakeCompletedProcess(stdout="", stderr="", returncode=0),
+        solve=FakeCompletedProcess(stdout=STREAM_SATISFY, stderr="", returncode=0),
+    )
+    target = tmp_path / "project"
+    data = "n = 3;\n"
+    portfolio_result = _portfolio_result(data_sha256=text_sha256(data), checker_sha256="c" * 64)
+
+    save_verified_model(
+        _SAVE_MODEL, target_dir=target, data=data, portfolio_result=portfolio_result
+    )
+
+    log = json.loads((target / EXPERIMENT_LOG_FILENAME).read_text())
+    assert log["managed_by"] == "openconstraint-mcp"
+    assert log["exploration_type"] == "minizinc_portfolio"
+    assert log["models_sha256"] == [text_sha256(_SAVE_MODEL)]
+    assert log["data_sha256"] == text_sha256(data)
+    assert log["checker_sha256"] == "c" * 64
+    assert log["solve_controls"] == {
+        "free_search": False,
+        "parallel": None,
+        "all_solutions": False,
+        "num_solutions": None,
+    }
+    assert len(log["attempts"]) == 1
+    assert log["attempts"][0] == {
+        "index": 0,
+        "model_index": 0,
+        "solver": DEFAULT_SOLVER,
+        "seed": None,
+        "timeout_ms": 5000,
+        "state": "succeeded",
+        "job_state": "succeeded",
+        "result_status": "optimal",
+        "checker_status": None,
+        "objective": None,
+        "elapsed_ms": 100,
+        "message": None,
+    }
+
+
+def test_save_verified_model_portfolio_result_log_row_surfaces_checker_status(
+    fake_minizinc_binary: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    # A checker-rejected attempt is purely observational (see PortfolioAttempt's
+    # docstring) — it does not affect winner selection — but its verdict must
+    # still make it into the persisted experiment-log.json row, not just onto
+    # the in-memory PortfolioAttempt (see test_portfolio_attempt_surfaces_checker_status).
+    _fake_check_then_solve(
+        monkeypatch,
+        check=FakeCompletedProcess(stdout="", stderr="", returncode=0),
+        solve=FakeCompletedProcess(stdout=STREAM_SATISFY, stderr="", returncode=0),
+    )
+    target = tmp_path / "project"
+    portfolio_result = _portfolio_result(checker_status="violation")
+
+    save_verified_model(_SAVE_MODEL, target_dir=target, portfolio_result=portfolio_result)
+
+    log = json.loads((target / EXPERIMENT_LOG_FILENAME).read_text())
+    assert log["attempts"][0]["checker_status"] == "violation"
+
+
+def test_save_verified_model_portfolio_result_failed_save_writes_nothing(
+    fake_minizinc_binary: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    # Same pattern as the existing no-portfolio failure tests: a failed fresh
+    # solve writes nothing, portfolio_result attached or not.
+    _fake_check_then_solve(
+        monkeypatch,
+        check=FakeCompletedProcess(stdout="", stderr="", returncode=0),
+        solve=FakeCompletedProcess(stdout=STREAM_UNSAT, stderr="", returncode=0),
+    )
+    target = tmp_path / "project"
+    portfolio_result = _portfolio_result()
+
+    result = save_verified_model(_SAVE_MODEL, target_dir=target, portfolio_result=portfolio_result)
+
+    assert result.status == "not_verified"
+    assert not target.exists()
+
+
+def test_save_verified_model_portfolio_result_no_winner_raises_before_runtime_runs(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    _fail_if_subprocess_called(monkeypatch)
+    portfolio_result = PortfolioSolveResult(
+        status="no_winner",
+        winner_index=None,
+        winner=None,
+        attempts=[_portfolio_attempt()],
+        elapsed_ms=150,
+        selection_policy="first-decisive-result",
+        models_sha256=[text_sha256(_SAVE_MODEL)],
+        data_sha256=None,
+        checker_sha256=None,
+        solve_controls=_DEFAULT_PORTFOLIO_CONTROLS,
+    )
+
+    with pytest.raises(ValueError, match="no_winner"):
+        save_verified_model(
+            _SAVE_MODEL, target_dir=tmp_path / "project", portfolio_result=portfolio_result
+        )
+
+
+def test_save_verified_model_portfolio_result_winner_index_out_of_bounds_raises_before_runtime_runs(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    # PortfolioSolveResult's own validators check attempt.model_index against
+    # models_sha256, but nothing checks winner_index against attempts — so this
+    # constructs cleanly and only core.py's own defensive bounds check catches it.
+    _fail_if_subprocess_called(monkeypatch)
+    portfolio_result = PortfolioSolveResult(
+        status="winner",
+        winner_index=5,
+        winner=_portfolio_winner_solve_result(),
+        attempts=[_portfolio_attempt()],
+        elapsed_ms=150,
+        selection_policy="first-decisive-result",
+        models_sha256=[text_sha256(_SAVE_MODEL)],
+        data_sha256=None,
+        checker_sha256=None,
+        solve_controls=_DEFAULT_PORTFOLIO_CONTROLS,
+    )
+
+    with pytest.raises(ValueError, match="winner_index"):
+        save_verified_model(
+            _SAVE_MODEL, target_dir=tmp_path / "project", portfolio_result=portfolio_result
+        )
+
+
+def test_save_verified_model_portfolio_result_solver_mismatch_raises_before_runtime_runs(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    _fail_if_subprocess_called(monkeypatch)
+    portfolio_result = _portfolio_result(solver="org.gecode.gecode")
+
+    with pytest.raises(ValueError, match="solver"):
+        save_verified_model(
+            _SAVE_MODEL,
+            target_dir=tmp_path / "project",
+            solver=DEFAULT_SOLVER,
+            portfolio_result=portfolio_result,
+        )
+
+
+def test_save_verified_model_portfolio_result_seed_mismatch_raises_before_runtime_runs(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    # A non-None random_seed is itself a gated control (-r), so it is allowlisted
+    # here (matching test_save_verified_model_rejects_unsupported_control_before_check's
+    # pattern) purely to reach the portfolio_result check; _fail_if_solve_runs still
+    # proves neither the compile check nor the solve ever runs.
+    _patch_capabilities(
+        monkeypatch, {DEFAULT_SOLVER: SolverCapabilities(supports_random_seed=True)}
+    )
+    _fail_if_solve_runs(monkeypatch)
+    portfolio_result = _portfolio_result(seed=7)
+
+    with pytest.raises(ValueError, match="winning attempt's seed"):
+        save_verified_model(
+            _SAVE_MODEL,
+            target_dir=tmp_path / "project",
+            random_seed=8,
+            portfolio_result=portfolio_result,
+        )
+
+
+def test_save_verified_model_portfolio_result_model_hash_mismatch_raises_before_runtime_runs(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    _fail_if_subprocess_called(monkeypatch)
+    # Built for a different model text than the one actually saved below.
+    portfolio_result = _portfolio_result(model="solve satisfy;\n")
+
+    with pytest.raises(ValueError, match="models_sha256"):
+        save_verified_model(
+            _SAVE_MODEL, target_dir=tmp_path / "project", portfolio_result=portfolio_result
+        )
+
+
+def test_save_verified_model_portfolio_result_data_hash_mismatch_raises_before_runtime_runs(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    _fail_if_subprocess_called(monkeypatch)
+    # data_sha256 defaults to None (a dataless race) but this save supplies data.
+    portfolio_result = _portfolio_result()
+
+    with pytest.raises(ValueError, match="data_sha256"):
+        save_verified_model(
+            _SAVE_MODEL,
+            target_dir=tmp_path / "project",
+            data="n = 3;\n",
+            portfolio_result=portfolio_result,
+        )
+
+
+@pytest.mark.parametrize(
+    ("control", "race_value"),
+    [
+        ("free_search", True),
+        ("parallel", 4),
+        ("all_solutions", True),
+        ("num_solutions", 3),
+    ],
+)
+def test_save_verified_model_portfolio_result_solve_controls_mismatch_raises_before_runtime_runs(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, control: str, race_value: object
+) -> None:
+    # The race ran with a non-default shared search control, so a default save is
+    # not a replay of the winning attempt's configuration — rejected eagerly,
+    # before any subprocess (timeout_ms, a budget, is deliberately not gated).
+    _fail_if_subprocess_called(monkeypatch)
+    controls = _DEFAULT_PORTFOLIO_CONTROLS.model_copy(update={control: race_value})
+    portfolio_result = _portfolio_result(solve_controls=controls)
+
+    with pytest.raises(ValueError, match=f"solve_controls.{control}"):
+        save_verified_model(
+            _SAVE_MODEL, target_dir=tmp_path / "project", portfolio_result=portfolio_result
+        )
+
+
+def test_save_verified_model_portfolio_result_unseeded_winner_matches_unseeded_save(
+    fake_minizinc_binary: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    # seed=None on both sides is a VALID match (an unseeded portfolio winner
+    # attached to an unseeded save) — paired with a fresh check/solve mock that
+    # lets the save actually succeed, so this reaches the write step.
+    _fake_check_then_solve(
+        monkeypatch,
+        check=FakeCompletedProcess(stdout="", stderr="", returncode=0),
+        solve=FakeCompletedProcess(stdout=STREAM_SATISFY, stderr="", returncode=0),
+    )
+    target = tmp_path / "project"
+    portfolio_result = _portfolio_result(seed=None)
+
+    result = save_verified_model(
+        _SAVE_MODEL, target_dir=target, random_seed=None, portfolio_result=portfolio_result
+    )
+
+    assert result.status == "saved"
+    assert (target / EXPERIMENT_LOG_FILENAME).is_file()
+
+
+def test_empty_string_data_does_not_match_a_dataless_portfolio_result_in_either_direction(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    # An empty-string `data` hashes to text_sha256(""), distinct from the None
+    # sentinel a dataless race records — neither direction may match the other.
+    _fail_if_subprocess_called(monkeypatch)
+
+    # portfolio ran dataless (data_sha256=None); save supplies empty-string data.
+    portfolio_result = _portfolio_result(data_sha256=None)
+    with pytest.raises(ValueError, match="data_sha256"):
+        save_verified_model(
+            _SAVE_MODEL, target_dir=tmp_path / "a", data="", portfolio_result=portfolio_result
+        )
+
+    # portfolio recorded empty-string data's hash; save is dataless.
+    portfolio_result = _portfolio_result(data_sha256=text_sha256(""))
+    with pytest.raises(ValueError, match="data_sha256"):
+        save_verified_model(
+            _SAVE_MODEL, target_dir=tmp_path / "b", data=None, portfolio_result=portfolio_result
+        )
+
+
+def test_save_verified_model_portfolio_result_checker_hash_mismatch_is_not_rejected(
+    fake_minizinc_binary: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    # checker_sha256 is informational-only: the fresh checker gate decides, so a
+    # mismatched hash does not block a save that otherwise verifies.
+    solve_stdout = stream(
+        checker_pass("CORRECT\n"),
+        solution_obj("x=3\n", {"x": 3}),
+        {"type": "status", "status": "SATISFIED"},
+    )
+    _fake_check_then_solve(
+        monkeypatch,
+        check=FakeCompletedProcess(stdout="", stderr="", returncode=0),
+        solve=FakeCompletedProcess(stdout=solve_stdout, stderr="", returncode=0),
+    )
+    target = tmp_path / "project"
+    portfolio_result = _portfolio_result(checker_sha256="mismatched-hash".ljust(64, "0"))
+
+    result = save_verified_model(
+        _SAVE_MODEL, target_dir=target, checker=_CHECKER_SRC, portfolio_result=portfolio_result
+    )
+
+    assert result.status == "saved"
+    assert result.solve is not None
+    assert result.solve.checker is not None
+    assert result.solve.checker.status == "completed"
+
+
+def test_save_verified_model_portfolio_result_optimal_winner_does_not_bypass_fresh_failure(
+    fake_minizinc_binary: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """The winning attempt's own ``result_status`` is ``"optimal"`` (so it is
+    clearly NOT the thing gating the save), but the *fresh* mocked solve
+    reports unsatisfiable. If the gate ever read ``portfolio_result.winner``
+    instead of the fresh solve, this save would incorrectly succeed — so this
+    is the case that actually proves the gate reads the fresh result."""
+    _fake_check_then_solve(
+        monkeypatch,
+        check=FakeCompletedProcess(stdout="", stderr="", returncode=0),
+        solve=FakeCompletedProcess(stdout=STREAM_UNSAT, stderr="", returncode=0),
+    )
+    target = tmp_path / "project"
+    portfolio_result = _portfolio_result(result_status="optimal")
+
+    result = save_verified_model(_SAVE_MODEL, target_dir=target, portfolio_result=portfolio_result)
+
+    assert result.status == "not_verified"
+    assert not target.exists()
 
 
 # --- cancellable Popen runner (Capability 1, Task 1.2) ---------------------

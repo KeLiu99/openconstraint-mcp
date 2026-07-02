@@ -27,9 +27,13 @@ from openconstraint_mcp.minizinc.core import DEFAULT_SOLVE_TIMEOUT_MS
 from openconstraint_mcp.portfolio import (
     _admit_portfolio,
     _first_decisive_index,
+    _PortfolioAdmission,
     _select_portfolio_outcome,
 )
+from openconstraint_mcp.save_target import text_sha256
 from openconstraint_mcp.schemas import (
+    CheckerReport,
+    PortfolioSolveControls,
     PortfolioSolveResult,
     SolveJobStatus,
     SolverCapabilities,
@@ -39,7 +43,9 @@ from openconstraint_mcp.schemas import (
 )
 
 
-def _solve_result(status: str = "satisfied", *, solver: str = "cp-sat") -> SolveResult:
+def _solve_result(
+    status: str = "satisfied", *, solver: str = "cp-sat", checker: CheckerReport | None = None
+) -> SolveResult:
     return SolveResult(
         status=status,  # type: ignore[arg-type]
         solver=solver,
@@ -51,6 +57,7 @@ def _solve_result(status: str = "satisfied", *, solver: str = "cp-sat") -> Solve
         solution={"x": 1},
         solutions=[{"x": 1}],
         objective=22 if status == "optimal" else None,
+        checker=checker,
     )
 
 
@@ -92,9 +99,7 @@ _ADMIT_DEFAULTS: dict[str, Any] = {
 }
 
 
-def _admit(
-    registry: JobRegistry, **kwargs: Any
-) -> tuple[float, list[str], list[tuple[int, str, int | None]]]:
+def _admit(registry: JobRegistry, **kwargs: Any) -> _PortfolioAdmission:
     """Admit a portfolio plan, filling the optional fields the engine requires."""
     return _admit_portfolio(registry, **{**_ADMIT_DEFAULTS, **kwargs})
 
@@ -105,10 +110,19 @@ def _race(registry: JobRegistry, **kwargs: Any) -> PortfolioSolveResult:
     Mirrors how ``PortfolioJobRegistry.get`` drives a race — admit once, then call
     ``_select_portfolio_outcome`` repeatedly until it returns the aggregate.
     """
-    start, job_ids, plan = _admit(registry, **kwargs)
+    admission = _admit(registry, **kwargs)
     deadline = time.monotonic() + 10.0
     while time.monotonic() < deadline:
-        outcome = _select_portfolio_outcome(registry, job_ids, plan, start)
+        outcome = _select_portfolio_outcome(
+            registry,
+            admission.job_ids,
+            admission.plan,
+            admission.start,
+            admission.models_sha256,
+            admission.data_sha256,
+            admission.checker_sha256,
+            admission.solve_controls,
+        )
         if outcome is not None:
             return outcome
         time.sleep(0.01)
@@ -137,7 +151,16 @@ def test_portfolio_returns_decisive_winner_and_cancels_loser(
 
     registry = JobRegistry(max_running_jobs=4)
     try:
-        result = _race(registry, models=["solve satisfy;"], solvers=["cp-sat", "org.gecode.gecode"])
+        model_text = "solve satisfy;"
+        data_text = "n = 3;"
+        checker_text = "% checker\n"
+        result = _race(
+            registry,
+            models=[model_text],
+            solvers=["cp-sat", "org.gecode.gecode"],
+            data=data_text,
+            checker=checker_text,
+        )
         assert result.status == "winner"
         assert result.winner_index == 0
         assert result.winner is not None
@@ -146,8 +169,62 @@ def test_portfolio_returns_decisive_winner_and_cancels_loser(
         assert result.attempts[0].result_status == "optimal"
         assert result.attempts[1].state == "cancelled"
         assert result.selection_policy == "first-decisive-result"
+        assert result.models_sha256 == [text_sha256(model_text)]
+        assert result.data_sha256 == text_sha256(data_text)
+        assert result.checker_sha256 == text_sha256(checker_text)
     finally:
         release.set()
+        registry.shutdown()
+
+
+def test_portfolio_attempt_surfaces_checker_status(monkeypatch: pytest.MonkeyPatch) -> None:
+    # checker_status is purely observational: a checker-rejected attempt still wins
+    # the race exactly as an unchecked one would — no gating on the checker verdict.
+    violation = CheckerReport(status="violation", checks=[], transcript="checker output")
+
+    def _fake_solve(model: str, *, solver: str, on_start: Any, **kw: Any) -> SolveResult:
+        on_start(_FakeProc())
+        return _solve_result("optimal", solver=solver, checker=violation)
+
+    _patch_solve(monkeypatch, _fake_solve)
+    registry = JobRegistry(max_running_jobs=4)
+    try:
+        result = _race(
+            registry, models=["solve satisfy;"], solvers=["cp-sat"], checker="% checker\n"
+        )
+        assert result.status == "winner"
+        assert result.winner_index == 0
+        assert result.attempts[0].checker_status == "violation"
+    finally:
+        registry.shutdown()
+
+
+def test_portfolio_result_records_shared_solve_controls(monkeypatch: pytest.MonkeyPatch) -> None:
+    # The shared search controls every attempt ran with are provenance, captured
+    # at admission and recorded verbatim on the result (see PortfolioSolveControls).
+    _patch_capabilities(
+        monkeypatch,
+        {"cp-sat": SolverCapabilities(supports_free_search=True, supports_parallel=True)},
+    )
+
+    def _fake_solve(model: str, *, solver: str, on_start: Any, **kw: Any) -> SolveResult:
+        on_start(_FakeProc())
+        return _solve_result("optimal", solver=solver)
+
+    _patch_solve(monkeypatch, _fake_solve)
+    registry = JobRegistry(max_running_jobs=4)
+    try:
+        result = _race(
+            registry,
+            models=["solve satisfy;"],
+            solvers=["cp-sat"],
+            free_search=True,
+            parallel=2,
+        )
+        assert result.solve_controls == PortfolioSolveControls(
+            free_search=True, parallel=2, all_solutions=False, num_solutions=None
+        )
+    finally:
         registry.shutdown()
 
 

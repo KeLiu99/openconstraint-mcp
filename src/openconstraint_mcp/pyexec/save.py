@@ -11,11 +11,14 @@ import hashlib
 import json
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import Any
 
 from ..childproc import ChildProcessTracker
 from ..save_target import (
+    EXPERIMENT_LOG_FILENAME,
     MANIFEST_FILENAME,
     commit_staged_dir,
+    text_sha256,
     validate_save_target,
 )
 from ..save_target import tool_version as _tool_version
@@ -23,6 +26,7 @@ from ..schemas import (
     CpsatCheckerReport,
     CpsatExpectation,
     CpsatPythonResult,
+    CpsatPythonSweepResult,
     CpsatVerificationLevel,
     SavedArtifactRole,
     SavedModelArtifact,
@@ -67,6 +71,84 @@ def _expectation_passes(
         return False, f"objective {obj} > threshold {threshold} (minimize)"
 
 
+def _validate_sweep_result_consistency(
+    sweep_result: CpsatPythonSweepResult, *, source: str, seed: int | None
+) -> None:
+    """Eagerly reject a ``sweep_result`` that cannot describe this save request.
+
+    This guards only against *accidental* mismatch (wrong script attached, a
+    stale sweep, a missing replay seed) — it is not, and cannot be, a proof
+    that ``sweep_result`` is honest. A client could construct a
+    self-consistent fake ``sweep_result`` that passes every check here; that
+    is acceptable because the save decision itself never reads
+    ``sweep_result`` — only the fresh re-run's ``run_result`` gates the save
+    (see ``save_verified_cpsat_python``'s docstring). ``checker_sha256``/
+    ``problem_sha256`` are deliberately not checked here: they are
+    informational-only provenance for the eventual log, not save gates.
+    """
+    if sweep_result.status != "winner":
+        raise ValueError(
+            "sweep_result.status must be 'winner' to attach an experiment log "
+            f"(got {sweep_result.status!r}); a no_winner sweep has nothing to attach"
+        )
+    if seed is None:
+        raise ValueError(
+            "sweep_result was supplied but seed is None; a sweep_result requires the "
+            "winning seed to be supplied so the log describes the replayed saved result"
+        )
+    if sweep_result.winner_seed != seed:
+        raise ValueError(
+            f"sweep_result.winner_seed ({sweep_result.winner_seed!r}) does not match "
+            f"the supplied seed ({seed!r})"
+        )
+    if text_sha256(source) != sweep_result.source_sha256:
+        raise ValueError(
+            "sweep_result.source_sha256 does not match the sha256 of the supplied "
+            "source: the sweep_result was attached to a different script"
+        )
+
+
+def _build_experiment_log(sweep_result: CpsatPythonSweepResult) -> dict[str, object]:
+    """Build the ``experiment-log.json`` content for a sweep_result.
+
+    Deliberately not a ``model_dump`` passthrough of ``CpsatPythonSweepResult``
+    — the log is a considered export shape, not an implementation detail of the
+    sweep schema, so it is built explicitly field by field.
+    """
+    return {
+        "managed_by": "openconstraint-mcp",
+        "tool_version": _tool_version(),
+        "created_at": datetime.now(UTC).isoformat(),
+        "exploration_type": "cpsat_python_sweep",
+        "source_sha256": sweep_result.source_sha256,
+        "checker_sha256": sweep_result.checker_sha256,
+        "problem_sha256": sweep_result.problem_sha256,
+        "objective_sense": sweep_result.objective_sense,
+        "selection_policy": sweep_result.selection_policy,
+        "winner_index": sweep_result.winner_index,
+        "winner_seed": sweep_result.winner_seed,
+        "elapsed_ms": sweep_result.elapsed_ms,
+        "per_run_timeout_ms": sweep_result.per_run_timeout_ms,
+        "distinct_accepted_objectives": sweep_result.distinct_accepted_objectives,
+        "seed_variation_hint": sweep_result.seed_variation_hint,
+        "attempts": [
+            {
+                "index": attempt.index,
+                "seed": attempt.seed,
+                "status": attempt.status,
+                "objective": attempt.objective,
+                "accepted": attempt.accepted,
+                "checker_status": attempt.checker_status,
+                "message": attempt.message,
+                "timed_out": attempt.timed_out,
+                "truncated": attempt.truncated,
+                "duration_ms": attempt.duration_ms,
+            }
+            for attempt in sweep_result.attempts
+        ],
+    }
+
+
 def _failure(
     run_result: CpsatPythonResult,
     *,
@@ -108,6 +190,7 @@ def _write_staged_artifacts(
     expectation_passed: bool | None,
     checker_report: CpsatCheckerReport | None,
     seed: int | None,
+    sweep_result: CpsatPythonSweepResult | None,
 ) -> list[SavedModelArtifact]:
     texts: list[tuple[SavedArtifactRole, str, str]] = [("model", SCRIPT_FILENAME, source)]
     if problem is not None:
@@ -122,6 +205,14 @@ def _write_staged_artifacts(
                 json.dumps(run_result.solution or {}, indent=2) + "\n",
             )
         )
+    if sweep_result is not None:
+        texts.append(
+            (
+                "experiment_log",
+                EXPERIMENT_LOG_FILENAME,
+                json.dumps(_build_experiment_log(sweep_result), indent=2) + "\n",
+            )
+        )
 
     artifacts: list[SavedModelArtifact] = []
     for role, filename, text in texts:
@@ -129,7 +220,7 @@ def _write_staged_artifacts(
         file_path.write_text(text, encoding="utf-8")
         artifacts.append(SavedModelArtifact(role=role, path=filename, sha256=_sha256_of(file_path)))
 
-    verification: dict = {
+    verification: dict[str, Any] = {
         "level": verification_level,
         "reported_status": run_result.status,
         "objective": run_result.objective,
@@ -150,6 +241,19 @@ def _write_staged_artifacts(
             "objective_sense": expectation.objective_sense,
             "objective_threshold": expectation.objective_threshold,
             "passed": expectation_passed,
+        }
+    if sweep_result is not None:
+        # Compact summary only — the full attempt table lives in experiment-log.json,
+        # not duplicated here, so the manifest stays skimmable.
+        accepted_attempt_count = sum(1 for attempt in sweep_result.attempts if attempt.accepted)
+        verification["experiment_log"] = {
+            "exploration_type": "cpsat_python_sweep",
+            "winner_index": sweep_result.winner_index,
+            "winner_seed": sweep_result.winner_seed,
+            "attempt_count": len(sweep_result.attempts),
+            "accepted_attempt_count": accepted_attempt_count,
+            "statuses_seen": sorted({attempt.status for attempt in sweep_result.attempts}),
+            "selection_policy": sweep_result.selection_policy,
         }
     if checker_report is not None:
         # Only scalar summary — no stdout/stderr/errors/details to avoid leakage.
@@ -189,6 +293,7 @@ def save_verified_cpsat_python(
     timeout_ms: int = DEFAULT_PYEXEC_TIMEOUT_MS,
     overwrite: bool = False,
     seed: int | None = None,
+    sweep_result: CpsatPythonSweepResult | None = None,
     tracker: ChildProcessTracker | None = None,
 ) -> SaveVerifiedPythonResult:
     """Re-run ``source`` and persist it when it passes all supplied save gates.
@@ -204,10 +309,21 @@ def save_verified_cpsat_python(
     seed, and the manifest records it. The save gates are UNCHANGED: the reported
     gate still requires ``optimal``/``feasible``, so a ``timeout`` sweep winner is
     NOT savable even with its seed replayed — re-run it with a larger budget first.
+
+    ``sweep_result`` is PROVENANCE ONLY, never verification evidence. It is
+    validated eagerly for self-consistency with this request (winner status,
+    matching seed, matching source hash — see ``_validate_sweep_result_consistency``)
+    but every save decision still comes from the fresh ``run_result`` above:
+    ``sweep_result.winner.status``/``.solution``/``.objective`` are never read
+    by any gate. On a successful save, ``sweep_result``'s attempt table is
+    copied into ``experiment-log.json`` as a durable record of the exploration
+    that led here; it is never written on a failed save.
     """
     validate_checker_args(checker=checker, checker_timeout_ms=checker_timeout_ms)
     if seed is not None:
         seed = validate_cpsat_random_seed(seed)
+    if sweep_result is not None:
+        _validate_sweep_result_consistency(sweep_result, source=source, seed=seed)
 
     effective_checker_timeout = effective_checker_timeout_ms(
         checker_timeout_ms=checker_timeout_ms,
@@ -293,6 +409,7 @@ def save_verified_cpsat_python(
             expectation_passed=exp_passed,
             checker_report=checker_report,
             seed=seed,
+            sweep_result=sweep_result,
         )
 
     files, _ = commit_staged_dir(target, overwrite=overwrite, write_files=_writer)

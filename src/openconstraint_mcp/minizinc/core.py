@@ -20,13 +20,14 @@ from ..proc import (
     terminate_process_tree as _terminate_process_tree,
 )
 from ..runtime import RuntimeMissingError, get_minizinc_binary, is_runtime_installed
-from ..save_target import validate_save_target
+from ..save_target import text_sha256, validate_save_target
 from ..schemas import (
     CheckerReport,
     CheckerStatus,
     CheckResult,
     CheckStatus,
     ModelInspectionResult,
+    PortfolioSolveResult,
     SaveVerifiedModelResult,
     SolutionCheck,
     SolverCapabilities,
@@ -1066,6 +1067,94 @@ def _verification_failure(solve: SolveResult, *, checker_supplied: bool) -> str 
     return None
 
 
+def _validate_portfolio_result_consistency(
+    portfolio_result: PortfolioSolveResult,
+    *,
+    model: str,
+    data: str | None,
+    solver: str,
+    random_seed: int | None,
+    free_search: bool,
+    parallel: int | None,
+    all_solutions: bool,
+    num_solutions: int | None,
+) -> None:
+    """Eagerly reject a ``portfolio_result`` that cannot describe this save request.
+
+    The MiniZinc mirror of ``pyexec.save._validate_sweep_result_consistency``:
+    this guards only against *accidental* mismatch (wrong model attached, a
+    stale portfolio, the wrong solver/seed/search configuration) — it is not,
+    and cannot be, a proof that ``portfolio_result`` is honest. A client could
+    construct a self-consistent fake ``portfolio_result`` that passes every
+    check here; that is acceptable because the save decision itself never reads
+    ``portfolio_result`` — only the fresh ``check_model``/``_run_solve`` below
+    gates the save (see ``save_verified_model``'s docstring). ``checker_sha256``
+    is deliberately not checked here: it is informational-only provenance for
+    the eventual log, never a save gate. The race's shared
+    ``solve_controls`` (``free_search``/``parallel``/``all_solutions``/
+    ``num_solutions``) must match this save's, since they change what the
+    solver searches — a mismatch means the save is not replaying the winning
+    attempt's run; ``timeout_ms`` is deliberately not compared (a budget, not
+    search configuration, and every log row already records its per-attempt
+    ``timeout_ms``).
+
+    ``winner_index`` is bounds-checked defensively against ``attempts`` before
+    indexing into it — nothing in ``PortfolioSolveResult`` guarantees that
+    invariant today (adding it there is out of scope for this task) — so a
+    malformed client-supplied result raises a clear ``ValueError`` here instead
+    of an unhandled ``IndexError``.
+    """
+    if portfolio_result.status != "winner":
+        raise ValueError(
+            "portfolio_result.status must be 'winner' to attach an experiment log "
+            f"(got {portfolio_result.status!r}); a no_winner portfolio has nothing "
+            "to attach"
+        )
+    winner_index = portfolio_result.winner_index
+    if winner_index is None or not (0 <= winner_index < len(portfolio_result.attempts)):
+        raise ValueError(
+            f"portfolio_result.winner_index ({winner_index!r}) is out of range for "
+            f"{len(portfolio_result.attempts)} attempts"
+        )
+    winning_attempt = portfolio_result.attempts[winner_index]
+    if winning_attempt.solver != solver:
+        raise ValueError(
+            "portfolio_result's winning attempt was solved with "
+            f"{winning_attempt.solver!r}, which does not match the supplied "
+            f"solver {solver!r}"
+        )
+    if winning_attempt.seed != random_seed:
+        raise ValueError(
+            f"portfolio_result's winning attempt's seed ({winning_attempt.seed!r}) "
+            f"does not match the supplied random_seed ({random_seed!r})"
+        )
+    if portfolio_result.models_sha256[winning_attempt.model_index] != text_sha256(model):
+        raise ValueError(
+            "portfolio_result.models_sha256 does not match the sha256 of the "
+            "supplied model: the portfolio_result was attached to a different model"
+        )
+    expected_data_sha256 = text_sha256(data) if data is not None else None
+    if portfolio_result.data_sha256 != expected_data_sha256:
+        raise ValueError(
+            "portfolio_result.data_sha256 does not match the sha256 of the "
+            "supplied data: the portfolio_result was attached to a different "
+            "data instance"
+        )
+    controls = portfolio_result.solve_controls
+    for name, race_value, save_value in (
+        ("free_search", controls.free_search, free_search),
+        ("parallel", controls.parallel, parallel),
+        ("all_solutions", controls.all_solutions, all_solutions),
+        ("num_solutions", controls.num_solutions, num_solutions),
+    ):
+        if race_value != save_value:
+            raise ValueError(
+                f"portfolio_result.solve_controls.{name} ({race_value!r}) does not "
+                f"match the supplied {name} ({save_value!r}): the save must replay "
+                "the winning attempt's search configuration"
+            )
+
+
 def save_verified_model(
     model: str,
     *,
@@ -1081,6 +1170,7 @@ def save_verified_model(
     all_solutions: bool = False,
     num_solutions: int | None = None,
     overwrite: bool = False,
+    portfolio_result: PortfolioSolveResult | None = None,
     tracker: ChildProcessTracker | None = None,
 ) -> SaveVerifiedModelResult:
     """Re-verify an inline model through the managed runtime, then save it.
@@ -1096,6 +1186,17 @@ def save_verified_model(
     ``status="not_verified"`` result. Nothing is ever written on a failed
     gate, and the commit itself is staged-then-swapped so a failure cannot
     leave a partial directory behind.
+
+    ``portfolio_result`` is PROVENANCE ONLY, never verification evidence. It is
+    validated eagerly for self-consistency with this request (winner status,
+    matching solver/seed, matching model/data hash, matching shared solve
+    controls — see ``_validate_portfolio_result_consistency``) but every save
+    decision still
+    comes from the fresh ``check``/``solve`` below: ``portfolio_result.winner``'s
+    status, solution, and objective are never read by any gate. On a
+    successful save, ``portfolio_result``'s attempt table is copied into
+    ``experiment-log.json`` as a durable record of the exploration that led
+    here; it is never written on a failed save.
     """
     _validate_model_and_timeout(model, timeout_ms)
     # Validates the solve controls (parallel/num_solutions ranges and the
@@ -1119,6 +1220,18 @@ def save_verified_model(
         random_seed=random_seed,
         all_solutions=all_solutions,
     )
+    if portfolio_result is not None:
+        _validate_portfolio_result_consistency(
+            portfolio_result,
+            model=model,
+            data=data,
+            solver=solver,
+            random_seed=random_seed,
+            free_search=free_search,
+            parallel=parallel,
+            all_solutions=all_solutions,
+            num_solutions=num_solutions,
+        )
     target = validate_save_target(target_dir, overwrite=overwrite)
 
     check = check_model(model, solver=solver, data=data, timeout_ms=timeout_ms, tracker=tracker)
@@ -1168,6 +1281,7 @@ def save_verified_model(
             "num_solutions": num_solutions,
         },
         overwrite=overwrite,
+        portfolio_result=portfolio_result,
     )
     message = f"Verified model saved to {target}."
     if warning is not None:

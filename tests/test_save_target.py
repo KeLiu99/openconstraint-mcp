@@ -12,6 +12,7 @@ import pytest
 from openconstraint_mcp.save_target import (
     MANIFEST_FILENAME,
     commit_staged_dir,
+    text_sha256,
     validate_save_target,
 )
 from openconstraint_mcp.schemas import SavedModelArtifact
@@ -59,6 +60,20 @@ def _writer_with_content(content: str) -> Callable[[Path], list[SavedModelArtifa
         return [artifact, manifest_artifact]
 
     return _writer
+
+
+# --- text_sha256 --------------------------------------------------------------
+
+
+def test_text_sha256_matches_hashlib_over_utf8_bytes() -> None:
+    text = "print('hello')\n"
+    assert text_sha256(text) == hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
+def test_text_sha256_does_not_normalize_line_endings() -> None:
+    # No newline normalization: "\n" and "\r\n" are distinct byte sequences and
+    # must hash differently — this hashes the string exactly as given.
+    assert text_sha256("a\nb") != text_sha256("a\r\nb")
 
 
 # --- validate_save_target ---------------------------------------------------

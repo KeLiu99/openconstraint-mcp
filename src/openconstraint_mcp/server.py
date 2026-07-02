@@ -98,6 +98,7 @@ from .schemas import (
     CpsatPythonSweepResult,
     ModelInspectionResult,
     PortfolioJobStatus,
+    PortfolioSolveResult,
     RuntimeStatus,
     SaveVerifiedModelResult,
     SaveVerifiedPythonResult,
@@ -702,6 +703,7 @@ def create_mcp_server() -> FastMCP:
         all_solutions: bool = False,
         num_solutions: int | None = None,
         overwrite: bool = False,
+        portfolio_result: PortfolioSolveResult | None = None,
         ctx: Context | None = None,
     ) -> Annotated[CallToolResult, SaveVerifiedModelResult]:
         await _status_starting(ctx, status.SAVE_STAGES)
@@ -721,6 +723,7 @@ def create_mcp_server() -> FastMCP:
                 all_solutions=all_solutions,
                 num_solutions=num_solutions,
                 overwrite=overwrite,
+                portfolio_result=portfolio_result,
                 tracker=child_tracker,
             )
         )
@@ -1048,6 +1051,7 @@ def create_mcp_server() -> FastMCP:
         timeout_ms: int = DEFAULT_PYEXEC_TIMEOUT_MS,
         overwrite: bool = False,
         seed: StrictInt | None = None,
+        sweep_result: CpsatPythonSweepResult | None = None,
         ctx: Context | None = None,
     ) -> SaveVerifiedPythonResult:
         stages = status.cpsat_save_stages(with_checker=checker is not None)
@@ -1064,6 +1068,7 @@ def create_mcp_server() -> FastMCP:
                 timeout_ms=timeout_ms,
                 overwrite=overwrite,
                 seed=seed,
+                sweep_result=sweep_result,
                 tracker=child_tracker,
             )
         )
