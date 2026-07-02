@@ -308,6 +308,12 @@ PortfolioAttemptState = Literal[
     "cancelled",
     "rejected",
 ]
+# `submitted`/`running` are the only non-terminal attempt states; everything
+# else — including `rejected`, which marks an attempt that will never run — is
+# final and never changes on a later poll.
+PORTFOLIO_ATTEMPT_TERMINAL_STATES: frozenset[PortfolioAttemptState] = frozenset(
+    {"succeeded", "timeout", "failed", "cancelled", "rejected"}
+)
 # A portfolio's overall outcome. `winner` ⇔ an attempt was selected (its winning
 # `SolveResult` is attached and `winner_index` is set); the winning result's own
 # `status` says whether the win was decisive (a proof/solution) or a best-available

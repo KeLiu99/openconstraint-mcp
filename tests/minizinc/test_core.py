@@ -12,7 +12,6 @@ import pytest
 from openconstraint_mcp.minizinc.artifacts import (
     CHECKER_FILENAME,
     DATA_FILENAME,
-    EXPERIMENT_LOG_FILENAME,
     MANIFEST_FILENAME,
     MODEL_FILENAME,
     PROBLEM_FILENAME,
@@ -38,7 +37,7 @@ from openconstraint_mcp.minizinc.core import (
     solver_supports_num_solutions,
 )
 from openconstraint_mcp.runtime import RuntimeMissingError
-from openconstraint_mcp.save_target import text_sha256
+from openconstraint_mcp.save_target import EXPERIMENT_LOG_FILENAME, text_sha256
 from openconstraint_mcp.schemas import (
     CheckResult,
     ModelInspectionResult,
@@ -2349,6 +2348,45 @@ def test_save_verified_model_with_portfolio_result_writes_experiment_log(
     assert summary["cancelled_attempt_count"] == 0
     assert summary["statuses_seen"] == ["succeeded"]
     assert summary["selection_policy"] == "first-decisive-result"
+
+
+def test_save_verified_model_portfolio_result_rejected_attempt_counts_as_terminal(
+    fake_minizinc_binary: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    # A `rejected` attempt was never admitted, so it is final — the manifest
+    # summary must count it in `terminal_attempt_count` alongside the registry's
+    # terminal states (see PORTFOLIO_ATTEMPT_TERMINAL_STATES).
+    _fake_check_then_solve(
+        monkeypatch,
+        check=FakeCompletedProcess(stdout="", stderr="", returncode=0),
+        solve=FakeCompletedProcess(stdout=STREAM_SATISFY, stderr="", returncode=0),
+    )
+    target = tmp_path / "project"
+    rejected_attempt = PortfolioAttempt(
+        index=1,
+        model_index=0,
+        solver=DEFAULT_SOLVER,
+        timeout_ms=5000,
+        state="rejected",
+    )
+    portfolio_result = PortfolioSolveResult(
+        status="winner",
+        winner_index=0,
+        winner=_portfolio_winner_solve_result(),
+        attempts=[_portfolio_attempt(), rejected_attempt],
+        elapsed_ms=150,
+        selection_policy="first-decisive-result",
+        models_sha256=[text_sha256(_SAVE_MODEL)],
+        data_sha256=None,
+        checker_sha256=None,
+    )
+
+    save_verified_model(_SAVE_MODEL, target_dir=target, portfolio_result=portfolio_result)
+
+    manifest = json.loads((target / MANIFEST_FILENAME).read_text())
+    assert manifest["verification"]["experiment_log"]["terminal_attempt_count"] == 2
 
 
 def test_save_verified_model_portfolio_result_log_hashes_match_saved_artifacts(

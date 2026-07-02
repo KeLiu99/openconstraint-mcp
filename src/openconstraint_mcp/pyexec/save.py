@@ -15,6 +15,7 @@ from typing import Any
 
 from ..childproc import ChildProcessTracker
 from ..save_target import (
+    EXPERIMENT_LOG_FILENAME,
     MANIFEST_FILENAME,
     commit_staged_dir,
     text_sha256,
@@ -46,7 +47,6 @@ SCRIPT_FILENAME: str = "solution.py"
 PROBLEM_FILENAME: str = "problem.txt"
 CHECKER_FILENAME: str = "checker.py"
 SOLUTION_FILENAME: str = "solution.json"
-EXPERIMENT_LOG_FILENAME: str = "experiment-log.json"
 
 
 def _sha256_of(path: Path) -> str:

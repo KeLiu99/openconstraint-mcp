@@ -17,6 +17,7 @@ from pathlib import Path
 from typing import Any
 
 from ..save_target import (
+    EXPERIMENT_LOG_FILENAME,
     MANIFEST_FILENAME,
     commit_staged_dir,
 )
@@ -24,6 +25,7 @@ from ..save_target import (
     tool_version as _tool_version,
 )
 from ..schemas import (
+    PORTFOLIO_ATTEMPT_TERMINAL_STATES,
     CheckResult,
     PortfolioAttempt,
     PortfolioSolveResult,
@@ -44,7 +46,6 @@ DATA_FILENAME: str = "data.dzn"
 CHECKER_FILENAME: str = "checker.mzc.mzn"
 PROBLEM_FILENAME: str = "problem.md"
 SOLVE_RESULT_FILENAME: str = "solve-result.json"
-EXPERIMENT_LOG_FILENAME: str = "experiment-log.json"
 
 
 def _winning_attempt(portfolio_result: PortfolioSolveResult) -> PortfolioAttempt:
@@ -169,7 +170,6 @@ def _write_staged_artifacts(
         # experiment-log.json, not duplicated here, so the manifest stays
         # skimmable.
         winner = _winning_attempt(portfolio_result)
-        terminal_states = {"succeeded", "timeout", "failed", "cancelled"}
         verification["experiment_log"] = {
             "exploration_type": "minizinc_portfolio",
             "winner_index": portfolio_result.winner_index,
@@ -178,7 +178,9 @@ def _write_staged_artifacts(
             "winner_model_index": winner.model_index,
             "attempt_count": len(portfolio_result.attempts),
             "terminal_attempt_count": sum(
-                1 for attempt in portfolio_result.attempts if attempt.state in terminal_states
+                1
+                for attempt in portfolio_result.attempts
+                if attempt.state in PORTFOLIO_ATTEMPT_TERMINAL_STATES
             ),
             "cancelled_attempt_count": sum(
                 1 for attempt in portfolio_result.attempts if attempt.state == "cancelled"

@@ -992,7 +992,8 @@ def test_save_with_sweep_result_writes_experiment_log(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from openconstraint_mcp.pyexec.save import EXPERIMENT_LOG_FILENAME, save_verified_cpsat_python
+    from openconstraint_mcp.pyexec.save import save_verified_cpsat_python
+    from openconstraint_mcp.save_target import EXPERIMENT_LOG_FILENAME
 
     _patch_executor(monkeypatch, _OPTIMAL_RESULT)
     target = tmp_path / "swept"
@@ -1022,7 +1023,8 @@ def test_save_with_sweep_result_log_content_matches_source_and_hashes(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from openconstraint_mcp.pyexec.save import EXPERIMENT_LOG_FILENAME, save_verified_cpsat_python
+    from openconstraint_mcp.pyexec.save import save_verified_cpsat_python
+    from openconstraint_mcp.save_target import EXPERIMENT_LOG_FILENAME
 
     _patch_executor(monkeypatch, _OPTIMAL_RESULT)
     target = tmp_path / "swept"
