@@ -42,6 +42,7 @@ from openconstraint_mcp.schemas import (
     CheckResult,
     ModelInspectionResult,
     PortfolioAttempt,
+    PortfolioSolveControls,
     PortfolioSolveResult,
     SolverCapabilities,
     SolveResult,
@@ -2275,6 +2276,13 @@ def _portfolio_attempt(
     )
 
 
+# The shared solve controls save_verified_model defaults to; a race with these
+# controls is eagerly consistent with a default save call.
+_DEFAULT_PORTFOLIO_CONTROLS = PortfolioSolveControls(
+    free_search=False, parallel=None, all_solutions=False, num_solutions=None
+)
+
+
 def _portfolio_result(
     *,
     model: str = _SAVE_MODEL,
@@ -2285,6 +2293,7 @@ def _portfolio_result(
     models_sha256: list[str] | None = None,
     data_sha256: str | None = None,
     checker_sha256: str | None = None,
+    solve_controls: PortfolioSolveControls | None = None,
 ) -> PortfolioSolveResult:
     """Build a minimal, self-consistent winning ``PortfolioSolveResult``.
 
@@ -2311,6 +2320,9 @@ def _portfolio_result(
         models_sha256=models_sha256 if models_sha256 is not None else [text_sha256(model)],
         data_sha256=data_sha256,
         checker_sha256=checker_sha256,
+        solve_controls=(
+            solve_controls if solve_controls is not None else _DEFAULT_PORTFOLIO_CONTROLS
+        ),
     )
 
 
@@ -2381,6 +2393,7 @@ def test_save_verified_model_portfolio_result_rejected_attempt_counts_as_termina
         models_sha256=[text_sha256(_SAVE_MODEL)],
         data_sha256=None,
         checker_sha256=None,
+        solve_controls=_DEFAULT_PORTFOLIO_CONTROLS,
     )
 
     save_verified_model(_SAVE_MODEL, target_dir=target, portfolio_result=portfolio_result)
@@ -2413,6 +2426,12 @@ def test_save_verified_model_portfolio_result_log_hashes_match_saved_artifacts(
     assert log["models_sha256"] == [text_sha256(_SAVE_MODEL)]
     assert log["data_sha256"] == text_sha256(data)
     assert log["checker_sha256"] == "c" * 64
+    assert log["solve_controls"] == {
+        "free_search": False,
+        "parallel": None,
+        "all_solutions": False,
+        "num_solutions": None,
+    }
     assert len(log["attempts"]) == 1
     assert log["attempts"][0] == {
         "index": 0,
@@ -2488,6 +2507,7 @@ def test_save_verified_model_portfolio_result_no_winner_raises_before_runtime_ru
         models_sha256=[text_sha256(_SAVE_MODEL)],
         data_sha256=None,
         checker_sha256=None,
+        solve_controls=_DEFAULT_PORTFOLIO_CONTROLS,
     )
 
     with pytest.raises(ValueError, match="no_winner"):
@@ -2513,6 +2533,7 @@ def test_save_verified_model_portfolio_result_winner_index_out_of_bounds_raises_
         models_sha256=[text_sha256(_SAVE_MODEL)],
         data_sha256=None,
         checker_sha256=None,
+        solve_controls=_DEFAULT_PORTFOLIO_CONTROLS,
     )
 
     with pytest.raises(ValueError, match="winner_index"):
@@ -2584,6 +2605,31 @@ def test_save_verified_model_portfolio_result_data_hash_mismatch_raises_before_r
             target_dir=tmp_path / "project",
             data="n = 3;\n",
             portfolio_result=portfolio_result,
+        )
+
+
+@pytest.mark.parametrize(
+    ("control", "race_value"),
+    [
+        ("free_search", True),
+        ("parallel", 4),
+        ("all_solutions", True),
+        ("num_solutions", 3),
+    ],
+)
+def test_save_verified_model_portfolio_result_solve_controls_mismatch_raises_before_runtime_runs(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, control: str, race_value: object
+) -> None:
+    # The race ran with a non-default shared search control, so a default save is
+    # not a replay of the winning attempt's configuration — rejected eagerly,
+    # before any subprocess (timeout_ms, a budget, is deliberately not gated).
+    _fail_if_subprocess_called(monkeypatch)
+    controls = _DEFAULT_PORTFOLIO_CONTROLS.model_copy(update={control: race_value})
+    portfolio_result = _portfolio_result(solve_controls=controls)
+
+    with pytest.raises(ValueError, match=f"solve_controls.{control}"):
+        save_verified_model(
+            _SAVE_MODEL, target_dir=tmp_path / "project", portfolio_result=portfolio_result
         )
 
 

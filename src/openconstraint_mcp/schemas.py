@@ -311,8 +311,9 @@ PortfolioAttemptState = Literal[
 # `submitted`/`running` are the only non-terminal attempt states; everything
 # else — including `rejected`, which marks an attempt that will never run — is
 # final and never changes on a later poll.
-PORTFOLIO_ATTEMPT_TERMINAL_STATES: frozenset[PortfolioAttemptState] = frozenset(
-    {"succeeded", "timeout", "failed", "cancelled", "rejected"}
+PORTFOLIO_ATTEMPT_TERMINAL_STATES: frozenset[PortfolioAttemptState] = cast(
+    "frozenset[PortfolioAttemptState]",
+    frozenset({"succeeded", "timeout", "failed", "cancelled", "rejected"}),
 )
 # A portfolio's overall outcome. `winner` ⇔ an attempt was selected (its winning
 # `SolveResult` is attached and `winner_index` is set); the winning result's own
@@ -355,6 +356,25 @@ class PortfolioAttempt(BaseModel):
     checker_status: CheckerStatus | None = None
 
 
+class PortfolioSolveControls(BaseModel):
+    """The shared solve controls every attempt in a portfolio race ran with.
+
+    Provenance, recorded at admission time like the sha256 hashes on
+    ``PortfolioSolveResult``: these four controls are applied uniformly to every
+    attempt's ``SolveRequest``, so they live once on the race result rather than
+    on each ``PortfolioAttempt`` row. A save that attaches the race as
+    ``portfolio_result`` must replay with the same values — unlike
+    ``timeout_ms``, which is a budget rather than search configuration (and is
+    already recorded per attempt), these change what the solver searches, so a
+    mismatch means the save is not replaying the winning attempt's run.
+    """
+
+    free_search: bool
+    parallel: int | None
+    all_solutions: bool
+    num_solutions: int | None
+
+
 class PortfolioSolveResult(BaseModel):
     """Outcome of a solver-portfolio race over the managed runtime.
 
@@ -383,6 +403,10 @@ class PortfolioSolveResult(BaseModel):
     on them happens here: a checker-hash mismatch between race and save is not a
     rejection, the fresh save-time checker decides, and the recorded hash only lets
     a log say which checker gated the race.
+
+    ``solve_controls`` records the shared search configuration the race ran under
+    (see ``PortfolioSolveControls``) — captured at admission time for the same
+    round-trip-trust reason as the hashes above.
     """
 
     status: PortfolioStatus
@@ -394,6 +418,7 @@ class PortfolioSolveResult(BaseModel):
     models_sha256: list[str]
     data_sha256: str | None
     checker_sha256: str | None
+    solve_controls: PortfolioSolveControls
 
     @model_validator(mode="after")
     def _winner_presence_matches_status(self) -> PortfolioSolveResult:

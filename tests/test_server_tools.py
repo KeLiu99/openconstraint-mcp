@@ -2031,7 +2031,11 @@ async def test_save_verified_minizinc_model_with_portfolio_result_writes_experim
 ) -> None:
     """A self-consistent `portfolio_result` reaches the core save and is persisted."""
     from openconstraint_mcp.save_target import text_sha256
-    from openconstraint_mcp.schemas import PortfolioAttempt, PortfolioSolveResult
+    from openconstraint_mcp.schemas import (
+        PortfolioAttempt,
+        PortfolioSolveControls,
+        PortfolioSolveResult,
+    )
 
     _fake_save_subprocess(
         monkeypatch,
@@ -2077,6 +2081,9 @@ async def test_save_verified_minizinc_model_with_portfolio_result_writes_experim
         models_sha256=[text_sha256(_SAVE_TOOL_MODEL)],
         data_sha256=None,
         checker_sha256=None,
+        solve_controls=PortfolioSolveControls(
+            free_search=False, parallel=None, all_solutions=False, num_solutions=None
+        ),
     )
 
     mcp = create_mcp_server()

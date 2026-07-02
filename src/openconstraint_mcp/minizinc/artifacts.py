@@ -86,6 +86,12 @@ def _build_experiment_log(portfolio_result: PortfolioSolveResult) -> dict[str, o
         "models_sha256": portfolio_result.models_sha256,
         "data_sha256": portfolio_result.data_sha256,
         "checker_sha256": portfolio_result.checker_sha256,
+        "solve_controls": {
+            "free_search": portfolio_result.solve_controls.free_search,
+            "parallel": portfolio_result.solve_controls.parallel,
+            "all_solutions": portfolio_result.solve_controls.all_solutions,
+            "num_solutions": portfolio_result.solve_controls.num_solutions,
+        },
         "selection_policy": portfolio_result.selection_policy,
         "winner_index": portfolio_result.winner_index,
         "winner_seed": winner.seed,

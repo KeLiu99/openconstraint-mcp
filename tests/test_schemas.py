@@ -18,6 +18,7 @@ from openconstraint_mcp.schemas import (
     CpsatStatus,
     PortfolioAttempt,
     PortfolioJobStatus,
+    PortfolioSolveControls,
     PortfolioSolveResult,
     SavedModelArtifact,
     SaveVerifiedModelResult,
@@ -542,6 +543,11 @@ def _portfolio_winner_result() -> SolveResult:
     )
 
 
+_PORTFOLIO_CONTROLS = PortfolioSolveControls(
+    free_search=False, parallel=None, all_solutions=False, num_solutions=None
+)
+
+
 def test_portfolio_attempt_round_trips() -> None:
     attempt = PortfolioAttempt(
         index=1,
@@ -613,6 +619,7 @@ def test_portfolio_solve_result_winner_with_cancelled_loser_round_trips() -> Non
         models_sha256=["m0-hash"],
         data_sha256=None,
         checker_sha256=None,
+        solve_controls=_PORTFOLIO_CONTROLS,
     )
     dumped = result.model_dump(mode="json")
     assert dumped["status"] == "winner"
@@ -660,6 +667,7 @@ def test_portfolio_solve_result_timeout_with_incumbent_is_a_winner() -> None:
         models_sha256=["m0-hash"],
         data_sha256=None,
         checker_sha256=None,
+        solve_controls=_PORTFOLIO_CONTROLS,
     )
     assert result.winner is not None
     assert result.winner.status == "timeout"
@@ -689,6 +697,7 @@ def test_portfolio_solve_result_all_failed_has_no_winner() -> None:
         models_sha256=["m0-hash"],
         data_sha256=None,
         checker_sha256=None,
+        solve_controls=_PORTFOLIO_CONTROLS,
     )
     dumped = result.model_dump(mode="json")
     assert dumped["status"] == "no_winner"
@@ -708,6 +717,7 @@ def test_portfolio_solve_result_rejects_winner_status_without_a_winner() -> None
             models_sha256=[],
             data_sha256=None,
             checker_sha256=None,
+            solve_controls=_PORTFOLIO_CONTROLS,
         )
 
 
@@ -723,6 +733,7 @@ def test_portfolio_solve_result_rejects_no_winner_carrying_a_winner() -> None:
             models_sha256=[],
             data_sha256=None,
             checker_sha256=None,
+            solve_controls=_PORTFOLIO_CONTROLS,
         )
 
 
@@ -753,6 +764,7 @@ def test_portfolio_solve_result_rejects_attempt_model_index_out_of_range() -> No
             models_sha256=["m0-hash"],
             data_sha256=None,
             checker_sha256=None,
+            solve_controls=_PORTFOLIO_CONTROLS,
         )
 
 
@@ -789,6 +801,7 @@ def _portfolio_job_result() -> PortfolioSolveResult:
         models_sha256=["m0-hash"],
         data_sha256=None,
         checker_sha256=None,
+        solve_controls=_PORTFOLIO_CONTROLS,
     )
 
 

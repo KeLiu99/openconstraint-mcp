@@ -1094,9 +1094,7 @@ def test_save_sweep_result_no_winner_raises_before_executor_runs(
     )
 
     with pytest.raises(ValueError, match="no_winner"):
-        save_verified_cpsat_python(
-            _SCRIPT, target_dir=tmp_path / "x", seed=7, sweep_result=sweep
-        )
+        save_verified_cpsat_python(_SCRIPT, target_dir=tmp_path / "x", seed=7, sweep_result=sweep)
 
     assert not calls, "executor must not be called before sweep_result validation"
 
@@ -1126,9 +1124,7 @@ def test_save_sweep_result_seed_mismatch_raises_before_executor_runs(
     sweep = _sweep_result(seed=7)
 
     with pytest.raises(ValueError, match="winner_seed"):
-        save_verified_cpsat_python(
-            _SCRIPT, target_dir=tmp_path / "x", seed=8, sweep_result=sweep
-        )
+        save_verified_cpsat_python(_SCRIPT, target_dir=tmp_path / "x", seed=8, sweep_result=sweep)
 
     assert not calls, "executor must not be called before sweep_result validation"
 
@@ -1143,9 +1139,7 @@ def test_save_sweep_result_source_hash_mismatch_raises_before_executor_runs(
     sweep = _sweep_result(seed=7, source_sha256="deadbeef" * 8)
 
     with pytest.raises(ValueError, match="source_sha256"):
-        save_verified_cpsat_python(
-            _SCRIPT, target_dir=tmp_path / "x", seed=7, sweep_result=sweep
-        )
+        save_verified_cpsat_python(_SCRIPT, target_dir=tmp_path / "x", seed=7, sweep_result=sweep)
 
     assert not calls, "executor must not be called before sweep_result validation"
 

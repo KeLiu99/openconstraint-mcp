@@ -33,6 +33,7 @@ from openconstraint_mcp.portfolio import (
 from openconstraint_mcp.save_target import text_sha256
 from openconstraint_mcp.schemas import (
     CheckerReport,
+    PortfolioSolveControls,
     PortfolioSolveResult,
     SolveJobStatus,
     SolverCapabilities,
@@ -120,6 +121,7 @@ def _race(registry: JobRegistry, **kwargs: Any) -> PortfolioSolveResult:
             admission.models_sha256,
             admission.data_sha256,
             admission.checker_sha256,
+            admission.solve_controls,
         )
         if outcome is not None:
             return outcome
@@ -193,6 +195,35 @@ def test_portfolio_attempt_surfaces_checker_status(monkeypatch: pytest.MonkeyPat
         assert result.status == "winner"
         assert result.winner_index == 0
         assert result.attempts[0].checker_status == "violation"
+    finally:
+        registry.shutdown()
+
+
+def test_portfolio_result_records_shared_solve_controls(monkeypatch: pytest.MonkeyPatch) -> None:
+    # The shared search controls every attempt ran with are provenance, captured
+    # at admission and recorded verbatim on the result (see PortfolioSolveControls).
+    _patch_capabilities(
+        monkeypatch,
+        {"cp-sat": SolverCapabilities(supports_free_search=True, supports_parallel=True)},
+    )
+
+    def _fake_solve(model: str, *, solver: str, on_start: Any, **kw: Any) -> SolveResult:
+        on_start(_FakeProc())
+        return _solve_result("optimal", solver=solver)
+
+    _patch_solve(monkeypatch, _fake_solve)
+    registry = JobRegistry(max_running_jobs=4)
+    try:
+        result = _race(
+            registry,
+            models=["solve satisfy;"],
+            solvers=["cp-sat"],
+            free_search=True,
+            parallel=2,
+        )
+        assert result.solve_controls == PortfolioSolveControls(
+            free_search=True, parallel=2, all_solutions=False, num_solutions=None
+        )
     finally:
         registry.shutdown()
 

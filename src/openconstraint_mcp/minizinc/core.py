@@ -1074,19 +1074,29 @@ def _validate_portfolio_result_consistency(
     data: str | None,
     solver: str,
     random_seed: int | None,
+    free_search: bool,
+    parallel: int | None,
+    all_solutions: bool,
+    num_solutions: int | None,
 ) -> None:
     """Eagerly reject a ``portfolio_result`` that cannot describe this save request.
 
     The MiniZinc mirror of ``pyexec.save._validate_sweep_result_consistency``:
     this guards only against *accidental* mismatch (wrong model attached, a
-    stale portfolio, the wrong solver/seed) — it is not, and cannot be, a proof
-    that ``portfolio_result`` is honest. A client could construct a
-    self-consistent fake ``portfolio_result`` that passes every check here;
-    that is acceptable because the save decision itself never reads
+    stale portfolio, the wrong solver/seed/search configuration) — it is not,
+    and cannot be, a proof that ``portfolio_result`` is honest. A client could
+    construct a self-consistent fake ``portfolio_result`` that passes every
+    check here; that is acceptable because the save decision itself never reads
     ``portfolio_result`` — only the fresh ``check_model``/``_run_solve`` below
     gates the save (see ``save_verified_model``'s docstring). ``checker_sha256``
     is deliberately not checked here: it is informational-only provenance for
-    the eventual log, never a save gate.
+    the eventual log, never a save gate. The race's shared
+    ``solve_controls`` (``free_search``/``parallel``/``all_solutions``/
+    ``num_solutions``) must match this save's, since they change what the
+    solver searches — a mismatch means the save is not replaying the winning
+    attempt's run; ``timeout_ms`` is deliberately not compared (a budget, not
+    search configuration, and every log row already records its per-attempt
+    ``timeout_ms``).
 
     ``winner_index`` is bounds-checked defensively against ``attempts`` before
     indexing into it — nothing in ``PortfolioSolveResult`` guarantees that
@@ -1130,6 +1140,19 @@ def _validate_portfolio_result_consistency(
             "supplied data: the portfolio_result was attached to a different "
             "data instance"
         )
+    controls = portfolio_result.solve_controls
+    for name, race_value, save_value in (
+        ("free_search", controls.free_search, free_search),
+        ("parallel", controls.parallel, parallel),
+        ("all_solutions", controls.all_solutions, all_solutions),
+        ("num_solutions", controls.num_solutions, num_solutions),
+    ):
+        if race_value != save_value:
+            raise ValueError(
+                f"portfolio_result.solve_controls.{name} ({race_value!r}) does not "
+                f"match the supplied {name} ({save_value!r}): the save must replay "
+                "the winning attempt's search configuration"
+            )
 
 
 def save_verified_model(
@@ -1166,8 +1189,9 @@ def save_verified_model(
 
     ``portfolio_result`` is PROVENANCE ONLY, never verification evidence. It is
     validated eagerly for self-consistency with this request (winner status,
-    matching solver/seed, matching model/data hash — see
-    ``_validate_portfolio_result_consistency``) but every save decision still
+    matching solver/seed, matching model/data hash, matching shared solve
+    controls — see ``_validate_portfolio_result_consistency``) but every save
+    decision still
     comes from the fresh ``check``/``solve`` below: ``portfolio_result.winner``'s
     status, solution, and objective are never read by any gate. On a
     successful save, ``portfolio_result``'s attempt table is copied into
@@ -1203,6 +1227,10 @@ def save_verified_model(
             data=data,
             solver=solver,
             random_seed=random_seed,
+            free_search=free_search,
+            parallel=parallel,
+            all_solutions=all_solutions,
+            num_solutions=num_solutions,
         )
     target = validate_save_target(target_dir, overwrite=overwrite)
 

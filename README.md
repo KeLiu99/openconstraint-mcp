@@ -528,9 +528,13 @@ produced solution against a checker model without changing result shape:
     check/solve/checker fresh and gates on that alone. Rejected eagerly
     (before any check/solve) unless `portfolio_result.status == "winner"`,
     the winning attempt's `solver`/`seed` match this call's
-    `solver`/`random_seed` (an unseeded winner matches an unseeded save), and
-    the winning formulation's/`data`'s hash matches `model`/`data`. A
-    `checker_sha256` mismatch is **not** rejected — the fresh checker gate
+    `solver`/`random_seed` (an unseeded winner matches an unseeded save),
+    the winning formulation's/`data`'s hash matches `model`/`data`, and the
+    race's shared `solve_controls`
+    (`free_search`/`parallel`/`all_solutions`/`num_solutions`) match this
+    call's — the save must replay the winning attempt's search configuration
+    (`timeout_ms`, a budget rather than search configuration, is not gated).
+    A `checker_sha256` mismatch is **not** rejected — the fresh checker gate
     still decides.
 
   **Verification gate.** Before anything is written, the server re-runs the
@@ -552,7 +556,7 @@ produced solution against a checker model without changing result shape:
   | `checker.mzc.mzn` | only when `checker` was passed | the checker source |
   | `problem.md` | only when `problem` was passed | the original problem text |
   | `solve-result.json` | always | the verifying `SolveResult` as JSON |
-  | `experiment-log.json` | only when `portfolio_result` was passed and the save succeeded | the portfolio's full attempt table (every model/solver/seed tried, statuses, checker verdicts) plus the winner's index/seed/solver |
+  | `experiment-log.json` | only when `portfolio_result` was passed and the save succeeded | the portfolio's full attempt table (every model/solver/seed tried, statuses, checker verdicts), the race's shared solve controls, plus the winner's index/seed/solver |
   | `.openconstraint-model.json` | always | manifest: tool version, timestamp, solver, the solve controls used, a verification summary (including a compact experiment-log summary when `portfolio_result` was supplied), and per-file sha256 hashes |
 
   **Overwrite safety (marker-gated).** A brand-new path or an existing empty
@@ -690,7 +694,10 @@ generic `solver_options`, `extra_args`, or raw MiniZinc flag passthrough.
     iff `data` was `None` — an empty-string `data` hashes distinctly from
     `null`), and `checker_sha256` (sha256 of `checker`, or `null` if none was
     supplied) content-bind the race to the exact formulations/data/checker it
-    ran. Pass this whole `PortfolioSolveResult` as `portfolio_result` to
+    ran. `solve_controls` records the shared search configuration
+    (`free_search`/`parallel`/`all_solutions`/`num_solutions`) every attempt
+    ran with, captured at admission time like the hashes. Pass this whole
+    `PortfolioSolveResult` as `portfolio_result` to
     `save_verified_minizinc_model` (below) to persist the race's full attempt
     table alongside a saved model.
 

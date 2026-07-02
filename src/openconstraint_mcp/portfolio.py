@@ -41,6 +41,7 @@ from .schemas import (
     JobState,
     PortfolioAttempt,
     PortfolioAttemptState,
+    PortfolioSolveControls,
     PortfolioSolveResult,
     PortfolioStatus,
     SolveJobStatus,
@@ -71,14 +72,14 @@ _JOB_TO_ATTEMPT_STATE: dict[JobState, PortfolioAttemptState] = {
 
 
 class _PortfolioAdmission(NamedTuple):
-    """``_admit_portfolio``'s return: the admitted plan plus its provenance hashes.
+    """``_admit_portfolio``'s return: the admitted plan plus its provenance.
 
-    ``models_sha256``/``data_sha256``/``checker_sha256`` are computed here — while
-    the caller's ``models``/``data``/``checker`` strings are still in scope — because
-    by the time ``_select_portfolio_outcome``/``_build_portfolio_result`` run
-    (potentially on a much later poll, via the background ``PortfolioJobRegistry``)
-    those original strings are out of scope. They must be threaded through
-    unchanged to the eventual ``PortfolioSolveResult``.
+    ``models_sha256``/``data_sha256``/``checker_sha256``/``solve_controls`` are
+    captured here — while the caller's original request values are still in
+    scope — because by the time ``_select_portfolio_outcome``/
+    ``_build_portfolio_result`` run (potentially on a much later poll, via the
+    background ``PortfolioJobRegistry``) those originals are out of scope. They
+    must be threaded through unchanged to the eventual ``PortfolioSolveResult``.
     """
 
     start: float
@@ -87,6 +88,7 @@ class _PortfolioAdmission(NamedTuple):
     models_sha256: list[str]
     data_sha256: str | None
     checker_sha256: str | None
+    solve_controls: PortfolioSolveControls
 
 
 def _admit_portfolio(
@@ -172,6 +174,12 @@ def _admit_portfolio(
         models_sha256=models_sha256,
         data_sha256=data_sha256,
         checker_sha256=checker_sha256,
+        solve_controls=PortfolioSolveControls(
+            free_search=free_search,
+            parallel=parallel,
+            all_solutions=all_solutions,
+            num_solutions=num_solutions,
+        ),
     )
 
 
@@ -203,6 +211,7 @@ def _select_portfolio_outcome(
     models_sha256: list[str],
     data_sha256: str | None,
     checker_sha256: str | None,
+    solve_controls: PortfolioSolveControls,
 ) -> PortfolioSolveResult | None:
     """One non-blocking selection pass over the admitted attempts (collect-on-poll).
 
@@ -213,9 +222,9 @@ def _select_portfolio_outcome(
     if every attempt is terminal without a decisive verdict, returns the
     best-available (or ``no_winner``) result. This is the background portfolio job's
     whole engine — driven by client polling, it needs no worker thread of its own.
-    ``models_sha256``/``data_sha256``/``checker_sha256`` are the provenance hashes
-    ``_admit_portfolio`` computed at admission time; they are threaded through
-    unchanged to ``_build_portfolio_result``.
+    ``models_sha256``/``data_sha256``/``checker_sha256``/``solve_controls`` are the
+    provenance ``_admit_portfolio`` captured at admission time; they are threaded
+    through unchanged to ``_build_portfolio_result``.
     """
     statuses = [registry.get(job_id) for job_id in job_ids]
     winner_index = _first_decisive_index(statuses)
@@ -227,7 +236,14 @@ def _select_portfolio_outcome(
                 registry.cancel(job_id)
         statuses = _await_all_terminal(registry, job_ids)
     return _build_portfolio_result(
-        plan, statuses, winner_index, start, models_sha256, data_sha256, checker_sha256
+        plan,
+        statuses,
+        winner_index,
+        start,
+        models_sha256,
+        data_sha256,
+        checker_sha256,
+        solve_controls,
     )
 
 
@@ -239,6 +255,7 @@ def _build_portfolio_result(
     models_sha256: list[str],
     data_sha256: str | None,
     checker_sha256: str | None,
+    solve_controls: PortfolioSolveControls,
 ) -> PortfolioSolveResult:
     """Build the winner-led ``PortfolioSolveResult`` from a terminal attempt snapshot.
 
@@ -246,8 +263,9 @@ def _build_portfolio_result(
     decisive ``winner_index``, falls back to the best available terminal attempt (or
     ``no_winner`` when none produced a usable result); the model enforces
     ``winner present ⇔ status=="winner"``. ``models_sha256``/``data_sha256``/
-    ``checker_sha256`` are recorded on the result verbatim — provenance of what the
-    race actually ran, not a race-time decision (see ``PortfolioSolveResult``).
+    ``checker_sha256``/``solve_controls`` are recorded on the result verbatim —
+    provenance of what the race actually ran, not a race-time decision (see
+    ``PortfolioSolveResult``).
     """
     if winner_index is None:
         winner_index = _best_available_index(statuses)
@@ -270,6 +288,7 @@ def _build_portfolio_result(
         models_sha256=models_sha256,
         data_sha256=data_sha256,
         checker_sha256=checker_sha256,
+        solve_controls=solve_controls,
     )
 
 
