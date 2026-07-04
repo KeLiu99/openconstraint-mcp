@@ -908,9 +908,7 @@ def test_normalize_objective_accepts_huge_int_without_overflow() -> None:
 # --- internal env overlay ----------------------------------------------------
 
 
-def _capture_popen_env(
-    source: str, *, env: dict[str, str | None] | None
-) -> dict[str, str] | None:
+def _capture_popen_env(source: str, *, env: dict[str, str | None] | None) -> dict[str, str] | None:
     """Run run_cpsat_python with a fake Popen and return the env kwarg it received."""
     captured: dict[str, Any] = {}
 

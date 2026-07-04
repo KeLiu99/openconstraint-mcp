@@ -232,9 +232,7 @@ def _write_staged_artifacts(
         # The winning attempt's replay config, persisted for auditability and
         # best-effort replay — never a non-winning attempt's config (see
         # _build_experiment_log).
-        texts.append(
-            ("replay_config", REPLAY_CONFIG_FILENAME, json.dumps(config, indent=2) + "\n")
-        )
+        texts.append(("replay_config", REPLAY_CONFIG_FILENAME, json.dumps(config, indent=2) + "\n"))
     if experiment_result is not None:
         texts.append(
             (

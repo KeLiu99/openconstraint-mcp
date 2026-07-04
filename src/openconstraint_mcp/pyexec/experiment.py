@@ -93,9 +93,7 @@ _STATUS_RANK: dict[str, int] = {"optimal": 0, "feasible": 1, "timeout": 2}
 _OPTIMIZATION_SELECTION_POLICY: CpsatExperimentSelectionPolicy = (
     "best_accepted_incumbent_objective_then_status_then_attempt_order"
 )
-_FEASIBILITY_SELECTION_POLICY: CpsatExperimentSelectionPolicy = (
-    "accepted_status_then_attempt_order"
-)
+_FEASIBILITY_SELECTION_POLICY: CpsatExperimentSelectionPolicy = "accepted_status_then_attempt_order"
 
 
 def _max_parallel_attempts_cap() -> int:
