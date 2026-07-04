@@ -5,6 +5,7 @@ import pytest
 from openconstraint_mcp.protocol_text.descriptions import (
     LIST_AVAILABLE_SOLVERS_DESCRIPTION,
     MCP_SERVER_INSTRUCTIONS,
+    RUN_CPSAT_PYTHON_DESCRIPTION,
     SOLVE_MINIZINC_FILES_DESCRIPTION,
     SOLVE_MINIZINC_MODEL_DESCRIPTION,
 )
@@ -65,6 +66,14 @@ def test_list_available_solvers_description_notes_complete_inventory_presentatio
     text = LIST_AVAILABLE_SOLVERS_DESCRIPTION
     assert "inventory" in text.lower()
     assert "not printed by default" in text
+
+
+def test_solve_minizinc_model_description_nudges_portfolio_for_hard_instances() -> None:
+    assert "submit_portfolio_job" in SOLVE_MINIZINC_MODEL_DESCRIPTION
+
+
+def test_run_cpsat_python_description_nudges_seed_sweep_for_hard_instances() -> None:
+    assert "run_cpsat_python_sweep" in RUN_CPSAT_PYTHON_DESCRIPTION
 
 
 SAMPLE_PROBLEM = (
@@ -444,6 +453,33 @@ async def test_solve_constraint_problem_prompt_requires_item_table_when_applicab
 
 
 @pytest.mark.asyncio
+async def test_solve_constraint_problem_prompt_step6_broadens_hard_problem_exploration() -> None:
+    text = await _get_prompt_text("solve_constraint_problem", {"problem": SAMPLE_PROBLEM})
+
+    # Step 6 must frame exploration around the general "hard problem, best
+    # approach not knowable in advance" case, not just "one solver too slow",
+    # and must name the concrete portfolio knobs a client can vary.
+    for needle in (
+        "submit_portfolio_job",
+        "get_portfolio_job",
+        "symmetry-breaking",
+        "seed_count",
+        "free_search",
+        "per_attempt_timeout_ms",
+    ):
+        assert needle in text, f"step 6 exploration guidance should mention {needle}"
+
+
+@pytest.mark.asyncio
+async def test_solve_constraint_problem_prompt_step6_nudges_cross_backend() -> None:
+    text = await _get_prompt_text("solve_constraint_problem", {"problem": SAMPLE_PROBLEM})
+
+    # Step 6 should point at the CP-SAT Python path for an especially hard
+    # instance, since neither backend dominates for every problem shape.
+    assert "run_cpsat_python_sweep" in text
+
+
+@pytest.mark.asyncio
 async def test_solve_constraint_problem_prompt_offers_save_only_on_user_request() -> None:
     text = await _get_prompt_text("solve_constraint_problem", {"problem": SAMPLE_PROBLEM})
 
@@ -462,6 +498,16 @@ async def test_solve_constraint_problem_prompt_save_step_follows_result_presenta
     # The save mention lives after the result-presentation step, so it cannot
     # read as a pre-solve requirement.
     assert text.index("save_verified_minizinc_model") > text.index("Present the result")
+
+
+@pytest.mark.asyncio
+async def test_solve_constraint_problem_prompt_save_step_mentions_portfolio_result() -> None:
+    text = await _get_prompt_text("solve_constraint_problem", {"problem": SAMPLE_PROBLEM})
+
+    # The portfolio_result mention belongs in the save step, after the save
+    # tool itself is introduced, not earlier as a pre-solve requirement.
+    assert "portfolio_result" in text
+    assert text.index("portfolio_result") > text.index("save_verified_minizinc_model")
 
 
 @pytest.mark.asyncio
@@ -510,6 +556,16 @@ async def test_solve_cpsat_python_prompt_teaches_seed_protocol() -> None:
     assert "42" in text
     assert "num_workers = 1" in text
     assert "run_cpsat_python_sweep" in text
+
+
+@pytest.mark.asyncio
+async def test_solve_cpsat_python_prompt_nudges_cross_backend() -> None:
+    text = await _get_prompt_text("solve_cpsat_python", {"problem": SAMPLE_PROBLEM})
+
+    # The seed-sweep step should point at the MiniZinc portfolio path for an
+    # especially hard instance, since neither backend dominates for every
+    # problem shape.
+    assert "submit_portfolio_job" in text
 
 
 @pytest.mark.asyncio
@@ -600,6 +656,16 @@ async def test_solve_cpsat_python_prompt_save_step_gated_on_user_request() -> No
     save_idx = text.index("save_verified_cpsat_python")
     run_idx = text.index("run_cpsat_python")
     assert save_idx > run_idx, "save step must appear after the run step"
+
+
+@pytest.mark.asyncio
+async def test_solve_cpsat_python_prompt_save_step_mentions_sweep_result() -> None:
+    text = await _get_prompt_text("solve_cpsat_python", {"problem": SAMPLE_PROBLEM})
+
+    # The sweep_result mention belongs in the save step, after the save tool
+    # itself is introduced.
+    assert "sweep_result" in text
+    assert text.index("sweep_result") > text.index("save_verified_cpsat_python")
 
 
 def test_solve_descriptions_state_checker_suffix_and_nested_report() -> None:

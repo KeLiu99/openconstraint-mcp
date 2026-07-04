@@ -520,6 +520,22 @@ produced solution against a checker model without changing result shape:
     the manifest so the recorded verification is reproducible.
   - `overwrite: bool = False` — required to replace a previous save (see the
     overwrite gate below).
+  - `portfolio_result: PortfolioSolveResult | None = None` — optional.
+    Attaches a MiniZinc solver-portfolio race's full attempt table (from
+    `submit_portfolio_job`/`get_portfolio_job`, see
+    [Solver portfolios](#solver-portfolios)) as **provenance only** — it is
+    never used as verification evidence; the save still re-runs
+    check/solve/checker fresh and gates on that alone. Rejected eagerly
+    (before any check/solve) unless `portfolio_result.status == "winner"`,
+    the winning attempt's `solver`/`seed` match this call's
+    `solver`/`random_seed` (an unseeded winner matches an unseeded save),
+    the winning formulation's/`data`'s hash matches `model`/`data`, and the
+    race's shared `solve_controls`
+    (`free_search`/`parallel`/`all_solutions`/`num_solutions`) match this
+    call's — the save must replay the winning attempt's search configuration
+    (`timeout_ms`, a budget rather than search configuration, is not gated).
+    A `checker_sha256` mismatch is **not** rejected — the fresh checker gate
+    still decides.
 
   **Verification gate.** Before anything is written, the server re-runs the
   compile check and then the solve on the artifacts exactly as supplied. The
@@ -540,7 +556,8 @@ produced solution against a checker model without changing result shape:
   | `checker.mzc.mzn` | only when `checker` was passed | the checker source |
   | `problem.md` | only when `problem` was passed | the original problem text |
   | `solve-result.json` | always | the verifying `SolveResult` as JSON |
-  | `.openconstraint-model.json` | always | manifest: tool version, timestamp, solver, the solve controls used, a verification summary, and per-file sha256 hashes |
+  | `experiment-log.json` | only when `portfolio_result` was passed and the save succeeded | the portfolio's full attempt table (every model/solver/seed tried, statuses, checker verdicts), the race's shared solve controls, plus the winner's index/seed/solver |
+  | `.openconstraint-model.json` | always | manifest: tool version, timestamp, solver, the solve controls used, a verification summary (including a compact experiment-log summary when `portfolio_result` was supplied; `statuses_seen` lists MiniZinc result statuses, while `attempt_states_seen` lists portfolio lifecycle states), and per-file sha256 hashes |
 
   **Overwrite safety (marker-gated).** A brand-new path or an existing empty
   directory is written directly. A non-empty directory is replaced only when
@@ -666,12 +683,23 @@ generic `solver_options`, `extra_args`, or raw MiniZinc flag passthrough.
 - **Result.** A `PortfolioSolveResult`: `status` (`"winner"`/`"no_winner"`),
   `winner_index`, the winning `SolveResult` in `winner` (its own `status` tells
   you whether the win was decisive), `attempts` (every attempt's `model_index`,
-  solver, seed, final state, result status, objective, and message — including
-  the cancelled losers, so you need not poll child jobs), `elapsed_ms`, and
-  `selection_policy`. The winning formulation is
+  solver, seed, final state, result status, objective, `checker_status`, and
+  message — including the cancelled losers, so you need not poll child jobs),
+  `elapsed_ms`, and `selection_policy`. The winning formulation is
   `models[attempts[winner_index].model_index]`. Present it like a single
   `solve_minizinc_model`: lead with the winner's model/solver/seed/status and then
   the winning solve.
+  - **Provenance hashes.** `models_sha256` (one sha256 digest per formulation,
+    index-aligned with `models`), `data_sha256` (sha256 of `data`, or `null`
+    iff `data` was `None` — an empty-string `data` hashes distinctly from
+    `null`), and `checker_sha256` (sha256 of `checker`, or `null` if none was
+    supplied) content-bind the race to the exact formulations/data/checker it
+    ran. `solve_controls` records the shared search configuration
+    (`free_search`/`parallel`/`all_solutions`/`num_solutions`) every attempt
+    ran with, captured at admission time like the hashes. Pass this whole
+    `PortfolioSolveResult` as `portfolio_result` to
+    `save_verified_minizinc_model` (below) to persist the race's full attempt
+    table alongside a saved model.
 
 ### Background portfolio jobs
 
@@ -929,10 +957,17 @@ server runs it in a **local child process**.
   - Returns `CpsatPythonSweepResult` with `status` (`"winner"`/`"no_winner"`),
     `winner_index`/`winner_seed`/`winner` (a full `CpsatPythonResult`, all
     present iff `"winner"`), `attempts`, `elapsed_ms`, `objective_sense`,
-    `selection_policy`, `distinct_accepted_objectives`, and
+    `selection_policy`, `distinct_accepted_objectives`,
     `seed_variation_hint` (nullable; set only when accepted attempts that ran to
     completion — `optimal`/`feasible` — repeat the same objective and solution,
-    as a conditional prompt to verify the script's seed handling).
+    as a conditional prompt to verify the script's seed handling),
+    `source_sha256` (sha256 of the swept `source`), `per_run_timeout_ms` (the
+    per-attempt budget), and optional default-null
+    `checker_sha256`/`problem_sha256` (sha256 of `checker`/`problem` when
+    supplied, else `null`). Pass this whole
+    `CpsatPythonSweepResult` as `sweep_result` to `save_verified_cpsat_python`
+    (below) to persist the sweep's full attempt table alongside a saved
+    script.
   - **A `timeout` winner is reportable but not savable:** it fails
     `save_verified_cpsat_python`'s reported gate. Re-run the winning seed with a
     larger `per_run_timeout_ms` until it reports `optimal`/`feasible`, then save
@@ -964,9 +999,12 @@ server runs it in a **local child process**.
   `target_dir` must be an explicit absolute local path; the server never
   opens a file dialog. Fixed filenames: `solution.py` (always); `problem.txt`
   when `problem` is supplied; `checker.py` and `solution.json` when a checker
-  is supplied; `.openconstraint-model.json` (always, the manifest). Overwrite
-  is marker-gated (prior-save manifest required, `overwrite=true` set, no
-  untracked files). Returns
+  is supplied; `experiment-log.json` when `sweep_result` was passed and the
+  save succeeded (the sweep's full attempt table); `.openconstraint-model.json`
+  (always, the manifest — includes a compact experiment-log summary when
+  present; `statuses_seen` lists CP-SAT result statuses). Overwrite is
+  marker-gated (prior-save manifest required,
+  `overwrite=true` set, no untracked files). Returns
   `SaveVerifiedPythonResult` with:
   - `saved: bool` — computed from whether all gates passed
   - `verification_level: "none" | "reported" | "expectation" | "checked"` —
@@ -988,6 +1026,15 @@ server runs it in a **local child process**.
   `solution.py` is byte-for-byte the script and carries only its own seed
   fallback, so to reproduce a seeded save by hand you must set
   `OPENCONSTRAINT_MCP_CPSAT_SEED` to the recorded seed.
+
+  Pass `sweep_result` (the `CpsatPythonSweepResult` from
+  `run_cpsat_python_sweep`) as **provenance only** — never verification
+  evidence; the save still re-runs `source` fresh and gates on that alone.
+  Rejected eagerly (before any run) unless `sweep_result.status == "winner"`,
+  `seed` is supplied, `sweep_result.winner_seed == seed`, and
+  `sweep_result.source_sha256` matches the sha256 of `source`. A
+  `checker_sha256`/`problem_sha256` mismatch is **not** rejected — it only
+  affects what the persisted log records.
 
 ### Background CP-SAT jobs
 

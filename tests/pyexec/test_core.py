@@ -947,9 +947,7 @@ def test_run_cpsat_python_file_forwards_env_overlay(tmp_path: Path) -> None:
     script = tmp_path / "model.py"
     script.write_text("print('ignored by mock')", encoding="utf-8")
 
-    _, captured = _run_file_with_mocked_proc(
-        script, env={"OPENCONSTRAINT_MCP_CPSAT_SEED": "7"}
-    )
+    _, captured = _run_file_with_mocked_proc(script, env={"OPENCONSTRAINT_MCP_CPSAT_SEED": "7"})
 
     assert captured["env"]["OPENCONSTRAINT_MCP_CPSAT_SEED"] == "7"
     assert "PATH" in captured["env"]

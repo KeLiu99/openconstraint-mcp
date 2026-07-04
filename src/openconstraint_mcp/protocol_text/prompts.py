@@ -87,12 +87,24 @@ Otherwise:
 
 6. On a syntax, type, or solver error, revise and retry — but only through
    `solve_minizinc_model` when that tool is actually available. Never
-   fabricate solver output. A single-solver `solve_minizinc_model` is the
-   default first attempt; only when one solver is too slow or the best choice
-   is genuinely unclear, you may race several by submitting a background
-   portfolio with `submit_portfolio_job` (a local race over the managed
-   runtime that returns the winning solver's result) on a cleanly-checked
-   model, then poll `get_portfolio_job` for the winner.
+   fabricate solver output. For a HARD problem — `status` comes back
+   `unknown`, the solve times out, or the best modeling/solving choice is
+   genuinely unclear — the best approach is rarely knowable in advance, so
+   explore rather than settling for one run. On a cleanly-checked model,
+   race alternatives with a background portfolio via `submit_portfolio_job`
+   (poll `get_portfolio_job` for the winner and the full per-attempt table),
+   trying any of: alternative model formulations (`models`, a list — e.g. a
+   different variable encoding, added redundant constraints, or
+   symmetry-breaking constraints), different `solvers`, different seeds
+   (`seed_count` or an explicit `seeds` list), and search controls
+   (`free_search`, `parallel`, and each attempt's `per_attempt_timeout_ms`
+   budget).
+   For an especially hard instance, also consider the OR-Tools CP-SAT
+   Python path (`solve_cpsat_python` prompt, `run_cpsat_python`/
+   `run_cpsat_python_sweep`) for the same problem — neither backend
+   dominates for every problem shape, and the server's structured results,
+   checkers, and durable experiment logs from both let you compare outcomes
+   before committing to one.
 
 7. Present the result as a short, structured summary; do not dump the raw
    `SolveResult`. Lead with the result itself; do not narrate the prompt,
@@ -149,7 +161,13 @@ Otherwise:
    your client's own file picker); the server opens no file dialog, and it
    re-verifies the artifacts through the managed runtime before writing
    anything. Replacing a previously saved directory needs `overwrite=true`,
-   and only a directory written by a prior save can be replaced.
+   and only a directory written by a prior save can be replaced. If you
+   explored via `submit_portfolio_job`, also pass that job's
+   `PortfolioSolveResult` as `portfolio_result` so the winning race's full
+   attempt table (every formulation/solver/seed tried, and why) is
+   persisted alongside the saved model as `experiment-log.json` — the
+   server still re-verifies independently and never trusts the attached
+   result as proof.
 
 Boundaries:
 - You draft the MiniZinc model; openconstraint-mcp does not.
@@ -281,6 +299,13 @@ User problem:
    - A `timeout` winner is reportable but NOT directly savable (see step 6):
      re-run its seed with a larger `per_run_timeout_ms` until it reports
      optimal/feasible, then save.
+   - For an especially hard instance where CP-SAT's own quality is
+     unclear, also consider the MiniZinc portfolio path
+     (`solve_constraint_problem` prompt, `submit_portfolio_job`) for the
+     same problem, potentially trying multiple formulations and solvers —
+     neither backend dominates for every problem shape, and the server's
+     structured results, checkers, and durable experiment logs from both
+     let you compare outcomes before committing to one.
 
 6. Persist only if the user asks. Call `save_verified_cpsat_python` with
    the script as `source`, the original problem text as `problem`, and the
@@ -294,6 +319,10 @@ User problem:
    gate — re-run it to optimal/feasible first. A saved seeded model reproduces
    by hand only when you set `OPENCONSTRAINT_MCP_CPSAT_SEED` to the recorded
    seed; the saved `solution.py` carries only its own seed fallback.
+   You may also pass the sweep's `CpsatPythonSweepResult` as `sweep_result`
+   so the full per-seed attempt table is persisted alongside the saved
+   script as `experiment-log.json` — the server still re-runs and gates
+   independently; it never trusts the attached result as proof.
 
    Save gate options (in order of strictness):
    a. Reported gate (always applied): `status` in `optimal`/`feasible` and

@@ -308,6 +308,13 @@ PortfolioAttemptState = Literal[
     "cancelled",
     "rejected",
 ]
+# `submitted`/`running` are the only non-terminal attempt states; everything
+# else — including `rejected`, which marks an attempt that will never run — is
+# final and never changes on a later poll.
+PORTFOLIO_ATTEMPT_TERMINAL_STATES: frozenset[PortfolioAttemptState] = cast(
+    "frozenset[PortfolioAttemptState]",
+    frozenset({"succeeded", "timeout", "failed", "cancelled", "rejected"}),
+)
 # A portfolio's overall outcome. `winner` ⇔ an attempt was selected (its winning
 # `SolveResult` is attached and `winner_index` is set); the winning result's own
 # `status` says whether the win was decisive (a proof/solution) or a best-available
@@ -328,6 +335,10 @@ class PortfolioAttempt(BaseModel):
     ``SolveResult`` was produced — the `result_status` and `objective`. `message`
     carries failure/cancel detail; `job_id` is the registry handle (``None`` when
     not admitted). The winning formulation is `models[attempts[winner_index].model_index]`.
+    `checker_status` is the attempt's own checker verdict (``None`` when no checker
+    was supplied to the race, or the attempt never produced a result) — purely
+    observational: it does not affect winner selection, so a checker-violated
+    attempt can still win the race.
     """
 
     index: int
@@ -342,6 +353,26 @@ class PortfolioAttempt(BaseModel):
     objective: int | float | None = None
     elapsed_ms: int | None = None
     message: str | None = None
+    checker_status: CheckerStatus | None = None
+
+
+class PortfolioSolveControls(BaseModel):
+    """The shared solve controls every attempt in a portfolio race ran with.
+
+    Provenance, recorded at admission time like the sha256 hashes on
+    ``PortfolioSolveResult``: these four controls are applied uniformly to every
+    attempt's ``SolveRequest``, so they live once on the race result rather than
+    on each ``PortfolioAttempt`` row. A save that attaches the race as
+    ``portfolio_result`` must replay with the same values — unlike
+    ``timeout_ms``, which is a budget rather than search configuration (and is
+    already recorded per attempt), these change what the solver searches, so a
+    mismatch means the save is not replaying the winning attempt's run.
+    """
+
+    free_search: bool
+    parallel: int | None
+    all_solutions: bool
+    num_solutions: int | None
 
 
 class PortfolioSolveResult(BaseModel):
@@ -355,6 +386,27 @@ class PortfolioSolveResult(BaseModel):
     final state (the winner plus the cancelled/terminal losers) so the loser fates
     are visible without polling child jobs. `selection_policy` documents how the
     winner was chosen (e.g. ``"first-decisive-result"``).
+
+    ``models_sha256``/``data_sha256``/``checker_sha256`` are provenance: sha256 hex
+    digests of the exact ``models``/``data``/``checker`` text the race was admitted
+    with, computed once at admission time (before any attempt ran) rather than at
+    save time, since a later save-time input is untrusted client round-trip data —
+    the binding must reflect what actually ran. ``models_sha256`` is one digest per
+    formulation, index-aligned with the caller's ``models`` list (so
+    ``models_sha256[attempt.model_index]`` names the exact text an attempt ran);
+    ``data_sha256``/``checker_sha256`` are ``None`` iff the race ran with no
+    ``data``/``checker`` supplied (an empty-string input, if ever accepted, still
+    hashes to ``sha256("")`` — never ``None``). They let a later save-with-result
+    flow verify the race ran against the exact same text it is being asked to save,
+    and let a persisted experiment log stay self-describing after it leaves the
+    original request. This task only computes and records these fields — no gating
+    on them happens here: a checker-hash mismatch between race and save is not a
+    rejection, the fresh save-time checker decides, and the recorded hash only lets
+    a log say which checker gated the race.
+
+    ``solve_controls`` records the shared search configuration the race ran under
+    (see ``PortfolioSolveControls``) — captured at admission time for the same
+    round-trip-trust reason as the hashes above.
     """
 
     status: PortfolioStatus
@@ -363,6 +415,10 @@ class PortfolioSolveResult(BaseModel):
     attempts: list[PortfolioAttempt] = Field(default_factory=list)
     elapsed_ms: int
     selection_policy: str
+    models_sha256: list[str]
+    data_sha256: str | None
+    checker_sha256: str | None
+    solve_controls: PortfolioSolveControls
 
     @model_validator(mode="after")
     def _winner_presence_matches_status(self) -> PortfolioSolveResult:
@@ -374,6 +430,17 @@ class PortfolioSolveResult(BaseModel):
                 "PortfolioSolveResult requires winner, winner_index, and "
                 "status=='winner' to agree (all present together or all absent)"
             )
+        return self
+
+    @model_validator(mode="after")
+    def _attempt_model_indices_in_range(self) -> PortfolioSolveResult:
+        for attempt in self.attempts:
+            if not (0 <= attempt.model_index < len(self.models_sha256)):
+                raise ValueError(
+                    f"attempt index={attempt.index} has model_index="
+                    f"{attempt.model_index}, out of range for {len(self.models_sha256)} "
+                    "models_sha256 entries"
+                )
         return self
 
 
@@ -456,7 +523,14 @@ SaveStatus = Literal[
 # solve-result.json, .openconstraint-model.json), so the role — not the
 # filename — is the stable key clients branch on.
 SavedArtifactRole = Literal[
-    "model", "data", "checker", "problem", "solve_result", "solution", "manifest"
+    "model",
+    "data",
+    "checker",
+    "problem",
+    "solve_result",
+    "solution",
+    "manifest",
+    "experiment_log",
 ]
 
 
@@ -782,6 +856,16 @@ class CpsatPythonSweepResult(BaseModel):
     repeated accepted incumbents that ran to completion (``optimal``/``feasible``)
     with the same objective and solution; it is a conditional prompt to verify seed
     handling, not a proof that the script ignored the seed.
+
+    ``source_sha256``/``checker_sha256``/``problem_sha256`` are provenance: the
+    sha256 hex digest of the exact ``source``/``checker``/``problem`` text the
+    sweep ran against (``None`` for ``checker``/``problem`` when that input was not
+    supplied). They let a later "save with sweep_result" flow verify the sweep ran
+    against the exact same script/checker/problem it is being asked to save, and
+    let a persisted experiment log stay self-describing after it leaves the
+    original request. ``per_run_timeout_ms`` records the per-attempt timeout budget
+    the sweep ran under. This task only computes and records these fields — no
+    gating on them happens here.
     """
 
     status: CpsatSweepStatus
@@ -794,6 +878,10 @@ class CpsatPythonSweepResult(BaseModel):
     selection_policy: CpsatSweepSelectionPolicy
     distinct_accepted_objectives: int
     seed_variation_hint: str | None = None
+    source_sha256: str
+    per_run_timeout_ms: int
+    checker_sha256: str | None = None
+    problem_sha256: str | None = None
 
     @model_validator(mode="after")
     def _winner_presence_matches_status(self) -> CpsatPythonSweepResult:

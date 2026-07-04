@@ -1948,6 +1948,7 @@ async def test_save_verified_minizinc_model_is_listed_with_expected_schema() -> 
         "all_solutions",
         "num_solutions",
         "overwrite",
+        "portfolio_result",
     } <= properties
     # The trailing Context parameter is server plumbing, never client schema.
     assert "ctx" not in properties
@@ -2020,6 +2021,85 @@ async def test_save_verified_minizinc_model_not_verified_is_normal_result(
     assert structured["files"] == []
     assert "nothing was written" in _content_text(result)
     assert not target.exists()
+
+
+@pytest.mark.asyncio
+async def test_save_verified_minizinc_model_with_portfolio_result_writes_experiment_log(
+    fake_minizinc_binary: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A self-consistent `portfolio_result` reaches the core save and is persisted."""
+    from openconstraint_mcp.save_target import text_sha256
+    from openconstraint_mcp.schemas import (
+        PortfolioAttempt,
+        PortfolioSolveControls,
+        PortfolioSolveResult,
+    )
+
+    _fake_save_subprocess(
+        monkeypatch,
+        check=FakeCompletedProcess(stdout="", stderr="", returncode=0),
+        solve=FakeCompletedProcess(
+            stdout=stream(solution_obj("x=3\n", {"x": 3})), stderr="", returncode=0
+        ),
+    )
+    target = tmp_path / "saved-project-portfolio"
+    winner_solve = SolveResult(
+        status="satisfied",
+        solver="cp-sat",
+        return_code=0,
+        timed_out=False,
+        stdout="x = 3;\n",
+        stderr="",
+        elapsed_ms=5,
+        solution={"x": 3},
+        solutions=[{"x": 3}],
+        objective=None,
+    )
+    portfolio_result = PortfolioSolveResult(
+        status="winner",
+        winner_index=0,
+        winner=winner_solve,
+        attempts=[
+            PortfolioAttempt(
+                index=0,
+                model_index=0,
+                solver="cp-sat",
+                seed=None,
+                timeout_ms=5000,
+                state="succeeded",
+                job_id="job-0",
+                job_state="succeeded",
+                result_status="satisfied",
+                objective=None,
+                elapsed_ms=5,
+            )
+        ],
+        elapsed_ms=10,
+        selection_policy="first-decisive-result",
+        models_sha256=[text_sha256(_SAVE_TOOL_MODEL)],
+        data_sha256=None,
+        checker_sha256=None,
+        solve_controls=PortfolioSolveControls(
+            free_search=False, parallel=None, all_solutions=False, num_solutions=None
+        ),
+    )
+
+    mcp = create_mcp_server()
+    result = await mcp.call_tool(
+        "save_verified_minizinc_model",
+        {
+            "model": _SAVE_TOOL_MODEL,
+            "target_dir": str(target),
+            "portfolio_result": portfolio_result.model_dump(mode="json"),
+        },
+    )
+
+    structured = _structured(result)
+    assert structured["status"] == "saved"
+    assert "experiment_log" in {entry["role"] for entry in structured["files"]}
+    assert (target / "experiment-log.json").is_file()
 
 
 # --- background solve jobs (submit / get / cancel / list) -------------------
@@ -2394,6 +2474,94 @@ async def test_submit_portfolio_job_returns_running_then_get_reaches_succeeded(
 
 
 @pytest.mark.asyncio
+async def test_background_portfolio_provenance_threads_to_save(
+    fake_minizinc_binary: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    from openconstraint_mcp.save_target import EXPERIMENT_LOG_FILENAME, text_sha256
+
+    model = _SAVE_TOOL_MODEL
+    data = "n = 3;\n"
+    checker = "% portfolio checker\n"
+    _patch_full_capabilities(monkeypatch, "cp-sat")
+
+    def _fake_solve(model: str, *, solver: str, on_start: Any, **kw: Any) -> SolveResult:
+        on_start(_PortfolioFakeProc())
+        return _portfolio_solve_result("satisfied", solver)
+
+    monkeypatch.setattr("openconstraint_mcp.jobs.solve_model_cancellable", _fake_solve)
+
+    mcp = create_mcp_server()
+    submitted = _structured(
+        await mcp.call_tool(
+            "submit_portfolio_job",
+            {
+                "models": [model],
+                "solvers": ["cp-sat"],
+                "data": data,
+                "checker": checker,
+                "seeds": [42],
+                "free_search": True,
+                "parallel": 2,
+            },
+        )
+    )
+    final = (
+        submitted
+        if submitted["state"] == "succeeded"
+        else await _poll_portfolio_status(mcp, submitted["job_id"])
+    )
+    portfolio_result = final["result"]
+
+    assert portfolio_result["models_sha256"] == [text_sha256(model)]
+    assert portfolio_result["data_sha256"] == text_sha256(data)
+    assert portfolio_result["checker_sha256"] == text_sha256(checker)
+    assert portfolio_result["solve_controls"] == {
+        "free_search": True,
+        "parallel": 2,
+        "all_solutions": False,
+        "num_solutions": None,
+    }
+
+    _fake_save_subprocess(
+        monkeypatch,
+        check=FakeCompletedProcess(stdout="", stderr="", returncode=0),
+        solve=FakeCompletedProcess(
+            stdout=stream(solution_obj("x=3\n", {"x": 3})), stderr="", returncode=0
+        ),
+    )
+    target = tmp_path / "portfolio-provenance-save"
+    save_result = _structured(
+        await mcp.call_tool(
+            "save_verified_minizinc_model",
+            {
+                "model": model,
+                "data": data,
+                "solver": "cp-sat",
+                "random_seed": 42,
+                "free_search": True,
+                "parallel": 2,
+                "target_dir": str(target),
+                "portfolio_result": portfolio_result,
+            },
+        )
+    )
+
+    assert save_result["status"] == "saved"
+    log = json.loads((target / EXPERIMENT_LOG_FILENAME).read_text())
+    assert log["models_sha256"] == [text_sha256(model)]
+    assert log["data_sha256"] == text_sha256(data)
+    assert log["checker_sha256"] == text_sha256(checker)
+    assert log["solve_controls"] == {
+        "free_search": True,
+        "parallel": 2,
+        "all_solutions": False,
+        "num_solutions": None,
+    }
+
+
+@pytest.mark.asyncio
 async def test_submit_portfolio_job_unsupported_control_surfaces_mcp_error(
     fake_minizinc_binary: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -2762,7 +2930,14 @@ async def test_save_verified_cpsat_python_tool_schema_includes_new_params() -> N
     tools = await mcp.list_tools()
     tool = next(t for t in tools if t.name == "save_verified_cpsat_python")
     props = set(tool.inputSchema["properties"])
-    assert {"source", "target_dir", "expectation", "checker", "checker_timeout_ms"} <= props
+    assert {
+        "source",
+        "target_dir",
+        "expectation",
+        "checker",
+        "checker_timeout_ms",
+        "sweep_result",
+    } <= props
     assert "ctx" not in props
     assert set(tool.inputSchema.get("required", [])) == {"source", "target_dir"}
 
@@ -2897,6 +3072,83 @@ async def test_save_verified_cpsat_python_tool_rejects_whitespace_only_checker(
         )
 
 
+@pytest.mark.asyncio
+async def test_save_verified_cpsat_python_tool_with_sweep_result_writes_experiment_log(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A self-consistent `sweep_result` reaches the core save and is persisted."""
+    from openconstraint_mcp.save_target import text_sha256
+    from openconstraint_mcp.schemas import (
+        CpsatPythonResult,
+        CpsatPythonSweepAttempt,
+        CpsatPythonSweepResult,
+    )
+
+    source = "print('x')"
+    monkeypatch.setattr(
+        "openconstraint_mcp.pyexec.save.run_cpsat_python",
+        lambda source, **kw: _fake_cpsat_run_result(),
+    )
+    sweep_result = CpsatPythonSweepResult(
+        status="winner",
+        winner_index=0,
+        winner_seed=7,
+        winner=CpsatPythonResult(
+            status="optimal",
+            solution={"x": 3},
+            objective=3.0,
+            stdout="",
+            stderr="",
+            return_code=0,
+            timed_out=False,
+            truncated=False,
+            duration_ms=10,
+        ),
+        attempts=[
+            CpsatPythonSweepAttempt(
+                index=0,
+                seed=7,
+                status="optimal",
+                objective=3.0,
+                accepted=True,
+                checker_status=None,
+                message=None,
+                timed_out=False,
+                truncated=False,
+                duration_ms=10,
+            )
+        ],
+        elapsed_ms=10,
+        objective_sense="minimize",
+        selection_policy="best_objective_then_status_then_seed",
+        distinct_accepted_objectives=1,
+        seed_variation_hint=None,
+        source_sha256=text_sha256(source),
+        per_run_timeout_ms=5000,
+        checker_sha256=None,
+        problem_sha256=None,
+    )
+
+    target = tmp_path / "save_target_sweep"
+    mcp = create_mcp_server()
+    result = _structured(
+        await mcp.call_tool(
+            "save_verified_cpsat_python",
+            {
+                "source": source,
+                "target_dir": str(target),
+                "seed": 7,
+                "sweep_result": sweep_result.model_dump(mode="json"),
+            },
+        )
+    )
+
+    assert result["saved"] is True
+    assert "experiment_log" in {entry["role"] for entry in result["files"]}
+    assert (target / "experiment-log.json").is_file()
+
+
 # --- run_cpsat_python_sweep tool ---------------------------------------------
 
 
@@ -2934,6 +3186,8 @@ def _fake_sweep_result(*, status: str = "winner", attempts: Any = None, **kw: An
         "selection_policy": "best_objective_then_status_then_seed",
         "distinct_accepted_objectives": kw.get("distinct_accepted_objectives", 1),
         "seed_variation_hint": kw.get("seed_variation_hint"),
+        "source_sha256": "a" * 64,
+        "per_run_timeout_ms": 5000,
     }
     if status == "no_winner":
         return CpsatPythonSweepResult(status="no_winner", **common)

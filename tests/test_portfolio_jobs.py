@@ -18,7 +18,7 @@ import pytest
 from openconstraint_mcp.job_errors import JobRejectedError
 from openconstraint_mcp.jobs import JobRegistry
 from openconstraint_mcp.portfolio_jobs import PortfolioJobRegistry
-from openconstraint_mcp.schemas import PortfolioSolveResult, SolveResult
+from openconstraint_mcp.schemas import PortfolioSolveControls, PortfolioSolveResult, SolveResult
 
 _TERMINAL = {"succeeded", "cancelled"}
 _SOLVE_TERMINAL = {"succeeded", "failed", "timeout", "cancelled"}
@@ -404,6 +404,12 @@ def test_list_does_not_observe_partially_finalized_record(
             attempts=[],
             elapsed_ms=1,
             selection_policy="first-decisive-result",
+            models_sha256=[],
+            data_sha256=None,
+            checker_sha256=None,
+            solve_controls=PortfolioSolveControls(
+                free_search=False, parallel=None, all_solutions=False, num_solutions=None
+            ),
         )
         listed: list[Any] = []
         errors: list[BaseException] = []
