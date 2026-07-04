@@ -2774,7 +2774,7 @@ async def test_run_cpsat_python_experiment_routes_to_experiment_result(
         ],
         elapsed_ms=42,
         objective_sense="maximize",
-        selection_policy="best_accepted_incumbent_objective_then_status_then_attempt_order",
+        selection_policy="best_accepted_incumbent_objective_then_status_then_duration_then_attempt_order",
         source_sha256=["abc123"],
     )
     seen: dict[str, object] = {}

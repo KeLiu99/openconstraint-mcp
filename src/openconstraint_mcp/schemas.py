@@ -808,11 +808,12 @@ CpsatExperimentStatus = Literal["winner", "no_winner"]
 
 # How an experiment winner is chosen, surfaced as a typed (not free-form) value:
 # optimization: best objective for the requested sense, then stronger status
-# (optimal > feasible > timeout), then earliest attempt order. Feasibility:
-# stronger status, then earliest attempt order. Never completion order.
+# (optimal > feasible > timeout), then faster duration_ms, then earliest attempt
+# order. Feasibility: stronger status, then faster duration_ms, then earliest
+# attempt order. Never completion order.
 CpsatExperimentSelectionPolicy = Literal[
-    "best_accepted_incumbent_objective_then_status_then_attempt_order",
-    "accepted_status_then_attempt_order",
+    "best_accepted_incumbent_objective_then_status_then_duration_then_attempt_order",
+    "accepted_status_then_duration_then_attempt_order",
 ]
 
 # A per-attempt checker verdict (None when no checker was supplied for the

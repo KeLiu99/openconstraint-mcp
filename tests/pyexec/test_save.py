@@ -1092,7 +1092,9 @@ def _experiment_result(
         "attempts": [winning_attempt, _losing_attempt_row()],
         "elapsed_ms": 100,
         "objective_sense": "maximize",
-        "selection_policy": "best_accepted_incumbent_objective_then_status_then_attempt_order",
+        "selection_policy": (
+            "best_accepted_incumbent_objective_then_status_then_duration_then_attempt_order"
+        ),
         "source_sha256": [winning_attempt.source_sha256, "some-other-hash"],
         "checker_sha256": None,
         "problem_sha256": None,

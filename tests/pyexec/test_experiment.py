@@ -29,6 +29,7 @@ def _result(
     timed_out: bool = False,
     truncated: bool = False,
     stderr: str = "",
+    duration_ms: int = 5,
 ) -> CpsatPythonResult:
     return CpsatPythonResult(
         status=status,  # type: ignore[arg-type]
@@ -39,7 +40,7 @@ def _result(
         return_code=None if timed_out else 0,
         timed_out=timed_out,
         truncated=truncated,
-        duration_ms=5,
+        duration_ms=duration_ms,
     )
 
 
@@ -180,7 +181,7 @@ def test_feasibility_tie_break_prefers_status_then_attempt_order(
     result = run_cpsat_python_experiment([_attempt("a"), _attempt("b"), _attempt("c")])
 
     assert result.winner_index == 1
-    assert result.selection_policy == "accepted_status_then_attempt_order"
+    assert result.selection_policy == "accepted_status_then_duration_then_attempt_order"
 
 
 def test_tie_break_prefers_stronger_status_then_attempt_order(
@@ -214,6 +215,36 @@ def test_tie_break_by_attempt_order_when_status_equal(monkeypatch: pytest.Monkey
     result = run_cpsat_python_experiment([_attempt("a"), _attempt("b")], objective_sense="minimize")
 
     assert result.winner_index == 0
+
+
+def test_feasibility_tie_break_prefers_faster_duration(monkeypatch: pytest.MonkeyPatch) -> None:
+    _patch_runner(
+        monkeypatch,
+        {
+            "a": _result(status="optimal", objective=None, duration_ms=50),
+            "b": _result(status="optimal", objective=None, duration_ms=10),
+        },
+    )
+
+    result = run_cpsat_python_experiment([_attempt("a"), _attempt("b")])
+
+    assert result.winner_index == 1  # faster attempt wins despite later attempt order
+
+
+def test_tie_break_prefers_faster_duration_when_status_and_objective_equal(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _patch_runner(
+        monkeypatch,
+        {
+            "a": _result(status="feasible", objective=5, duration_ms=50),
+            "b": _result(status="feasible", objective=5, duration_ms=10),
+        },
+    )
+
+    result = run_cpsat_python_experiment([_attempt("a"), _attempt("b")], objective_sense="minimize")
+
+    assert result.winner_index == 1  # faster attempt wins despite later attempt order
 
 
 def test_winner_name_uses_explicit_name(monkeypatch: pytest.MonkeyPatch) -> None:

@@ -91,9 +91,11 @@ _BASE_ACCEPT_STATUSES: frozenset[str] = frozenset({"optimal", "feasible", "timeo
 _STATUS_RANK: dict[str, int] = {"optimal": 0, "feasible": 1, "timeout": 2}
 
 _OPTIMIZATION_SELECTION_POLICY: CpsatExperimentSelectionPolicy = (
-    "best_accepted_incumbent_objective_then_status_then_attempt_order"
+    "best_accepted_incumbent_objective_then_status_then_duration_then_attempt_order"
 )
-_FEASIBILITY_SELECTION_POLICY: CpsatExperimentSelectionPolicy = "accepted_status_then_attempt_order"
+_FEASIBILITY_SELECTION_POLICY: CpsatExperimentSelectionPolicy = (
+    "accepted_status_then_duration_then_attempt_order"
+)
 
 
 def _max_parallel_attempts_cap() -> int:
@@ -425,21 +427,22 @@ def _run_attempt(
 
 def _winner_sort_key(
     item: tuple[int, CpsatPythonResult], objective_sense: CpsatObjectiveSense | None
-) -> tuple[float, int, int]:
+) -> tuple[float, int, int, int]:
     """Sort key for accepted candidates; the minimum is the winner (lower is better).
 
     In feasibility mode, status wins first. In optimization mode, base
     acceptance guarantees ``objective`` is a finite number, so negating it for
-    ``maximize`` is safe. Ties break by stronger status, then earliest attempt
-    order (the index component) — never completion order.
+    ``maximize`` is safe. Ties break by stronger status, then faster
+    ``duration_ms``, then earliest attempt order (the index component) — never
+    completion order.
     """
     index, result = item
     if objective_sense is None:
-        return 0.0, _STATUS_RANK[result.status], index
+        return 0.0, _STATUS_RANK[result.status], result.duration_ms, index
     objective = result.objective
     assert objective is not None  # guaranteed by optimization-mode acceptance
     objective_key = -objective if objective_sense == "maximize" else objective
-    return objective_key, _STATUS_RANK[result.status], index
+    return objective_key, _STATUS_RANK[result.status], result.duration_ms, index
 
 
 def run_cpsat_python_experiment(
