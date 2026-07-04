@@ -34,10 +34,11 @@ else:
 _TERMINATE_GRACE_SECONDS: float = 3.0
 
 # Public milliseconds view of the same SIGTERM→SIGKILL grace, for callers that must
-# account for the time a timed-out child can spend being terminated (a wall-clock
-# admission gate budgets two waits — once after SIGTERM, once after SIGKILL — per
-# timed-out child). Exposed so those callers never import the private
-# ``_TERMINATE_GRACE_SECONDS``.
+# account for the time a timed-out child can spend being terminated (a future
+# admission gate would budget two waits — once after SIGTERM, once after SIGKILL —
+# per timed-out child; no current caller needs this, but it's kept public for the
+# planned explicit-experiments tool). Exposed so such callers never import the
+# private ``_TERMINATE_GRACE_SECONDS``.
 PROCESS_TREE_TERMINATE_GRACE_MS: int = int(_TERMINATE_GRACE_SECONDS * 1000)
 
 
