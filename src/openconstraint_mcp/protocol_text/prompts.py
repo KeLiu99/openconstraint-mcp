@@ -100,11 +100,10 @@ Otherwise:
    (`free_search`, `parallel`, and each attempt's `per_attempt_timeout_ms`
    budget).
    For an especially hard instance, also consider the OR-Tools CP-SAT
-   Python path (`solve_cpsat_python` prompt, `run_cpsat_python`/
-   `run_cpsat_python_sweep`) for the same problem — neither backend
-   dominates for every problem shape, and the server's structured results,
-   checkers, and durable experiment logs from both let you compare outcomes
-   before committing to one.
+   Python path (`solve_cpsat_python` prompt, `run_cpsat_python`) for the
+   same problem — neither backend dominates for every problem shape, and
+   the server's structured results and checkers from both let you compare
+   outcomes before committing to one.
 
 7. Present the result as a short, structured summary; do not dump the raw
    `SolveResult`. Lead with the result itself; do not narrate the prompt,
@@ -203,15 +202,15 @@ User problem:
    - Build the model with `cp_model.CpModel()`, declare variables, add
      constraints, set the objective.
    - Create a solver: `solver = cp_model.CpSolver()`.
-   - For a REPRODUCIBLE saved artifact, and to cooperate with the seed-sweep
-     tool, READ the seed from the environment (falling back to 42) and prefer
-     a single search worker:
+   - For a REPRODUCIBLE saved artifact, READ the seed from the environment
+     (falling back to 42) and prefer a single search worker:
        `import os`
        `solver.parameters.random_seed = int(os.environ.get("OPENCONSTRAINT_MCP_CPSAT_SEED", "42"))`
        `solver.parameters.num_workers = 1`
-     `run_cpsat_python_sweep` sets `OPENCONSTRAINT_MCP_CPSAT_SEED` per attempt;
-     a script that hardcodes the seed instead of reading this env var silently
-     ignores the sweep. The server cannot force a seed into arbitrary Python.
+     `save_verified_cpsat_python`'s optional `seed` argument sets this
+     environment variable for the replay re-run; a script that hardcodes the
+     seed instead of reading this env var silently ignores the replay. The
+     server cannot force a seed into arbitrary Python.
    - Solve: `status_code = solver.Solve(model)`.
    - Emit exactly ONE JSON object as the LAST line of stdout:
      ```
@@ -268,44 +267,12 @@ User problem:
      feasible-not-optimal), otherwise none was reached in time.
    - Describe the solution in the user's own terms (task names, variable
      semantics), not as a raw JSON dump.
-
-5a. Optional seed sweep. When an optimization model may find better incumbents
-   under different random seeds within a fixed per-run budget, call
-   `run_cpsat_python_sweep` with the SAME `source`, a list of unique `seeds`,
-   and `objective_sense` ('maximize' or 'minimize'). The script must read
-   `OPENCONSTRAINT_MCP_CPSAT_SEED` (see step 3) — otherwise every attempt runs
-   the same seed and the sweep is pointless.
-   - Attempts run SERIALLY, one child per seed. The server returns the best
-     ACCEPTED result plus a per-attempt table; partial failures (errors, no
-     solution, non-numeric objective, checker rejections) are recorded but never
-     discard the successful attempts.
-   - Acceptance: base acceptance (status optimal/feasible/timeout, a non-empty
-     solution, a finite numeric objective), then an optional `checker` gate
-     (same checker protocol as the save tool, run only on base-eligible
-     attempts). A checker rejection removes an otherwise-best candidate.
-   - The sweep is a QUALITY improvement across runs, NOT a new optimality proof:
-     the winner's own `status` stays authoritative. Equal objective values alone
-     do not prove the seed was ignored; if the result includes
-     `seed_variation_hint`, relay it as a conditional check of the script's seed
-     handling.
-   - The sweep is rejected UP FRONT when its projected wall-clock budget
-     (per-seed run and checker budgets plus per-child kill overhead) exceeds the
-     fixed cap, or when the seed count exceeds 8. These two gates are
-     independent: at the default per_run_timeout_ms, the wall-clock budget binds
-     well before 8 seeds (only a handful fit). Reaching the full 8-seed cap
-     requires a correspondingly smaller per_run_timeout_ms (and
-     checker_timeout_ms, if checking — checked sweeps cost roughly twice as much
-     per seed).
-   - A `timeout` winner is reportable but NOT directly savable (see step 6):
-     re-run its seed with a larger `per_run_timeout_ms` until it reports
-     optimal/feasible, then save.
-   - For an especially hard instance where CP-SAT's own quality is
-     unclear, also consider the MiniZinc portfolio path
-     (`solve_constraint_problem` prompt, `submit_portfolio_job`) for the
-     same problem, potentially trying multiple formulations and solvers —
-     neither backend dominates for every problem shape, and the server's
-     structured results, checkers, and durable experiment logs from both
-     let you compare outcomes before committing to one.
+   - For a HARD instance where CP-SAT's own result quality is unclear, also
+     consider the MiniZinc portfolio path (`solve_constraint_problem` prompt,
+     `submit_portfolio_job`) for the same problem, potentially trying multiple
+     formulations and solvers — neither backend dominates for every problem
+     shape, and the server's structured results and checkers from both let
+     you compare outcomes before committing to one.
 
 6. Persist only if the user asks. Call `save_verified_cpsat_python` with
    the script as `source`, the original problem text as `problem`, and the
@@ -313,16 +280,12 @@ User problem:
    ask the user for that path; the server opens no file dialog. The server
    re-runs the script to evaluate the save gate before writing anything.
    Replacing a previously saved directory needs `overwrite=true`.
-   To persist a `run_cpsat_python_sweep` winner, pass its `winner_seed` as the
-   `seed` argument: the re-run replays that seed and the manifest records it.
-   The save gates are UNCHANGED, so a `timeout` winner still fails the reported
-   gate — re-run it to optimal/feasible first. A saved seeded model reproduces
-   by hand only when you set `OPENCONSTRAINT_MCP_CPSAT_SEED` to the recorded
+   Optional `seed` is a single-run replay aid: the re-run replays that seed
+   and the manifest records it. The save gates are UNCHANGED, so a
+   `timeout` result still fails the reported gate regardless of `seed` —
+   re-run it to optimal/feasible first. A saved seeded model reproduces by
+   hand only when you set `OPENCONSTRAINT_MCP_CPSAT_SEED` to the recorded
    seed; the saved `solution.py` carries only its own seed fallback.
-   You may also pass the sweep's `CpsatPythonSweepResult` as `sweep_result`
-   so the full per-seed attempt table is persisted alongside the saved
-   script as `experiment-log.json` — the server still re-runs and gates
-   independently; it never trusts the attached result as proof.
 
    Save gate options (in order of strictness):
    a. Reported gate (always applied): `status` in `optimal`/`feasible` and

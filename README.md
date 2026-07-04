@@ -915,64 +915,6 @@ server runs it in a **local child process**.
   timeout, tree-kill, and `CpsatPythonResult` shape (including timeout partial
   recovery) as `run_cpsat_python`.
 
-- **`run_cpsat_python_sweep(source, seeds, objective_sense, per_run_timeout_ms=30000, problem=None, checker=None, checker_timeout_ms=None)`**
-  — run one `source` multiple times under different CP-SAT random seeds and
-  return the best **accepted** result plus a per-attempt table. Useful when an
-  optimization model finds different incumbents under different seeds within a
-  fixed per-run budget. **A sweep is a quality improvement across runs, not a new
-  optimality proof** — the winner's own `status` stays authoritative.
-
-  - **Seed protocol:** each attempt re-runs `source` with the environment
-    variable `OPENCONSTRAINT_MCP_CPSAT_SEED` set to that seed. The script must
-    read it and assign `solver.parameters.random_seed` — the server cannot force
-    a seed into arbitrary Python, so a script that hardcodes its seed silently
-    ignores the sweep. Prefer `solver.parameters.num_workers = 1`. The
-    `examples/cpsat_python/assignment.py` script and the `solve_cpsat_python`
-    prompt both show the canonical
-    `int(os.environ.get("OPENCONSTRAINT_MCP_CPSAT_SEED", "42"))` pattern.
-  - **Seeds and serial execution.** `seeds` must be non-empty, unique non-bool
-    integers in the CP-SAT `random_seed` signed-int32 range. Attempts run one
-    child at a time in the given `seeds` order (no parallelism, to avoid CP-SAT
-    worker-pool oversubscription).
-  - **Acceptance** is two ordered gates: base acceptance (status
-    `optimal`/`feasible`/`timeout`, a non-empty solution, a finite numeric
-    objective), then — only on base-eligible attempts — an optional `checker`
-    gate (same checker protocol as the save tool; a rejection drops the
-    candidate). `problem` is forwarded to the checker payload; `checker_timeout_ms`
-    defaults to `per_run_timeout_ms`. Partial failures are recorded in the
-    attempt table but never discard the successful attempts.
-  - **Winner selection:** best objective for `objective_sense`, ties broken by
-    stronger status (optimal > feasible > timeout) then earliest provided seed
-    order (list position, not numeric seed value).
-  - **Synchronous budget gate.** Because the sweep is synchronous, it is
-    rejected *up front* (before any child runs) when its projected wall-clock
-    budget — per-seed run (and checker) budgets plus a conservative per-child
-    timeout/kill overhead, summed over the seeds — exceeds
-    `MAX_SWEEP_WALL_CLOCK_MS` (2 min), and separately when the seed count exceeds
-    `MAX_SWEEP_SEEDS` (8). These two gates are independent: at the default
-    `per_run_timeout_ms`, the wall-clock budget binds well before 8 seeds (only a
-    handful fit). Reaching the full 8-seed cap requires a correspondingly smaller
-    `per_run_timeout_ms` (and `checker_timeout_ms`, if checking — checked sweeps
-    cost roughly twice as much per seed).
-  - Returns `CpsatPythonSweepResult` with `status` (`"winner"`/`"no_winner"`),
-    `winner_index`/`winner_seed`/`winner` (a full `CpsatPythonResult`, all
-    present iff `"winner"`), `attempts`, `elapsed_ms`, `objective_sense`,
-    `selection_policy`, `distinct_accepted_objectives`,
-    `seed_variation_hint` (nullable; set only when accepted attempts that ran to
-    completion — `optimal`/`feasible` — repeat the same objective and solution,
-    as a conditional prompt to verify the script's seed handling),
-    `source_sha256` (sha256 of the swept `source`), `per_run_timeout_ms` (the
-    per-attempt budget), and optional default-null
-    `checker_sha256`/`problem_sha256` (sha256 of `checker`/`problem` when
-    supplied, else `null`). Pass this whole
-    `CpsatPythonSweepResult` as `sweep_result` to `save_verified_cpsat_python`
-    (below) to persist the sweep's full attempt table alongside a saved
-    script.
-  - **A `timeout` winner is reportable but not savable:** it fails
-    `save_verified_cpsat_python`'s reported gate. Re-run the winning seed with a
-    larger `per_run_timeout_ms` until it reports `optimal`/`feasible`, then save
-    it (passing that `seed`).
-
 - **`save_verified_cpsat_python(source, target_dir, …)`** — re-run `source`
   and persist it only when all supplied save gates pass. Gates run in order
   and short-circuit on the first failure:
@@ -999,11 +941,8 @@ server runs it in a **local child process**.
   `target_dir` must be an explicit absolute local path; the server never
   opens a file dialog. Fixed filenames: `solution.py` (always); `problem.txt`
   when `problem` is supplied; `checker.py` and `solution.json` when a checker
-  is supplied; `experiment-log.json` when `sweep_result` was passed and the
-  save succeeded (the sweep's full attempt table); `.openconstraint-model.json`
-  (always, the manifest — includes a compact experiment-log summary when
-  present; `statuses_seen` lists CP-SAT result statuses). Overwrite is
-  marker-gated (prior-save manifest required,
+  is supplied; `.openconstraint-model.json` (always, the manifest). Overwrite
+  is marker-gated (prior-save manifest required,
   `overwrite=true` set, no untracked files). Returns
   `SaveVerifiedPythonResult` with:
   - `saved: bool` — computed from whether all gates passed
@@ -1018,23 +957,13 @@ server runs it in a **local child process**.
   duration, timed_out, truncated) — no stdout/stderr/errors/details.
 
   Pass `seed` (a non-bool integer in the CP-SAT `random_seed` signed-int32
-  range) to replay a specific CP-SAT random seed —
-  e.g. to persist a `run_cpsat_python_sweep` winner. The re-run sets
+  range) as a single-run replay aid: the re-run sets
   `OPENCONSTRAINT_MCP_CPSAT_SEED` so a cooperating script uses that seed, and the
-  manifest records it. The save gates are **unchanged** — a `timeout` sweep
-  winner still fails the reported gate even with its seed replayed. The saved
+  manifest records it. The save gates are **unchanged** — a `timeout` result
+  still fails the reported gate even with its seed replayed. The saved
   `solution.py` is byte-for-byte the script and carries only its own seed
   fallback, so to reproduce a seeded save by hand you must set
   `OPENCONSTRAINT_MCP_CPSAT_SEED` to the recorded seed.
-
-  Pass `sweep_result` (the `CpsatPythonSweepResult` from
-  `run_cpsat_python_sweep`) as **provenance only** — never verification
-  evidence; the save still re-runs `source` fresh and gates on that alone.
-  Rejected eagerly (before any run) unless `sweep_result.status == "winner"`,
-  `seed` is supplied, `sweep_result.winner_seed == seed`, and
-  `sweep_result.source_sha256` matches the sha256 of `source`. A
-  `checker_sha256`/`problem_sha256` mismatch is **not** rejected — it only
-  affects what the persisted log records.
 
 ### Background CP-SAT jobs
 
@@ -1110,13 +1039,11 @@ snippet:
   that reads the payload from `sys.argv[1]` and verifies no two adjacent
   vertices share the same color. Returns `{"status": "accepted", "errors": [],
   "details": {}}` on success or `"rejected"` with a per-edge error message.
-- **`examples/cpsat_python/clinic_roster_sweep.py`** — 7-day urgent-care nurse
-  rostering example for `run_cpsat_python_sweep`. It covers shift coverage,
-  night-shift skills, time off, rest after nights, workload bounds, and a
-  preference/fairness objective.
-- **`examples/cpsat_python/clinic_roster_checker.py`** — checker for the clinic
-  roster example. It independently validates the rota and recomputes the
-  objective before accepting a sweep attempt.
+- **`examples/cpsat_python/clinic_roster_checker.py`** — standalone checker
+  demonstrating the checker protocol against a 7-day urgent-care nurse
+  rostering instance. It covers shift coverage, night-shift skills, time off,
+  rest after nights, and workload bounds, and independently recomputes the
+  preference/fairness objective before accepting a solution.
 - **`examples/nonogram/python/`** — verified 5x5 nonogram CP-SAT save bundle
   generated by `save_verified_cpsat_python`, including `solution.py`,
   `checker.py`, `problem.txt`, `solution.json`, and
@@ -1124,8 +1051,9 @@ snippet:
 
 The `examples/cpsat_python/` scripts can be run standalone
 (`python examples/cpsat_python/assignment.py`), and the first two are used as
-integration-test anchors for `run_cpsat_python`. The clinic roster pair is the
-integration-test anchor for `run_cpsat_python_sweep` with a checker.
+integration-test anchors for `run_cpsat_python`. The clinic roster checker is
+exercised directly (independent of any specific CP-SAT script) as a
+standalone checker-protocol test.
 
 #### Satisfaction save with a checker
 

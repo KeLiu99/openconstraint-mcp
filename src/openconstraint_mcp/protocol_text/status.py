@@ -43,20 +43,10 @@ CPSAT_PYTHON_STAGES = (
     "Child finished; parsing result",
     "CP-SAT Python execution complete",
 )
-CPSAT_PYTHON_SWEEP_STAGES = (
-    "Validating sweep request and seed budget",
-    "Running CP-SAT Python once per seed (serial)",
-    "Sweep finished; selecting the best accepted result",
-    "CP-SAT Python sweep complete",
-)
 
 
 def cpsat_save_stages(with_checker: bool) -> tuple[str, str, str, str]:
-    """Return the CP-SAT save milestone messages, checker-aware at stage 2.
-
-    The optional experiment-log write rides inside this same commit step; it
-    gets no stage of its own.
-    """
+    """Return the CP-SAT save milestone messages, checker-aware at stage 2."""
     if with_checker:
         return (
             "Validating save request and CP-SAT Python source",

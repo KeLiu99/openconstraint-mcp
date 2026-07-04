@@ -72,8 +72,8 @@ def test_solve_minizinc_model_description_nudges_portfolio_for_hard_instances() 
     assert "submit_portfolio_job" in SOLVE_MINIZINC_MODEL_DESCRIPTION
 
 
-def test_run_cpsat_python_description_nudges_seed_sweep_for_hard_instances() -> None:
-    assert "run_cpsat_python_sweep" in RUN_CPSAT_PYTHON_DESCRIPTION
+def test_run_cpsat_python_description_nudges_portfolio_for_hard_instances() -> None:
+    assert "submit_portfolio_job" in RUN_CPSAT_PYTHON_DESCRIPTION
 
 
 SAMPLE_PROBLEM = (
@@ -476,7 +476,7 @@ async def test_solve_constraint_problem_prompt_step6_nudges_cross_backend() -> N
 
     # Step 6 should point at the CP-SAT Python path for an especially hard
     # instance, since neither backend dominates for every problem shape.
-    assert "run_cpsat_python_sweep" in text
+    assert "run_cpsat_python" in text
 
 
 @pytest.mark.asyncio
@@ -549,22 +549,23 @@ async def test_solve_cpsat_python_prompt_mentions_run_cpsat_python() -> None:
 
 @pytest.mark.asyncio
 async def test_solve_cpsat_python_prompt_teaches_seed_protocol() -> None:
-    # The client-facing protocol must not drift from the env-var contract the sweep
-    # relies on: read OPENCONSTRAINT_MCP_CPSAT_SEED, fall back to 42, single worker.
+    # The client-facing protocol must not drift from the env-var contract the
+    # save replay relies on: read OPENCONSTRAINT_MCP_CPSAT_SEED, fall back to
+    # 42, single worker.
     text = await _get_prompt_text("solve_cpsat_python", {"problem": SAMPLE_PROBLEM})
     assert "OPENCONSTRAINT_MCP_CPSAT_SEED" in text
     assert "42" in text
     assert "num_workers = 1" in text
-    assert "run_cpsat_python_sweep" in text
+    assert "save_verified_cpsat_python" in text
 
 
 @pytest.mark.asyncio
 async def test_solve_cpsat_python_prompt_nudges_cross_backend() -> None:
     text = await _get_prompt_text("solve_cpsat_python", {"problem": SAMPLE_PROBLEM})
 
-    # The seed-sweep step should point at the MiniZinc portfolio path for an
-    # especially hard instance, since neither backend dominates for every
-    # problem shape.
+    # The result-presentation step should point at the MiniZinc portfolio path
+    # for an especially hard instance, since neither backend dominates for
+    # every problem shape.
     assert "submit_portfolio_job" in text
 
 
@@ -656,16 +657,6 @@ async def test_solve_cpsat_python_prompt_save_step_gated_on_user_request() -> No
     save_idx = text.index("save_verified_cpsat_python")
     run_idx = text.index("run_cpsat_python")
     assert save_idx > run_idx, "save step must appear after the run step"
-
-
-@pytest.mark.asyncio
-async def test_solve_cpsat_python_prompt_save_step_mentions_sweep_result() -> None:
-    text = await _get_prompt_text("solve_cpsat_python", {"problem": SAMPLE_PROBLEM})
-
-    # The sweep_result mention belongs in the save step, after the save tool
-    # itself is introduced.
-    assert "sweep_result" in text
-    assert text.index("sweep_result") > text.index("save_verified_cpsat_python")
 
 
 def test_solve_descriptions_state_checker_suffix_and_nested_report() -> None:

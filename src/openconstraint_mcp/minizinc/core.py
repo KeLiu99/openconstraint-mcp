@@ -1081,8 +1081,7 @@ def _validate_portfolio_result_consistency(
 ) -> None:
     """Eagerly reject a ``portfolio_result`` that cannot describe this save request.
 
-    The MiniZinc mirror of ``pyexec.save._validate_sweep_result_consistency``:
-    this guards only against *accidental* mismatch (wrong model attached, a
+    This guards only against *accidental* mismatch (wrong model attached, a
     stale portfolio, the wrong solver/seed/search configuration) — it is not,
     and cannot be, a proof that ``portfolio_result`` is honest. A client could
     construct a self-consistent fake ``portfolio_result`` that passes every
