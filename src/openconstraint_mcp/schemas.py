@@ -4,7 +4,15 @@ import math
 from pathlib import Path
 from typing import Any, Literal, cast
 
-from pydantic import BaseModel, Field, computed_field, field_validator, model_validator
+from pydantic import (
+    BaseModel,
+    Field,
+    JsonValue,
+    StrictInt,
+    computed_field,
+    field_validator,
+    model_validator,
+)
 
 # ---------------------------------------------------------------------------
 # CP-SAT Python executor output models (moved from pyexec/core.py per D7 so
@@ -531,6 +539,7 @@ SavedArtifactRole = Literal[
     "solution",
     "manifest",
     "experiment_log",
+    "replay_config",
 ]
 
 
@@ -786,3 +795,151 @@ class SaveVerifiedPythonResult(BaseModel):
     @property
     def saved(self) -> bool:
         return self.reason is None and self.target_dir is not None
+
+
+# ---------------------------------------------------------------------------
+# CP-SAT Python explicit-experiment schemas
+# ---------------------------------------------------------------------------
+
+# An experiment's overall outcome. ``winner`` ⇔ an accepted attempt was selected
+# (its full ``CpsatPythonResult`` plus ``winner_index``/``winner_name`` are set);
+# ``no_winner`` ⇔ no attempt was accepted. This ⇔ is enforced below.
+CpsatExperimentStatus = Literal["winner", "no_winner"]
+
+# How an experiment winner is chosen, surfaced as a typed (not free-form) value:
+# best objective for the requested sense, then stronger status (optimal >
+# feasible > timeout), then earliest attempt order (never completion order).
+CpsatExperimentSelectionPolicy = Literal[
+    "best_accepted_incumbent_objective_then_status_then_attempt_order"
+]
+
+# A per-attempt checker verdict (None when no checker was supplied for the
+# experiment, or when the attempt failed base acceptance and the checker was
+# never run on it).
+CpsatExperimentCheckerStatus = Literal["accepted", "rejected", "error", "timeout"]
+
+
+class CpsatPythonExperimentAttempt(BaseModel):
+    """One explicit attempt in a ``run_cpsat_python_experiment`` request.
+
+    ``source`` is a complete, independent CP-SAT Python script — the server does
+    not diff or merge attempts, so each one must be runnable on its own. ``name``
+    is optional; an unnamed attempt is assigned the display label
+    ``attempt-{index}`` at execution time (see ``CpsatPythonExperimentAttemptResult``).
+    ``seed`` injects ``OPENCONSTRAINT_MCP_CPSAT_SEED`` for a cooperating script,
+    identically to the save path's seeded replay. ``config`` is an OPAQUE JSON
+    object the server writes to a temp file and points
+    ``OPENCONSTRAINT_MCP_CPSAT_CONFIG`` at — the server never sets OR-Tools
+    parameters itself; only a cooperating script that reads the env var and
+    applies fields it understands benefits from it. An empty ``config`` (``{}``)
+    is normalized to "no config" everywhere (no temp file, no env var, no hash).
+    ``timeout_ms`` overrides the request's ``default_timeout_ms`` for this one
+    attempt.
+    """
+
+    name: str | None = None
+    source: str
+    seed: StrictInt | None = None
+    config: dict[str, JsonValue] = Field(default_factory=dict)
+    timeout_ms: int | None = None
+
+
+class CpsatPythonExperimentAttemptResult(BaseModel):
+    """One attempt's observed outcome in an experiment's attempt table.
+
+    ``name`` is always the RESOLVED display label (explicit, or the
+    ``attempt-{index}`` default) — never ``None`` — so it can double as
+    ``winner_name`` and as the uniqueness key attempts were validated over.
+    ``config_sha256`` is the canonical-JSON hash of this attempt's ``config``,
+    or ``None`` when the attempt ran with no config (``{}`` and omitted are
+    equivalent). ``source_sha256`` is this attempt's exact source text hash —
+    provenance for a later save's replay-consistency check. ``checker_status``
+    is ``None`` when no checker was supplied for the experiment, or this
+    attempt failed base acceptance before the checker could run.
+    """
+
+    index: int
+    name: str
+    seed: int | None = None
+    config_sha256: str | None = None
+    source_sha256: str
+    timeout_ms: int
+    status: CpsatStatus
+    objective: float | int | None
+    accepted: bool
+    checker_status: CpsatExperimentCheckerStatus | None = None
+    message: str | None = None
+    timed_out: bool
+    truncated: bool
+    duration_ms: int
+
+
+class CpsatPythonExperimentResult(BaseModel):
+    """Outcome of a CP-SAT Python explicit experiment: the winner and the full table.
+
+    ``status="winner"`` carries the winning attempt's ``winner_index`` (a 0-based
+    handle into ``attempts``), ``winner_name`` (equal to
+    ``attempts[winner_index].name``), and the full ``winner`` ``CpsatPythonResult``;
+    ``status="no_winner"`` leaves all three ``None`` because no attempt was
+    accepted. The invariant ``winner ⇔ winner_index ⇔ winner_name ⇔ status ==
+    "winner"`` is enforced, and — going one step further than
+    ``PortfolioSolveResult`` — ``winner_index`` is bounds-checked against
+    ``attempts`` and ``winner_name`` is checked to match the winning row's own
+    ``name`` HERE, in the schema, so the save gate and ``server.py`` formatting
+    can trust the winner fields without re-checking them defensively (unlike
+    ``PortfolioSolveResult``'s ``winner_index``, whose bounds are instead
+    checked eagerly by the minizinc save path's
+    ``_validate_portfolio_result_consistency``).
+
+    A ``timeout`` winner is a REPORTABLE best incumbent, not a SAVABLE one: it
+    fails ``save_verified_cpsat_python``'s reported gate (``optimal``/``feasible``
+    only).
+
+    ``source_sha256`` is one hex digest per attempt, index-aligned with
+    ``attempts`` (so ``source_sha256[i] == attempts[i].source_sha256``).
+    ``checker_sha256``/``problem_sha256`` are the hashes of the experiment's
+    shared ``checker``/``problem`` text, or ``None`` when omitted. All three are
+    provenance, computed once for the request that produced this result — not a
+    save-time trust decision (the save gate always re-runs the winner fresh).
+    """
+
+    status: CpsatExperimentStatus
+    winner_index: int | None = None
+    winner_name: str | None = None
+    winner: CpsatPythonResult | None = None
+    attempts: list[CpsatPythonExperimentAttemptResult] = Field(default_factory=list)
+    elapsed_ms: int
+    objective_sense: CpsatObjectiveSense
+    selection_policy: CpsatExperimentSelectionPolicy
+    source_sha256: list[str] = Field(default_factory=list)
+    checker_sha256: str | None = None
+    problem_sha256: str | None = None
+
+    @model_validator(mode="after")
+    def _winner_presence_matches_status(self) -> CpsatPythonExperimentResult:
+        has_winner = self.winner is not None
+        index_present = self.winner_index is not None
+        name_present = self.winner_name is not None
+        status_winner = self.status == "winner"
+        if not (has_winner == index_present == name_present == status_winner):
+            raise ValueError(
+                "CpsatPythonExperimentResult requires winner, winner_index, "
+                "winner_name, and status=='winner' to agree (all present "
+                "together or all absent)"
+            )
+        self._validate_winner_attempt_fields()
+        return self
+
+    def _validate_winner_attempt_fields(self) -> None:
+        if self.winner_index is None:
+            return
+        if not (0 <= self.winner_index < len(self.attempts)):
+            raise ValueError(
+                f"winner_index {self.winner_index} is out of range for "
+                f"{len(self.attempts)} attempts"
+            )
+        if self.attempts[self.winner_index].name != self.winner_name:
+            raise ValueError(
+                "winner_name must equal attempts[winner_index].name "
+                f"({self.winner_name!r} != {self.attempts[self.winner_index].name!r})"
+            )

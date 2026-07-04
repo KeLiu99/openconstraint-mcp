@@ -274,7 +274,38 @@ User problem:
      shape, and the server's structured results and checkers from both let
      you compare outcomes before committing to one.
 
-6. Persist only if the user asks. Call `save_verified_cpsat_python` with
+6. For MULTIPLE explicit attempts — comparing model/source variants, or the
+   same source under different cooperative configs — use
+   `run_cpsat_python_experiment` instead of calling `run_cpsat_python`
+   repeatedly yourself. YOU always write every attempt's complete `source`;
+   the server never generates, diffs, or merges attempts — it only executes
+   what you give it, verifies acceptance, and selects a winner.
+   - Each attempt is `{{name, source, seed, config, timeout_ms}}`. `source`
+     is a full, independent script (same SAFETY rule as step 3: model,
+     solve, and stdout JSON only — no network access, file writes/deletes,
+     or subprocess spawning unless the user explicitly requested it). `seed`
+     and `config` are optional cooperative protocols: a script must opt in
+     to read them, and a non-cooperating script simply ignores them.
+   - To vary the SAME script by a cooperative config instead of pasting it
+     multiple times, have the script read
+     `os.environ.get("OPENCONSTRAINT_MCP_CPSAT_CONFIG")`, load that path as
+     JSON, and apply whichever fields it defines, e.g.:
+       `config_path = os.environ.get("OPENCONSTRAINT_MCP_CPSAT_CONFIG")`
+       `config = json.load(open(config_path)) if config_path else {{}}`
+       `solver.parameters.num_workers = config.get("num_workers", 1)`
+     The server only writes this JSON to a temp file and points the env var
+     at it — it never sets OR-Tools parameters itself. An empty `config`
+     (`{{}}`) behaves identically to omitting it.
+   - If you set `max_parallel_attempts > 1`, keep each attempt's own
+     `solver.parameters.num_workers` conservative: `max_parallel_attempts *
+     num_workers` oversubscribing the machine's CPUs makes runs slower and
+     less stable, not faster.
+   - Present the winner plus the full attempt table (every attempt's status,
+     objective, and whether it was accepted/rejected and why). A `timeout`
+     winner is a best-so-far incumbent, not proven optimal, and is not yet
+     savable — re-run just that attempt with a larger `timeout_ms` first.
+
+7. Persist only if the user asks. Call `save_verified_cpsat_python` with
    the script as `source`, the original problem text as `problem`, and the
    user's chosen save directory as an explicit absolute `target_dir`. You
    ask the user for that path; the server opens no file dialog. The server
@@ -286,6 +317,16 @@ User problem:
    re-run it to optimal/feasible first. A saved seeded model reproduces by
    hand only when you set `OPENCONSTRAINT_MCP_CPSAT_SEED` to the recorded
    seed; the saved `solution.py` carries only its own seed fallback.
+   If the winner came from `run_cpsat_python_experiment`, also pass its
+   `config` (the winning attempt's exact config, `{{}}`/omitted if it ran
+   without one) and that tool's result as `experiment_result`, so the full
+   attempt table is persisted alongside the saved script as
+   `experiment-log.json` — a provenance SUMMARY (hashes and scalar outcomes
+   per attempt), not an archive of every attempt's full config. The server
+   still re-verifies independently and never trusts the attached result as
+   proof; `experiment_result` must describe THIS exact save (matching
+   source, seed, and config) or the save is rejected before it re-runs
+   anything.
 
    Save gate options (in order of strictness):
    a. Reported gate (always applied): `status` in `optimal`/`feasible` and

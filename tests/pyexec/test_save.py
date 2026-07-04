@@ -7,11 +7,13 @@ from pathlib import Path
 
 import pytest
 
-from openconstraint_mcp.pyexec.core import VERIFIED_STATUSES
-from openconstraint_mcp.save_target import MANIFEST_FILENAME
+from openconstraint_mcp.pyexec.core import VERIFIED_STATUSES, config_sha256
+from openconstraint_mcp.save_target import EXPERIMENT_LOG_FILENAME, MANIFEST_FILENAME, text_sha256
 from openconstraint_mcp.schemas import (
     CpsatCheckerReport,
     CpsatExpectation,
+    CpsatPythonExperimentAttemptResult,
+    CpsatPythonExperimentResult,
     CpsatPythonResult,
 )
 
@@ -921,3 +923,366 @@ def test_save_with_seed_above_int32_is_rejected(
     _patch_executor(monkeypatch, _OPTIMAL_RESULT)
     with pytest.raises(ValueError, match="CP-SAT random_seed range"):
         save_verified_cpsat_python(_SCRIPT, target_dir=tmp_path / "x", seed=2_147_483_648)
+
+
+# --- config replay ------------------------------------------------------------
+
+
+def test_save_with_config_reruns_with_config_env_and_persists_replay_config(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from openconstraint_mcp.pyexec.save import save_verified_cpsat_python
+
+    captured: dict = {}
+
+    def _spy(source: str, **kw: object) -> CpsatPythonResult:
+        env = kw.get("env")
+        assert env is not None
+        config_path = Path(env["OPENCONSTRAINT_MCP_CPSAT_CONFIG"])  # type: ignore[index]
+        captured["contents"] = json.loads(config_path.read_text())
+        return _OPTIMAL_RESULT
+
+    monkeypatch.setattr("openconstraint_mcp.pyexec.save.run_cpsat_python", _spy)
+    target = tmp_path / "configured"
+
+    result = save_verified_cpsat_python(_SCRIPT, target_dir=target, config={"num_workers": 2})
+
+    assert result.saved is True
+    assert captured["contents"] == {"num_workers": 2}
+    assert (target / "replay-config.json").read_text() == json.dumps(
+        {"num_workers": 2}, indent=2
+    ) + "\n"
+
+    manifest = json.loads((target / MANIFEST_FILENAME).read_text())
+    assert manifest["verification"]["replay_config_sha256"] == config_sha256({"num_workers": 2})
+
+
+def test_save_without_config_passes_no_config_env_and_writes_no_artifact(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from openconstraint_mcp.pyexec.save import save_verified_cpsat_python
+
+    captured: dict = {}
+
+    def _spy(source: str, **kw: object) -> CpsatPythonResult:
+        captured["env"] = kw.get("env")
+        return _OPTIMAL_RESULT
+
+    monkeypatch.setattr("openconstraint_mcp.pyexec.save.run_cpsat_python", _spy)
+    target = tmp_path / "unconfigured"
+
+    save_verified_cpsat_python(_SCRIPT, target_dir=target)
+
+    assert captured["env"] is None
+    assert not (target / "replay-config.json").exists()
+    manifest = json.loads((target / MANIFEST_FILENAME).read_text())
+    assert "replay_config_sha256" not in manifest["verification"]
+
+
+def test_save_with_empty_config_dict_equivalent_to_omitted(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from openconstraint_mcp.pyexec.save import save_verified_cpsat_python
+
+    captured: dict = {}
+
+    def _spy(source: str, **kw: object) -> CpsatPythonResult:
+        captured["env"] = kw.get("env")
+        return _OPTIMAL_RESULT
+
+    monkeypatch.setattr("openconstraint_mcp.pyexec.save.run_cpsat_python", _spy)
+    target = tmp_path / "empty_config"
+
+    save_verified_cpsat_python(_SCRIPT, target_dir=target, config={})
+
+    assert captured["env"] is None
+    assert not (target / "replay-config.json").exists()
+
+
+def test_save_with_seed_and_config_combine_in_env(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from openconstraint_mcp.pyexec.save import save_verified_cpsat_python
+
+    captured: dict = {}
+
+    def _spy(source: str, **kw: object) -> CpsatPythonResult:
+        captured["env"] = kw.get("env")
+        return _OPTIMAL_RESULT
+
+    monkeypatch.setattr("openconstraint_mcp.pyexec.save.run_cpsat_python", _spy)
+    target = tmp_path / "seeded_and_configured"
+
+    save_verified_cpsat_python(_SCRIPT, target_dir=target, seed=5, config={"a": 1})
+
+    env = captured["env"]
+    assert env["OPENCONSTRAINT_MCP_CPSAT_SEED"] == "5"
+    assert "OPENCONSTRAINT_MCP_CPSAT_CONFIG" in env
+
+
+# --- experiment_result provenance ---------------------------------------------
+
+
+def _winning_attempt_row(**overrides: object) -> CpsatPythonExperimentAttemptResult:
+    defaults: dict[str, object] = {
+        "index": 0,
+        "name": "baseline",
+        "seed": None,
+        "config_sha256": None,
+        "source_sha256": text_sha256(_SCRIPT),
+        "timeout_ms": 5000,
+        "status": "optimal",
+        "objective": 3.0,
+        "accepted": True,
+        "checker_status": None,
+        "message": None,
+        "timed_out": False,
+        "truncated": False,
+        "duration_ms": 42,
+    }
+    defaults.update(overrides)
+    return CpsatPythonExperimentAttemptResult(**defaults)  # type: ignore[arg-type]
+
+
+def _losing_attempt_row(**overrides: object) -> CpsatPythonExperimentAttemptResult:
+    defaults: dict[str, object] = {
+        "index": 1,
+        "name": "worse",
+        "seed": None,
+        "config_sha256": None,
+        "source_sha256": "some-other-hash",
+        "timeout_ms": 5000,
+        "status": "feasible",
+        "objective": 1.0,
+        "accepted": True,
+        "checker_status": None,
+        "message": None,
+        "timed_out": False,
+        "truncated": False,
+        "duration_ms": 10,
+    }
+    defaults.update(overrides)
+    return CpsatPythonExperimentAttemptResult(**defaults)  # type: ignore[arg-type]
+
+
+def _experiment_result(
+    *, winning_attempt: CpsatPythonExperimentAttemptResult, status: str = "winner"
+) -> CpsatPythonExperimentResult:
+    kwargs: dict[str, object] = {
+        "status": status,
+        "attempts": [winning_attempt, _losing_attempt_row()],
+        "elapsed_ms": 100,
+        "objective_sense": "maximize",
+        "selection_policy": "best_accepted_incumbent_objective_then_status_then_attempt_order",
+        "source_sha256": [winning_attempt.source_sha256, "some-other-hash"],
+        "checker_sha256": None,
+        "problem_sha256": None,
+    }
+    if status == "winner":
+        kwargs["winner_index"] = winning_attempt.index
+        kwargs["winner_name"] = winning_attempt.name
+        kwargs["winner"] = _OPTIMAL_RESULT
+    return CpsatPythonExperimentResult(**kwargs)  # type: ignore[arg-type]
+
+
+def test_save_with_matching_experiment_result_writes_experiment_log(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from openconstraint_mcp.pyexec.save import save_verified_cpsat_python
+
+    _patch_executor(monkeypatch, _OPTIMAL_RESULT)
+    target = tmp_path / "with_experiment_log"
+    experiment_result = _experiment_result(winning_attempt=_winning_attempt_row())
+
+    result = save_verified_cpsat_python(
+        _SCRIPT, target_dir=target, experiment_result=experiment_result
+    )
+
+    assert result.saved is True
+    log = json.loads((target / EXPERIMENT_LOG_FILENAME).read_text())
+    assert log["exploration_type"] == "cpsat_python_experiment"
+    assert log["winner_index"] == 0
+    assert log["winner_name"] == "baseline"
+    assert len(log["attempts"]) == 2
+    # Provenance summary only: hashes and scalars, never a full config object.
+    for attempt in log["attempts"]:
+        assert "config" not in attempt
+        assert set(attempt) == {
+            "index",
+            "name",
+            "seed",
+            "source_sha256",
+            "config_sha256",
+            "timeout_ms",
+            "status",
+            "objective",
+            "accepted",
+            "checker_status",
+            "message",
+            "timed_out",
+            "truncated",
+            "duration_ms",
+        }
+
+    manifest = json.loads((target / MANIFEST_FILENAME).read_text())
+    exp_summary = manifest["verification"]["experiment_log"]
+    assert exp_summary["winner_index"] == 0
+    assert exp_summary["attempt_count"] == 2
+
+
+def test_save_without_experiment_result_writes_no_experiment_log(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from openconstraint_mcp.pyexec.save import save_verified_cpsat_python
+
+    _patch_executor(monkeypatch, _OPTIMAL_RESULT)
+    target = tmp_path / "no_experiment_log"
+
+    save_verified_cpsat_python(_SCRIPT, target_dir=target)
+
+    assert not (target / EXPERIMENT_LOG_FILENAME).exists()
+
+
+def test_save_rejects_no_winner_experiment_result(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from openconstraint_mcp.pyexec.save import save_verified_cpsat_python
+
+    called = _patch_executor_counting(monkeypatch, _OPTIMAL_RESULT)
+    experiment_result = _experiment_result(
+        winning_attempt=_winning_attempt_row(accepted=False), status="no_winner"
+    )
+
+    with pytest.raises(ValueError, match="status must be 'winner'"):
+        save_verified_cpsat_python(
+            _SCRIPT, target_dir=tmp_path / "x", experiment_result=experiment_result
+        )
+    assert called == []  # rejected before any re-run
+
+
+def test_save_rejects_experiment_result_with_source_mismatch(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from openconstraint_mcp.pyexec.save import save_verified_cpsat_python
+
+    called = _patch_executor_counting(monkeypatch, _OPTIMAL_RESULT)
+    experiment_result = _experiment_result(
+        winning_attempt=_winning_attempt_row(source_sha256="wrong-hash")
+    )
+
+    with pytest.raises(ValueError, match="source_sha256"):
+        save_verified_cpsat_python(
+            _SCRIPT, target_dir=tmp_path / "x", experiment_result=experiment_result
+        )
+    assert called == []
+
+
+def test_save_rejects_experiment_result_with_seed_mismatch(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from openconstraint_mcp.pyexec.save import save_verified_cpsat_python
+
+    called = _patch_executor_counting(monkeypatch, _OPTIMAL_RESULT)
+    experiment_result = _experiment_result(winning_attempt=_winning_attempt_row(seed=7))
+
+    with pytest.raises(ValueError, match="seed"):
+        save_verified_cpsat_python(
+            _SCRIPT, target_dir=tmp_path / "x", experiment_result=experiment_result
+        )
+    assert called == []
+
+
+def test_save_rejects_experiment_result_config_supplied_but_winner_had_none(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from openconstraint_mcp.pyexec.save import save_verified_cpsat_python
+
+    called = _patch_executor_counting(monkeypatch, _OPTIMAL_RESULT)
+    experiment_result = _experiment_result(winning_attempt=_winning_attempt_row(config_sha256=None))
+
+    with pytest.raises(ValueError, match="config_sha256"):
+        save_verified_cpsat_python(
+            _SCRIPT,
+            target_dir=tmp_path / "x",
+            config={"unexpected": True},
+            experiment_result=experiment_result,
+        )
+    assert called == []
+
+
+def test_save_rejects_experiment_result_config_omitted_but_winner_used_one(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from openconstraint_mcp.pyexec.save import save_verified_cpsat_python
+
+    called = _patch_executor_counting(monkeypatch, _OPTIMAL_RESULT)
+    winning_config_hash = config_sha256({"num_workers": 4})
+    experiment_result = _experiment_result(
+        winning_attempt=_winning_attempt_row(config_sha256=winning_config_hash)
+    )
+
+    with pytest.raises(ValueError, match="config_sha256"):
+        save_verified_cpsat_python(
+            _SCRIPT, target_dir=tmp_path / "x", experiment_result=experiment_result
+        )
+    assert called == []
+
+
+def test_save_accepts_experiment_result_config_matching_winner(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from openconstraint_mcp.pyexec.save import save_verified_cpsat_python
+
+    _patch_executor(monkeypatch, _OPTIMAL_RESULT)
+    config = {"num_workers": 4}
+    winning_config_hash = config_sha256(config)
+    experiment_result = _experiment_result(
+        winning_attempt=_winning_attempt_row(config_sha256=winning_config_hash)
+    )
+    target = tmp_path / "matching_config"
+
+    result = save_verified_cpsat_python(
+        _SCRIPT, target_dir=target, config=config, experiment_result=experiment_result
+    )
+
+    assert result.saved is True
+    assert (target / "replay-config.json").is_file()
+    assert (target / EXPERIMENT_LOG_FILENAME).is_file()
+
+
+def test_save_with_matching_experiment_result_still_fails_a_bad_fresh_rerun(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """experiment_result is provenance only — it never substitutes for verification.
+
+    A self-consistent experiment_result claiming a winner is not enough: the
+    fresh re-run below is mocked to return infeasible, so the save must still
+    fail the reported gate and write nothing, exactly as it would with no
+    experiment_result at all.
+    """
+    from openconstraint_mcp.pyexec.save import save_verified_cpsat_python
+
+    _patch_executor(monkeypatch, _INFEASIBLE_RESULT)
+    experiment_result = _experiment_result(winning_attempt=_winning_attempt_row())
+    target = tmp_path / "provenance_is_not_evidence"
+
+    result = save_verified_cpsat_python(
+        _SCRIPT, target_dir=target, experiment_result=experiment_result
+    )
+
+    assert result.saved is False
+    assert result.verification_level == "none"
+    assert not target.exists()

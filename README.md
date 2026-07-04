@@ -965,6 +965,94 @@ server runs it in a **local child process**.
   fallback, so to reproduce a seeded save by hand you must set
   `OPENCONSTRAINT_MCP_CPSAT_SEED` to the recorded seed.
 
+### Explicit experiments
+
+- **`run_cpsat_python_experiment(attempts, objective_sense, …)`** — run a list
+  of **explicit attempts** and return the best accepted result plus the full
+  attempt table. Each attempt is
+  `{name, source, seed, config, timeout_ms}`: `source` is a complete,
+  independent script (the server never generates, diffs, or merges attempts —
+  it only executes what the client supplies); `name` defaults to
+  `attempt-{index}` when omitted, and every resolved name (explicit or
+  defaulted) must be unique. `seed` and `config` are both **cooperative,
+  opt-in** protocols, not server-enforced parameters:
+  - `seed` sets `OPENCONSTRAINT_MCP_CPSAT_SEED`, identically to the save path's
+    seeded replay.
+  - `config` (a JSON object, `{}` treated identically to omitted) is written to
+    a temp file and its path set as `OPENCONSTRAINT_MCP_CPSAT_CONFIG`; a
+    cooperating script reads it and applies whichever fields it understands
+    (e.g. `solver.parameters.num_workers`). The server never sets OR-Tools
+    parameters itself.
+
+  Attempts run through a bounded worker pool sized by `max_parallel_attempts`
+  (default `1` = serial; capped at `min(server CPU count, 4)` and rejected
+  above that). Coordinate it with each script's own
+  `solver.parameters.num_workers` — oversubscribing the machine makes runs
+  slower and less stable, not faster. Results are always returned in
+  **original attempt order**, and winner tie-breaks use that same order, never
+  completion order.
+
+  Acceptance is the same two ordered gates as the save path: base acceptance
+  (`status` in `optimal`/`feasible`/`timeout`, non-empty `solution`, finite
+  numeric `objective`), then — only for base-eligible attempts — the optional
+  checker gate (`checker`/`checker_timeout_ms`, same contract as
+  `save_verified_cpsat_python`'s checker). The winner is the accepted attempt
+  with the best objective for `objective_sense`, ties broken by stronger
+  status (`optimal` > `feasible` > `timeout`) then earliest attempt order.
+
+  The request is **synchronous and budget-gated**: it is rejected up front
+  (before any child runs) when its projected wall-clock budget — batched by
+  `max_parallel_attempts`, using each attempt's effective timeout, checker
+  timeout when present, and a conservative per-child timeout/kill overhead —
+  exceeds a fixed cap. Reduce attempt count/timeouts or raise
+  `max_parallel_attempts` to fit.
+
+  Returns `CpsatPythonExperimentResult`: `status` (`"winner"` or
+  `"no_winner"`), `winner_index`/`winner_name`/`winner` (a full
+  `CpsatPythonResult`, all present iff `"winner"`), `attempts` (every attempt,
+  accepted or not, each with its resolved `name`, `source_sha256`,
+  `config_sha256`), `elapsed_ms`, `objective_sense`, `selection_policy`,
+  `source_sha256` (index-aligned with `attempts`), `checker_sha256`,
+  `problem_sha256`. A `timeout` winner is **reportable, not savable** —
+  `save_verified_cpsat_python`'s reported gate still requires
+  `optimal`/`feasible`.
+
+  Pass the result as `experiment_result` to `save_verified_cpsat_python` (with
+  the winning attempt's exact replay `config`, if any) to persist the winner
+  with full provenance — see below.
+
+#### Persisting an experiment's winner
+
+`save_verified_cpsat_python` accepts two additional, optional arguments for
+experiment provenance:
+
+- **`config`** — the winning attempt's exact replay config (`{}`/omitted if it
+  ran without one). Like `seed`, this is a replay aid: the re-run writes it to
+  a temp file and sets `OPENCONSTRAINT_MCP_CPSAT_CONFIG`, then — on a
+  successful save — persists it as `replay-config.json` alongside its sha256
+  in the manifest.
+- **`experiment_result`** — the `CpsatPythonExperimentResult` from
+  `run_cpsat_python_experiment`. This is **provenance only, never verification
+  evidence**: when supplied, it must be self-consistent with this save request
+  (`status == "winner"`, the winning attempt's `source_sha256` matching
+  `source`, its `seed` matching the supplied `seed`, its `config_sha256`
+  matching the canonical hash of the supplied `config`) or the save is
+  **rejected before any child runs**; the fresh re-run and save gates below
+  still decide everything. On a successful save, the full attempt table is
+  written as `experiment-log.json` — a **provenance summary**, not an archive:
+  every attempt row carries only hashes and scalar outcomes (`index`, `name`,
+  `seed`, `source_sha256`, `config_sha256`, `timeout_ms`, `status`,
+  `objective`, `accepted`, `checker_status`, `message`, `timed_out`,
+  `truncated`, `duration_ms`). **Non-winning attempts' full `config` objects
+  are never persisted** — only the winning attempt's config is, via
+  `replay-config.json`.
+
+  Saved seed/config provenance **improves replayability but does not
+  guarantee bit-for-bit reproducibility** — CP-SAT randomness, parallel
+  search, solver version changes, and script-level nondeterminism can still
+  produce a different incumbent; the fresh save-time verification run is
+  always the authority.
+
 ### Background CP-SAT jobs
 
 For long-running CP-SAT solves (`timeout_ms` of minutes), the synchronous
@@ -1053,7 +1141,29 @@ The `examples/cpsat_python/` scripts can be run standalone
 (`python examples/cpsat_python/assignment.py`), and the first two are used as
 integration-test anchors for `run_cpsat_python`. The clinic roster checker is
 exercised directly (independent of any specific CP-SAT script) as a
-standalone checker-protocol test.
+standalone checker-protocol test. `run_cpsat_python_experiment`'s own
+integration test (`tests/pyexec/test_experiment_integration.py`) is
+self-contained rather than reusing the files above: a tiny two-variable
+optimization problem solved by two distinct explicit source variants, plus a
+script that reads the cooperative `OPENCONSTRAINT_MCP_CPSAT_CONFIG` protocol
+for real — both fast and fully deterministic.
+
+#### Comparing explicit source variants
+
+```python
+# The client writes every attempt's complete source; the server never
+# generates, diffs, or merges them — it only executes, verifies, and picks
+# the winner.
+result = await mcp.call_tool("run_cpsat_python_experiment", {
+    "attempts": [
+        {"name": "baseline", "source": open("model_v1.py").read()},
+        {"name": "redundant_constraint", "source": open("model_v2.py").read()},
+    ],
+    "objective_sense": "minimize",
+})
+# result["status"] == "winner" and result["winner_name"] name the best accepted
+# attempt; result["attempts"] carries every attempt's status/objective/verdict.
+```
 
 #### Satisfaction save with a checker
 
@@ -1174,7 +1284,14 @@ The stdio server exposes two MCP prompts for client-side LLMs:
   5. Present the `CpsatPythonResult`: distinguish `optimal` (proven best)
      from `feasible` (valid but not proven optimal); point at `stderr` on
      `error`; explain `timeout` clearly.
-  6. Optionally — only when the user asks — call `save_verified_cpsat_python`
+  6. For MULTIPLE explicit attempts (comparing source variants, or the same
+     source under different cooperative configs), call
+     `run_cpsat_python_experiment` instead of calling `run_cpsat_python`
+     repeatedly — the client always writes every attempt's complete source;
+     the server only executes, verifies, and selects a winner. Coordinate
+     `max_parallel_attempts` with each script's own
+     `solver.parameters.num_workers` to avoid oversubscribing the machine.
+  7. Optionally — only when the user asks — call `save_verified_cpsat_python`
      with the script and an explicit absolute `target_dir`. The client asks
      the user for that path; the server opens no file dialog and re-runs the
      script to evaluate the save gate before writing anything. Three gate
@@ -1185,7 +1302,10 @@ The stdio server exposes two MCP prompts for client-side LLMs:
      (optional): a Python checker script that reads payload JSON from
      `sys.argv[1]` and returns `{"status": "accepted"|"rejected"|"error",
      "errors": [...], "details": {}}` — `accepted` + empty errors is the only
-     passing verdict. The checker is not sandboxed.
+     passing verdict. The checker is not sandboxed. If the winner came from
+     `run_cpsat_python_experiment`, also pass its `config` and
+     `experiment_result` so the full attempt table is persisted as
+     `experiment-log.json` — a provenance summary, not an archive.
 
   The server makes no LLM call. The prompt structures how the *client's*
   LLM should write the script; the script is then executed locally by

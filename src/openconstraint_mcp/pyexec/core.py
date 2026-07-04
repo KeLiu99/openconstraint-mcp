@@ -40,12 +40,14 @@ Canonical emit snippet (inlined in scripts, never imported from here):
 
 from __future__ import annotations
 
+import hashlib
 import json
 import math
 import tempfile
 from collections.abc import Callable
 from pathlib import Path
 from subprocess import Popen
+from typing import Any
 
 from ..childproc import ChildProcessTracker
 from ..schemas import CpsatPythonResult, CpsatStatus
@@ -64,6 +66,12 @@ CPSAT_SEED_ENV_VAR: str = "OPENCONSTRAINT_MCP_CPSAT_SEED"
 # that range before they reach a child process.
 CPSAT_RANDOM_SEED_MIN: int = -2_147_483_648
 CPSAT_RANDOM_SEED_MAX: int = 2_147_483_647
+
+# Environment variable an experiment attempt (or a config-carrying save replay)
+# sets for the child, carrying the path to a temporary JSON config file. A
+# cooperating script reads it and applies whichever fields it understands; the
+# server never sets OR-Tools parameters itself — see CpsatPythonExperimentAttempt.
+CPSAT_CONFIG_ENV_VAR: str = "OPENCONSTRAINT_MCP_CPSAT_CONFIG"
 
 VERIFIED_STATUSES: frozenset[CpsatStatus] = frozenset({"optimal", "feasible"})
 
@@ -102,6 +110,72 @@ def validate_cpsat_random_seed(seed: object, *, label: str = "seed") -> int:
             f"{CPSAT_RANDOM_SEED_MIN}..{CPSAT_RANDOM_SEED_MAX}, got {seed!r}"
         )
     return seed
+
+
+def _canonical_json_dumps(value: dict[str, Any]) -> str:
+    """Serialize value with sorted keys and no extra whitespace.
+
+    The single definition of "canonical" for CP-SAT config hashing, so
+    ``canonical_json_sha256`` and ``canonical_json_byte_length`` can never
+    disagree about what they are hashing/measuring.
+    """
+    return json.dumps(value, sort_keys=True, separators=(",", ":"))
+
+
+def canonical_json_sha256(value: dict[str, Any]) -> str:
+    """Return the sha256 hex digest of value's canonical JSON serialization.
+
+    Sorted keys mean two dicts with the same keys in different insertion order
+    hash identically. Shared by the experiment executor (execution-time config
+    hash) and the save gate (save-time mismatch check) so the two can never
+    drift apart — see ``config_sha256`` for the "no config" normalization atop
+    this.
+    """
+    return hashlib.sha256(_canonical_json_dumps(value).encode("utf-8")).hexdigest()
+
+
+def canonical_json_byte_length(value: dict[str, Any]) -> int:
+    """Return the byte length of value's canonical JSON encoding (for size bounds)."""
+    return len(_canonical_json_dumps(value).encode("utf-8"))
+
+
+def config_sha256(config: dict[str, Any] | None) -> str | None:
+    """Return config's canonical hash, or ``None`` for the "no config" state.
+
+    An empty dict (``{}``) and an omitted config (``None``) both mean "no
+    config" — no temp file, no env var, and this returns ``None`` for both, so
+    hashes and the save replay gate never have to distinguish ``{}`` from absent.
+    """
+    if not config:
+        return None
+    return canonical_json_sha256(config)
+
+
+def write_config_file(directory: Path, config: dict[str, Any]) -> Path:
+    """Write config as JSON into directory and return the file path.
+
+    The caller supplies directory — typically a per-attempt or per-save-run
+    ``tempfile.TemporaryDirectory()`` — so the file's lifetime is scoped to that
+    context and cleaned up on every exit path, including a timeout tree-kill.
+    """
+    path = directory / "config.json"
+    path.write_text(json.dumps(config), encoding="utf-8")
+    return path
+
+
+def seed_config_env(*, seed: int | None, config_path: Path | None) -> dict[str, str] | None:
+    """Build the child env overlay for an optional seed and/or config file path.
+
+    Returns ``None`` when neither is present, so callers can pass the result
+    straight through to ``run_cpsat_python``'s ``env=`` without an extra
+    None-vs-empty-dict branch.
+    """
+    env: dict[str, str] = {}
+    if seed is not None:
+        env[CPSAT_SEED_ENV_VAR] = str(seed)
+    if config_path is not None:
+        env[CPSAT_CONFIG_ENV_VAR] = str(config_path)
+    return env or None
 
 
 def normalize_status(raw: object) -> CpsatStatus:

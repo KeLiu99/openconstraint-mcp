@@ -1,0 +1,453 @@
+"""CP-SAT Python explicit-experiment orchestrator.
+
+Runs a client-supplied list of explicit attempts — each a complete, independent
+CP-SAT Python script, optionally paired with a seed and/or a cooperative JSON
+config — through the existing CP-SAT child runner and checker, and selects the
+best accepted incumbent. This generalizes the (removed) seed sweep: instead of
+one source run under N seeds, an experiment runs N independently-specified
+attempts, each of which may vary source, seed, and/or config.
+
+The server does not generate attempts, does not mutate OR-Tools objects, and
+does not set solver parameters itself. It only writes a non-empty ``config`` to
+a temp file and points ``OPENCONSTRAINT_MCP_CPSAT_CONFIG`` at it (and a seed via
+``OPENCONSTRAINT_MCP_CPSAT_SEED``); a cooperating script decides how to apply
+either.
+
+Attempts run through a bounded ``ThreadPoolExecutor`` (``max_parallel_attempts``
+workers, default 1 = serial); ``run_cpsat_python`` blocks on a subprocess wait,
+so a worker thread spends nearly all its time off the GIL. Results are
+assembled in original attempt order regardless of completion order, and winner
+tie-breaks use that same original order — never completion order.
+
+This is a synchronous, budget-gated tool, not a background job: a projected
+worst-case wall-clock estimate is checked before any child runs (see
+``_check_wall_clock_budget``), and the request is rejected outright when it
+would exceed the budget.
+
+Imports only the dependency-light leaves (``childproc``, ``proc``,
+``save_target``, ``schemas``) and the pyexec siblings ``core``/``checker``;
+never ``minizinc`` or ``runtime``.
+"""
+
+from __future__ import annotations
+
+import math
+import os
+import tempfile
+import time
+from collections.abc import Sequence
+from concurrent.futures import ThreadPoolExecutor
+from pathlib import Path
+from typing import cast
+
+from ..childproc import ChildProcessTracker
+from ..proc import process_tree_terminate_worst_case_ms
+from ..save_target import text_sha256
+from ..schemas import (
+    CpsatExperimentSelectionPolicy,
+    CpsatObjectiveSense,
+    CpsatPythonExperimentAttempt,
+    CpsatPythonExperimentAttemptResult,
+    CpsatPythonExperimentResult,
+    CpsatPythonResult,
+)
+from .checker import run_checker
+from .core import (
+    DEFAULT_PYEXEC_TIMEOUT_MS,
+    canonical_json_byte_length,
+    config_sha256,
+    effective_checker_timeout_ms,
+    run_cpsat_python,
+    seed_config_env,
+    validate_checker_args,
+    validate_cpsat_random_seed,
+    write_config_file,
+)
+
+# The synchronous experiment's pre-flight wall-clock budget, matching the
+# removed seed sweep's MAX_SWEEP_WALL_CLOCK_MS: comfortably under a typical
+# synchronous MCP client timeout.
+MAX_CPSAT_EXPERIMENT_WALL_CLOCK_MS: int = 120_000
+
+# Small allowance for the executor's polling interval and orchestration
+# overhead, folded into each attempt's projected timeout overhead.
+EXECUTOR_POLL_SLACK_MS: int = 250
+
+# A config dict is a small cooperative parameter bag, not a data payload — bound
+# its canonical JSON encoding well under the 1 MiB child-output cap.
+MAX_EXPERIMENT_CONFIG_BYTES: int = 64 * 1024
+
+# The hard ceiling on max_parallel_attempts, independent of any client-requested
+# value: never oversubscribe the local machine by more than a handful of
+# concurrent CP-SAT children (each of which may itself use multiple workers).
+_MAX_PARALLEL_ATTEMPTS_CAP_LIMIT: int = 4
+
+# Statuses an experiment treats as usable (base-eligible). "timeout" is a
+# recovered partial — reportable, not savable; the save path's stricter reported
+# gate ({optimal, feasible}) still rejects it.
+_BASE_ACCEPT_STATUSES: frozenset[str] = frozenset({"optimal", "feasible", "timeout"})
+
+# Stronger status wins a tie at equal objective; lower rank is better.
+_STATUS_RANK: dict[str, int] = {"optimal": 0, "feasible": 1, "timeout": 2}
+
+_SELECTION_POLICY: CpsatExperimentSelectionPolicy = (
+    "best_accepted_incumbent_objective_then_status_then_attempt_order"
+)
+
+
+def _max_parallel_attempts_cap() -> int:
+    return min(os.cpu_count() or 1, _MAX_PARALLEL_ATTEMPTS_CAP_LIMIT)
+
+
+def _base_eligibility(result: CpsatPythonResult) -> tuple[bool, str | None]:
+    """Return ``(eligible, reject_reason)``; ``reject_reason`` is set iff not eligible.
+
+    Single source of truth for base acceptance, so the accept/reject verdict and
+    the displayed rejection reason can never disagree about which condition failed.
+    """
+    if result.status not in _BASE_ACCEPT_STATUSES:
+        return False, f"status={result.status!r}"
+    if not result.solution:
+        return False, "solution is missing or empty"
+    if result.objective is None:
+        return False, "objective is missing or non-numeric"
+    return True, None
+
+
+def _validate_objective_sense(objective_sense: object) -> CpsatObjectiveSense:
+    if objective_sense not in ("maximize", "minimize"):
+        raise ValueError("objective_sense must be 'maximize' or 'minimize'")
+    return cast("CpsatObjectiveSense", objective_sense)
+
+
+def _resolved_name(attempt: CpsatPythonExperimentAttempt, index: int) -> str:
+    return attempt.name if attempt.name is not None else f"attempt-{index}"
+
+
+def _validate_attempts(attempts: Sequence[CpsatPythonExperimentAttempt]) -> list[str]:
+    """Validate attempts and return resolved display names, index-aligned.
+
+    Raises ``ValueError`` for: an empty attempts list, an empty/whitespace-only
+    source, an out-of-range seed, an oversized config, a non-positive
+    ``timeout_ms``, or a name collision (explicit vs. explicit, or explicit vs.
+    a defaulted ``attempt-{index}`` label).
+    """
+    if not attempts:
+        raise ValueError("attempts must not be empty")
+
+    names: list[str] = []
+    seen: set[str] = set()
+    for index, attempt in enumerate(attempts):
+        name = _resolved_name(attempt, index)
+        if name in seen:
+            raise ValueError(f"duplicate attempt name (explicit or defaulted): {name!r}")
+        seen.add(name)
+        names.append(name)
+
+        if not attempt.source.strip():
+            raise ValueError(f"attempts[{index}].source must be non-empty")
+        if attempt.seed is not None:
+            validate_cpsat_random_seed(attempt.seed, label=f"attempts[{index}].seed")
+        if attempt.config:
+            size = canonical_json_byte_length(attempt.config)
+            if size > MAX_EXPERIMENT_CONFIG_BYTES:
+                raise ValueError(
+                    f"attempts[{index}].config canonical JSON is {size} bytes, "
+                    f"exceeding MAX_EXPERIMENT_CONFIG_BYTES={MAX_EXPERIMENT_CONFIG_BYTES}"
+                )
+        if attempt.timeout_ms is not None and attempt.timeout_ms <= 0:
+            raise ValueError(f"attempts[{index}].timeout_ms must be positive")
+    return names
+
+
+def _validate_max_parallel_attempts(max_parallel_attempts: object) -> int:
+    if isinstance(max_parallel_attempts, bool) or not isinstance(max_parallel_attempts, int):
+        raise ValueError("max_parallel_attempts must be a non-bool positive integer")
+    if max_parallel_attempts < 1:
+        raise ValueError("max_parallel_attempts must be >= 1")
+    cap = _max_parallel_attempts_cap()
+    if max_parallel_attempts > cap:
+        raise ValueError(
+            f"max_parallel_attempts={max_parallel_attempts} exceeds the server cap "
+            f"{cap} (= min(os.cpu_count(), {_MAX_PARALLEL_ATTEMPTS_CAP_LIMIT}))"
+        )
+    return max_parallel_attempts
+
+
+def _effective_timeout_ms(attempt: CpsatPythonExperimentAttempt, default_timeout_ms: int) -> int:
+    return attempt.timeout_ms if attempt.timeout_ms is not None else default_timeout_ms
+
+
+def _child_timeout_overhead_ms() -> int:
+    """Conservative per-child time a timed-out child can burn after its nominal cap.
+
+    The process-tree leaf owns the termination sequence. The experiment adds
+    only the executor's poll/orchestration slack on top of that worst-case
+    cleanup budget.
+    """
+    return process_tree_terminate_worst_case_ms() + EXECUTOR_POLL_SLACK_MS
+
+
+def _attempt_worst_case_ms(
+    attempt: CpsatPythonExperimentAttempt,
+    *,
+    default_timeout_ms: int,
+    checker_present: bool,
+    checker_timeout_ms: int | None,
+) -> int:
+    overhead = _child_timeout_overhead_ms()
+    timeout_ms = _effective_timeout_ms(attempt, default_timeout_ms)
+    worst = timeout_ms + overhead
+    if checker_present:
+        worst += (
+            effective_checker_timeout_ms(
+                checker_timeout_ms=checker_timeout_ms,
+                default_timeout_ms=timeout_ms,
+            )
+            + overhead
+        )
+    return worst
+
+
+def _check_wall_clock_budget(
+    attempts: Sequence[CpsatPythonExperimentAttempt],
+    *,
+    default_timeout_ms: int,
+    max_parallel_attempts: int,
+    checker_present: bool,
+    checker_timeout_ms: int | None,
+) -> None:
+    """Reject a projected over-budget request before any child runs.
+
+    Batches attempts by ``max_parallel_attempts``: the projection is
+    ``ceil(len(attempts) / max_parallel_attempts) * worst_case_of_the_slowest_attempt``,
+    a conservative upper bound on wall-clock time for a bounded thread-pool
+    schedule (parallelism can only reduce the true wall-clock time relative to
+    this bound, never exceed it).
+    """
+    per_attempt_worst = [
+        _attempt_worst_case_ms(
+            attempt,
+            default_timeout_ms=default_timeout_ms,
+            checker_present=checker_present,
+            checker_timeout_ms=checker_timeout_ms,
+        )
+        for attempt in attempts
+    ]
+    batches = math.ceil(len(attempts) / max_parallel_attempts)
+    projected_ms = batches * max(per_attempt_worst)
+    if projected_ms > MAX_CPSAT_EXPERIMENT_WALL_CLOCK_MS:
+        raise ValueError(
+            f"projected experiment budget {projected_ms} ms exceeds "
+            f"MAX_CPSAT_EXPERIMENT_WALL_CLOCK_MS={MAX_CPSAT_EXPERIMENT_WALL_CLOCK_MS} ms "
+            "(reduce attempt count or per-attempt timeout_ms, or increase "
+            "max_parallel_attempts)"
+        )
+
+
+def _run_attempt(
+    index: int,
+    attempt: CpsatPythonExperimentAttempt,
+    name: str,
+    *,
+    default_timeout_ms: int,
+    checker: str | None,
+    problem: str | None,
+    checker_timeout_ms: int | None,
+    tracker: ChildProcessTracker | None,
+) -> tuple[CpsatPythonExperimentAttemptResult, CpsatPythonResult | None]:
+    """Run one attempt end to end; return its result row and, if accepted, its raw result.
+
+    The config temp file (when ``attempt.config`` is non-empty) lives in a
+    ``tempfile.TemporaryDirectory()`` scoped to exactly this call: it is created
+    right before the child runs and removed right after ``run_cpsat_python``
+    returns, whether the child exited cleanly, errored, or was tree-killed on
+    timeout — no config temp file outlives its attempt.
+    """
+    timeout_ms = _effective_timeout_ms(attempt, default_timeout_ms)
+    source_hash = text_sha256(attempt.source)
+    config_hash = config_sha256(attempt.config)
+
+    if attempt.config:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            config_path = write_config_file(Path(tmp_dir), attempt.config)
+            env = seed_config_env(seed=attempt.seed, config_path=config_path)
+            result = run_cpsat_python(
+                attempt.source, timeout_ms=timeout_ms, tracker=tracker, env=env
+            )
+    else:
+        env = seed_config_env(seed=attempt.seed, config_path=None)
+        result = run_cpsat_python(attempt.source, timeout_ms=timeout_ms, tracker=tracker, env=env)
+
+    base_eligible, base_reject_reason = _base_eligibility(result)
+    accepted = False
+    checker_status = None
+    message = base_reject_reason
+    if base_eligible and checker is not None:
+        report = run_checker(
+            checker=checker,
+            run_result=result,
+            problem=problem,
+            timeout_ms=effective_checker_timeout_ms(
+                checker_timeout_ms=checker_timeout_ms,
+                default_timeout_ms=timeout_ms,
+            ),
+            tracker=tracker,
+        )
+        checker_status = report.status
+        if report.status == "accepted":
+            accepted = True
+        else:
+            message = f"checker {report.status}"
+    elif base_eligible:
+        accepted = True
+
+    row = CpsatPythonExperimentAttemptResult(
+        index=index,
+        name=name,
+        seed=attempt.seed,
+        config_sha256=config_hash,
+        source_sha256=source_hash,
+        timeout_ms=timeout_ms,
+        status=result.status,
+        objective=result.objective,
+        accepted=accepted,
+        checker_status=checker_status,
+        message=message,
+        timed_out=result.timed_out,
+        truncated=result.truncated,
+        duration_ms=result.duration_ms,
+    )
+    return row, (result if accepted else None)
+
+
+def _winner_sort_key(
+    item: tuple[int, CpsatPythonResult], objective_sense: CpsatObjectiveSense
+) -> tuple[float, int, int]:
+    """Sort key for accepted candidates; the minimum is the winner (lower is better).
+
+    Base acceptance guarantees ``objective`` is a finite number, so negating it
+    for ``maximize`` is safe. Ties break by stronger status, then earliest
+    attempt order (the index component) — never completion order.
+    """
+    index, result = item
+    objective = result.objective
+    assert objective is not None  # guaranteed by base acceptance
+    objective_key = -objective if objective_sense == "maximize" else objective
+    return (objective_key, _STATUS_RANK[result.status], index)
+
+
+def run_cpsat_python_experiment(
+    attempts: Sequence[CpsatPythonExperimentAttempt],
+    *,
+    objective_sense: CpsatObjectiveSense,
+    default_timeout_ms: int = DEFAULT_PYEXEC_TIMEOUT_MS,
+    max_parallel_attempts: int = 1,
+    problem: str | None = None,
+    checker: str | None = None,
+    checker_timeout_ms: int | None = None,
+    tracker: ChildProcessTracker | None = None,
+) -> CpsatPythonExperimentResult:
+    """Run every explicit attempt and return the best accepted incumbent plus the table.
+
+    Each attempt runs its own complete ``source`` (the server never diffs or
+    merges attempts), optionally seeded via ``OPENCONSTRAINT_MCP_CPSAT_SEED`` and
+    configured via ``OPENCONSTRAINT_MCP_CPSAT_CONFIG`` — both are cooperative
+    protocols a script may ignore. Attempts run through a bounded thread pool
+    (``max_parallel_attempts`` workers, default 1 = serial); results are
+    assembled in original attempt order regardless of completion order.
+
+    Acceptance is two ordered gates (short-circuiting like the save path): base
+    acceptance (status ∈ {optimal, feasible, timeout}, non-empty solution, finite
+    numeric objective), then — only for base-eligible attempts — the optional
+    checker gate (accepted iff the checker returns ``accepted``). The checker is
+    never spent on an attempt that already failed base acceptance.
+
+    The winner is the accepted attempt with the best objective for
+    ``objective_sense``, breaking ties by stronger status (optimal > feasible >
+    timeout) then earliest attempt order. Returns a
+    ``CpsatPythonExperimentResult`` with ``status="winner"`` and the winning
+    ``CpsatPythonResult``/index/name, or ``status="no_winner"`` when nothing was
+    accepted. A ``timeout`` winner is a reportable best incumbent, not a savable
+    one (it fails the save reported gate).
+
+    Raises ``ValueError`` for an invalid request — including a projected budget
+    over ``MAX_CPSAT_EXPERIMENT_WALL_CLOCK_MS`` or a ``max_parallel_attempts``
+    over the server cap — before any child is spawned.
+    """
+    validated_objective_sense = _validate_objective_sense(objective_sense)
+    validate_checker_args(checker=checker, checker_timeout_ms=checker_timeout_ms)
+    if default_timeout_ms <= 0:
+        raise ValueError("default_timeout_ms must be positive")
+    validated_max_parallel = _validate_max_parallel_attempts(max_parallel_attempts)
+    names = _validate_attempts(attempts)
+
+    _check_wall_clock_budget(
+        attempts,
+        default_timeout_ms=default_timeout_ms,
+        max_parallel_attempts=validated_max_parallel,
+        checker_present=checker is not None,
+        checker_timeout_ms=checker_timeout_ms,
+    )
+
+    start = time.monotonic()
+
+    def _run(
+        item: tuple[int, CpsatPythonExperimentAttempt],
+    ) -> tuple[CpsatPythonExperimentAttemptResult, CpsatPythonResult | None]:
+        index, attempt = item
+        return _run_attempt(
+            index,
+            attempt,
+            names[index],
+            default_timeout_ms=default_timeout_ms,
+            checker=checker,
+            problem=problem,
+            checker_timeout_ms=checker_timeout_ms,
+            tracker=tracker,
+        )
+
+    with ThreadPoolExecutor(max_workers=validated_max_parallel) as pool:
+        # map() yields in input order regardless of completion order, so the
+        # pool's own concurrency is never traded away for ordered results.
+        results = list(pool.map(_run, enumerate(attempts)))
+
+    attempt_rows = [row for row, _ in results]
+    accepted = [(index, result) for index, (_, result) in enumerate(results) if result is not None]
+    elapsed_ms = max(int((time.monotonic() - start) * 1000), 0)
+    winner = (
+        min(accepted, key=lambda item: _winner_sort_key(item, validated_objective_sense))
+        if accepted
+        else None
+    )
+
+    source_sha256 = [row.source_sha256 for row in attempt_rows]
+    checker_sha = text_sha256(checker) if checker is not None else None
+    problem_sha = text_sha256(problem) if problem is not None else None
+
+    if winner is None:
+        return CpsatPythonExperimentResult(
+            status="no_winner",
+            attempts=attempt_rows,
+            elapsed_ms=elapsed_ms,
+            objective_sense=validated_objective_sense,
+            selection_policy=_SELECTION_POLICY,
+            source_sha256=source_sha256,
+            checker_sha256=checker_sha,
+            problem_sha256=problem_sha,
+        )
+
+    winner_index, winner_result = winner
+    return CpsatPythonExperimentResult(
+        status="winner",
+        winner_index=winner_index,
+        winner_name=names[winner_index],
+        winner=winner_result,
+        attempts=attempt_rows,
+        elapsed_ms=elapsed_ms,
+        objective_sense=validated_objective_sense,
+        selection_policy=_SELECTION_POLICY,
+        source_sha256=source_sha256,
+        checker_sha256=checker_sha,
+        problem_sha256=problem_sha,
+    )
