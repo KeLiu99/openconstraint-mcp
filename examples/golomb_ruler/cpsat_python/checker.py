@@ -23,7 +23,9 @@ def main() -> None:
             errors.append(f"mark_0 must be 0, got {marks[0]}")
         for i in range(order - 1):
             if not (marks[i] < marks[i + 1]):
-                errors.append(f"marks not strictly increasing at index {i}: {marks[i]} >= {marks[i + 1]}")
+                errors.append(
+                    f"marks not strictly increasing at index {i}: {marks[i]} >= {marks[i + 1]}"
+                )
         diffs = []
         for i in range(order):
             for j in range(i + 1, order):

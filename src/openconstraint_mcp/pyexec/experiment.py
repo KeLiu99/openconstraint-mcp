@@ -304,7 +304,7 @@ def _check_wall_clock_budget(
         f"checker_timeout_ms={slowest.checker_timeout_ms}, "
         f"attempt_budget_ms={slowest.attempt_budget_ms}, "
         f"checker_budget_ms={slowest.checker_budget_ms}, "
-        f"overhead_ms={_child_timeout_overhead_ms()}, "
+        f"overhead_ms={slowest.attempt_budget_ms - slowest.timeout_ms}, "
         f"total_budget_ms={projected_ms}, "
         f"max_budget_ms={MAX_CPSAT_EXPERIMENT_WALL_CLOCK_MS} ({hint})"
     )
@@ -315,21 +315,31 @@ def _check_wall_clock_budget(
 # the attempt table.
 _STDERR_SNIPPET_MAX_CHARS: int = 500
 
+# Number of trailing non-blank stderr lines to keep. 2 covers the common case
+# of a chained exception (a "During handling..." cause line followed by the
+# final exception line) without the snippet growing past what a one-bullet
+# attempt row should show.
+_STDERR_SNIPPET_MAX_LINES: int = 2
+
 
 def _stderr_snippet(stderr: str) -> str | None:
     """Return the last couple of non-blank stderr lines, bounded, or ``None`` if empty.
 
     A Python traceback's most useful line — the exception type and message — is
     the last line printed, so tailing stderr surfaces it without parsing the
-    traceback structure itself.
+    traceback structure itself. Each line is truncated on its own (keeping its
+    head, e.g. the exception type prefix) rather than tail-truncating the whole
+    joined snippet, which could otherwise cut the prefix off a long final line.
+    Lines are joined with " | " so the result stays single-line-safe for the
+    plain-text, one-bullet-per-attempt formatter.
     """
     lines = [line for line in stderr.splitlines() if line.strip()]
     if not lines:
         return None
-    snippet = "\n".join(lines[-2:])
-    if len(snippet) > _STDERR_SNIPPET_MAX_CHARS:
-        snippet = snippet[-_STDERR_SNIPPET_MAX_CHARS:]
-    return snippet
+    tail = lines[-_STDERR_SNIPPET_MAX_LINES:]
+    per_line_max = _STDERR_SNIPPET_MAX_CHARS // len(tail)
+    truncated = [line if len(line) <= per_line_max else line[:per_line_max] for line in tail]
+    return " | ".join(truncated)
 
 
 def _run_attempt(

@@ -305,6 +305,34 @@ def test_errored_attempt_with_empty_stderr_keeps_bare_status_message(
     assert result.attempts[0].message == "status='error'"
 
 
+def test_stderr_snippet_preserves_exception_type_prefix_on_long_line() -> None:
+    long_message = "x" * 600
+    stderr = f"Traceback (most recent call last):\nValueError: {long_message}"
+
+    snippet = experiment._stderr_snippet(stderr)
+
+    assert snippet is not None
+    assert "ValueError:" in snippet
+    # The prefix must survive truncation, not just the tail of the long line.
+    assert snippet.index("ValueError:") < 50
+    assert len(snippet) < len(long_message)
+
+
+def test_errored_attempt_message_is_single_line_for_multiline_stderr(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    traceback = 'Traceback (most recent call last):\n  File "script.py", line 1\nValueError: boom'
+    _patch_runner(
+        monkeypatch,
+        {"a": _result(status="error", solution=None, objective=None, stderr=traceback)},
+    )
+
+    result = run_cpsat_python_experiment([_attempt("a")], objective_sense="minimize")
+
+    assert result.attempts[0].message is not None
+    assert "\n" not in result.attempts[0].message
+
+
 def test_optimization_rejects_missing_objective_with_reason(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -763,6 +791,33 @@ def test_projected_budget_over_cap_rejected(monkeypatch: pytest.MonkeyPatch) -> 
     # A single attempt this slow already exceeds the cap by itself; no
     # attempt-count/parallelism change can fit it.
     assert "use run_cpsat_python instead" in message
+
+
+def test_budget_rejection_reuses_overhead_from_breakdown_without_recomputing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The rejection message's overhead_ms must come from the already-computed
+    attempt budget breakdown, not a second call to _child_timeout_overhead_ms()."""
+    monkeypatch.setattr(experiment, "_max_parallel_attempts_cap", lambda: 4)
+    original_overhead = experiment._child_timeout_overhead_ms()
+    calls = 0
+    real = experiment._child_timeout_overhead_ms
+
+    def _counting() -> int:
+        nonlocal calls
+        calls += 1
+        return real()
+
+    monkeypatch.setattr(experiment, "_child_timeout_overhead_ms", _counting)
+
+    with pytest.raises(ValueError, match="MAX_CPSAT_EXPERIMENT_WALL_CLOCK_MS") as exc_info:
+        run_cpsat_python_experiment(
+            [_attempt("a", timeout_ms=MAX_CPSAT_EXPERIMENT_WALL_CLOCK_MS)],
+            objective_sense="minimize",
+        )
+
+    assert calls == 1, "overhead should be computed once (in the breakdown), not re-derived"
+    assert f"overhead_ms={original_overhead}" in str(exc_info.value)
 
 
 def test_budget_rejection_from_batching_hints_at_attempt_count_not_swap(
