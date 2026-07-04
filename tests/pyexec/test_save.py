@@ -102,6 +102,7 @@ def _sweep_result(
     checker_sha256: str | None = None,
     problem_sha256: str | None = None,
     source_sha256: str | None = None,
+    extra_attempts: list[CpsatPythonSweepAttempt] | None = None,
 ) -> CpsatPythonSweepResult:
     """Build a minimal, self-consistent winning ``CpsatPythonSweepResult``."""
     winner = CpsatPythonResult(
@@ -120,7 +121,7 @@ def _sweep_result(
         winner_index=0,
         winner_seed=seed,
         winner=winner,
-        attempts=[_sweep_attempt(seed=seed, status=winner_status)],
+        attempts=[_sweep_attempt(seed=seed, status=winner_status), *(extra_attempts or [])],
         elapsed_ms=10,
         objective_sense="minimize",
         selection_policy="best_objective_then_status_then_seed",
@@ -1017,6 +1018,23 @@ def test_save_with_sweep_result_writes_experiment_log(
     assert summary["accepted_attempt_count"] == 1
     assert summary["statuses_seen"] == ["optimal"]
     assert summary["selection_policy"] == "best_objective_then_status_then_seed"
+
+
+def test_cpsat_sweep_manifest_statuses_seen_are_solver_statuses(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from openconstraint_mcp.pyexec.save import save_verified_cpsat_python
+
+    _patch_executor(monkeypatch, _OPTIMAL_RESULT)
+    target = tmp_path / "swept_status_summary"
+    sweep = _sweep_result(seed=7, extra_attempts=[_sweep_attempt(seed=8, status="timeout")])
+
+    save_verified_cpsat_python(_SCRIPT, target_dir=target, seed=7, sweep_result=sweep)
+
+    manifest = json.loads((target / MANIFEST_FILENAME).read_text())
+    summary = manifest["verification"]["experiment_log"]
+    assert summary["statuses_seen"] == ["optimal", "timeout"]
 
 
 def test_save_with_sweep_result_log_content_matches_source_and_hashes(

@@ -191,7 +191,14 @@ def _write_staged_artifacts(
             "cancelled_attempt_count": sum(
                 1 for attempt in portfolio_result.attempts if attempt.state == "cancelled"
             ),
-            "statuses_seen": sorted({attempt.state for attempt in portfolio_result.attempts}),
+            "statuses_seen": sorted(
+                {
+                    attempt.result_status
+                    for attempt in portfolio_result.attempts
+                    if attempt.result_status is not None
+                }
+            ),
+            "attempt_states_seen": sorted({attempt.state for attempt in portfolio_result.attempts}),
             "selection_policy": portfolio_result.selection_policy,
         }
 

@@ -557,7 +557,7 @@ produced solution against a checker model without changing result shape:
   | `problem.md` | only when `problem` was passed | the original problem text |
   | `solve-result.json` | always | the verifying `SolveResult` as JSON |
   | `experiment-log.json` | only when `portfolio_result` was passed and the save succeeded | the portfolio's full attempt table (every model/solver/seed tried, statuses, checker verdicts), the race's shared solve controls, plus the winner's index/seed/solver |
-  | `.openconstraint-model.json` | always | manifest: tool version, timestamp, solver, the solve controls used, a verification summary (including a compact experiment-log summary when `portfolio_result` was supplied), and per-file sha256 hashes |
+  | `.openconstraint-model.json` | always | manifest: tool version, timestamp, solver, the solve controls used, a verification summary (including a compact experiment-log summary when `portfolio_result` was supplied; `statuses_seen` lists MiniZinc result statuses, while `attempt_states_seen` lists portfolio lifecycle states), and per-file sha256 hashes |
 
   **Overwrite safety (marker-gated).** A brand-new path or an existing empty
   directory is written directly. A non-empty directory is replaced only when
@@ -962,8 +962,9 @@ server runs it in a **local child process**.
     completion — `optimal`/`feasible` — repeat the same objective and solution,
     as a conditional prompt to verify the script's seed handling),
     `source_sha256` (sha256 of the swept `source`), `per_run_timeout_ms` (the
-    per-attempt budget), and `checker_sha256`/`problem_sha256` (sha256 of
-    `checker`/`problem` when supplied, else `null`). Pass this whole
+    per-attempt budget), and optional default-null
+    `checker_sha256`/`problem_sha256` (sha256 of `checker`/`problem` when
+    supplied, else `null`). Pass this whole
     `CpsatPythonSweepResult` as `sweep_result` to `save_verified_cpsat_python`
     (below) to persist the sweep's full attempt table alongside a saved
     script.
@@ -1001,7 +1002,8 @@ server runs it in a **local child process**.
   is supplied; `experiment-log.json` when `sweep_result` was passed and the
   save succeeded (the sweep's full attempt table); `.openconstraint-model.json`
   (always, the manifest — includes a compact experiment-log summary when
-  present). Overwrite is marker-gated (prior-save manifest required,
+  present; `statuses_seen` lists CP-SAT result statuses). Overwrite is
+  marker-gated (prior-save manifest required,
   `overwrite=true` set, no untracked files). Returns
   `SaveVerifiedPythonResult` with:
   - `saved: bool` — computed from whether all gates passed

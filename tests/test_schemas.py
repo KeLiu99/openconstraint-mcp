@@ -1262,6 +1262,32 @@ def test_cpsat_sweep_result_no_winner_round_trips() -> None:
     assert result.winner is None
 
 
+def test_cpsat_sweep_result_hashes_are_default_null_for_compatibility() -> None:
+    result = CpsatPythonSweepResult.model_validate(
+        {
+            "status": "no_winner",
+            "attempts": [_sweep_attempt(1, accepted=False).model_dump(mode="json")],
+            "elapsed_ms": 10,
+            "objective_sense": "minimize",
+            "selection_policy": "best_objective_then_status_then_seed",
+            "distinct_accepted_objectives": 0,
+            "source_sha256": "a" * 64,
+            "per_run_timeout_ms": 5000,
+        }
+    )
+
+    assert result.checker_sha256 is None
+    assert result.problem_sha256 is None
+    dumped = result.model_dump(mode="json")
+    assert dumped["checker_sha256"] is None
+    assert dumped["problem_sha256"] is None
+    required = set(CpsatPythonSweepResult.model_json_schema()["required"])
+    assert "source_sha256" in required
+    assert "per_run_timeout_ms" in required
+    assert "checker_sha256" not in required
+    assert "problem_sha256" not in required
+
+
 def test_cpsat_sweep_result_rejects_winner_status_without_winner_fields() -> None:
     with pytest.raises(ValidationError):
         CpsatPythonSweepResult(

@@ -2474,6 +2474,94 @@ async def test_submit_portfolio_job_returns_running_then_get_reaches_succeeded(
 
 
 @pytest.mark.asyncio
+async def test_background_portfolio_provenance_threads_to_save(
+    fake_minizinc_binary: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    from openconstraint_mcp.save_target import EXPERIMENT_LOG_FILENAME, text_sha256
+
+    model = _SAVE_TOOL_MODEL
+    data = "n = 3;\n"
+    checker = "% portfolio checker\n"
+    _patch_full_capabilities(monkeypatch, "cp-sat")
+
+    def _fake_solve(model: str, *, solver: str, on_start: Any, **kw: Any) -> SolveResult:
+        on_start(_PortfolioFakeProc())
+        return _portfolio_solve_result("satisfied", solver)
+
+    monkeypatch.setattr("openconstraint_mcp.jobs.solve_model_cancellable", _fake_solve)
+
+    mcp = create_mcp_server()
+    submitted = _structured(
+        await mcp.call_tool(
+            "submit_portfolio_job",
+            {
+                "models": [model],
+                "solvers": ["cp-sat"],
+                "data": data,
+                "checker": checker,
+                "seeds": [42],
+                "free_search": True,
+                "parallel": 2,
+            },
+        )
+    )
+    final = (
+        submitted
+        if submitted["state"] == "succeeded"
+        else await _poll_portfolio_status(mcp, submitted["job_id"])
+    )
+    portfolio_result = final["result"]
+
+    assert portfolio_result["models_sha256"] == [text_sha256(model)]
+    assert portfolio_result["data_sha256"] == text_sha256(data)
+    assert portfolio_result["checker_sha256"] == text_sha256(checker)
+    assert portfolio_result["solve_controls"] == {
+        "free_search": True,
+        "parallel": 2,
+        "all_solutions": False,
+        "num_solutions": None,
+    }
+
+    _fake_save_subprocess(
+        monkeypatch,
+        check=FakeCompletedProcess(stdout="", stderr="", returncode=0),
+        solve=FakeCompletedProcess(
+            stdout=stream(solution_obj("x=3\n", {"x": 3})), stderr="", returncode=0
+        ),
+    )
+    target = tmp_path / "portfolio-provenance-save"
+    save_result = _structured(
+        await mcp.call_tool(
+            "save_verified_minizinc_model",
+            {
+                "model": model,
+                "data": data,
+                "solver": "cp-sat",
+                "random_seed": 42,
+                "free_search": True,
+                "parallel": 2,
+                "target_dir": str(target),
+                "portfolio_result": portfolio_result,
+            },
+        )
+    )
+
+    assert save_result["status"] == "saved"
+    log = json.loads((target / EXPERIMENT_LOG_FILENAME).read_text())
+    assert log["models_sha256"] == [text_sha256(model)]
+    assert log["data_sha256"] == text_sha256(data)
+    assert log["checker_sha256"] == text_sha256(checker)
+    assert log["solve_controls"] == {
+        "free_search": True,
+        "parallel": 2,
+        "all_solutions": False,
+        "num_solutions": None,
+    }
+
+
+@pytest.mark.asyncio
 async def test_submit_portfolio_job_unsupported_control_surfaces_mcp_error(
     fake_minizinc_binary: Path,
     monkeypatch: pytest.MonkeyPatch,

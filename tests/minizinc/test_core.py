@@ -2358,7 +2358,8 @@ def test_save_verified_model_with_portfolio_result_writes_experiment_log(
     assert summary["attempt_count"] == 1
     assert summary["terminal_attempt_count"] == 1
     assert summary["cancelled_attempt_count"] == 0
-    assert summary["statuses_seen"] == ["succeeded"]
+    assert summary["statuses_seen"] == ["optimal"]
+    assert summary["attempt_states_seen"] == ["succeeded"]
     assert summary["selection_policy"] == "first-decisive-result"
 
 
@@ -2399,7 +2400,10 @@ def test_save_verified_model_portfolio_result_rejected_attempt_counts_as_termina
     save_verified_model(_SAVE_MODEL, target_dir=target, portfolio_result=portfolio_result)
 
     manifest = json.loads((target / MANIFEST_FILENAME).read_text())
-    assert manifest["verification"]["experiment_log"]["terminal_attempt_count"] == 2
+    summary = manifest["verification"]["experiment_log"]
+    assert summary["terminal_attempt_count"] == 2
+    assert summary["statuses_seen"] == ["optimal"]
+    assert summary["attempt_states_seen"] == ["rejected", "succeeded"]
 
 
 def test_save_verified_model_portfolio_result_log_hashes_match_saved_artifacts(
