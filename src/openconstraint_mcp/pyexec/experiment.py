@@ -38,7 +38,7 @@ import time
 from collections.abc import Sequence
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
-from typing import cast
+from typing import NamedTuple, cast
 
 from ..childproc import ChildProcessTracker
 from ..proc import process_tree_terminate_worst_case_ms
@@ -204,25 +204,50 @@ def _child_timeout_overhead_ms() -> int:
     return process_tree_terminate_worst_case_ms() + EXECUTOR_POLL_SLACK_MS
 
 
-def _attempt_worst_case_ms(
+class _AttemptBudget(NamedTuple):
+    """One attempt's admission-budget components, in ms.
+
+    ``checker_timeout_ms``/``checker_budget_ms`` are ``None``/``0`` when the
+    experiment has no checker — there is nothing to charge a checker budget for.
+    """
+
+    timeout_ms: int
+    checker_timeout_ms: int | None
+    attempt_budget_ms: int
+    checker_budget_ms: int
+    total_ms: int
+
+
+def _attempt_budget_breakdown(
     attempt: CpsatPythonExperimentAttempt,
     *,
     default_timeout_ms: int,
     checker_present: bool,
     checker_timeout_ms: int | None,
-) -> int:
+) -> _AttemptBudget:
+    """Break one attempt's projected worst-case wall-clock time into its components.
+
+    Single source of truth for the admission-budget math, so the pass/fail gate
+    (``_check_wall_clock_budget``) and its rejection message can never disagree
+    about how a projected total was derived.
+    """
     overhead = _child_timeout_overhead_ms()
     timeout_ms = _effective_timeout_ms(attempt, default_timeout_ms)
-    worst = timeout_ms + overhead
+    attempt_budget_ms = timeout_ms + overhead
+    effective_checker_ms: int | None = None
+    checker_budget_ms = 0
     if checker_present:
-        worst += (
-            effective_checker_timeout_ms(
-                checker_timeout_ms=checker_timeout_ms,
-                default_timeout_ms=timeout_ms,
-            )
-            + overhead
+        effective_checker_ms = effective_checker_timeout_ms(
+            checker_timeout_ms=checker_timeout_ms, default_timeout_ms=timeout_ms
         )
-    return worst
+        checker_budget_ms = effective_checker_ms + overhead
+    return _AttemptBudget(
+        timeout_ms=timeout_ms,
+        checker_timeout_ms=effective_checker_ms,
+        attempt_budget_ms=attempt_budget_ms,
+        checker_budget_ms=checker_budget_ms,
+        total_ms=attempt_budget_ms + checker_budget_ms,
+    )
 
 
 def _check_wall_clock_budget(
@@ -239,10 +264,13 @@ def _check_wall_clock_budget(
     ``ceil(len(attempts) / max_parallel_attempts) * worst_case_of_the_slowest_attempt``,
     a conservative upper bound on wall-clock time for a bounded thread-pool
     schedule (parallelism can only reduce the true wall-clock time relative to
-    this bound, never exceed it).
+    this bound, never exceed it). On rejection, the error breaks the total down
+    by the slowest attempt's own components so a caller can see whether the
+    culprit is attempt count, per-attempt timeout, or the checker timeout —
+    instead of only a single opaque "over budget" total.
     """
-    per_attempt_worst = [
-        _attempt_worst_case_ms(
+    breakdowns = [
+        _attempt_budget_breakdown(
             attempt,
             default_timeout_ms=default_timeout_ms,
             checker_present=checker_present,
@@ -251,14 +279,57 @@ def _check_wall_clock_budget(
         for attempt in attempts
     ]
     batches = math.ceil(len(attempts) / max_parallel_attempts)
-    projected_ms = batches * max(per_attempt_worst)
-    if projected_ms > MAX_CPSAT_EXPERIMENT_WALL_CLOCK_MS:
-        raise ValueError(
-            f"projected experiment budget {projected_ms} ms exceeds "
-            f"MAX_CPSAT_EXPERIMENT_WALL_CLOCK_MS={MAX_CPSAT_EXPERIMENT_WALL_CLOCK_MS} ms "
-            "(reduce attempt count or per-attempt timeout_ms, or increase "
-            "max_parallel_attempts)"
+    slowest = max(breakdowns, key=lambda b: b.total_ms)
+    projected_ms = batches * slowest.total_ms
+    if projected_ms <= MAX_CPSAT_EXPERIMENT_WALL_CLOCK_MS:
+        return
+
+    if slowest.total_ms > MAX_CPSAT_EXPERIMENT_WALL_CLOCK_MS:
+        # Even a single run of the slowest attempt (batches=1) is already over
+        # the cap: no attempt-count or max_parallel_attempts change can fit it.
+        hint = (
+            "the slowest attempt alone already exceeds the cap, so reducing "
+            "attempt count or raising max_parallel_attempts cannot fit it — for "
+            "a single attempt near or over this cap, use run_cpsat_python "
+            "instead of run_cpsat_python_experiment"
         )
+    else:
+        hint = "reduce attempt count or per-attempt timeout_ms, or increase max_parallel_attempts"
+    raise ValueError(
+        f"projected experiment budget {projected_ms} ms exceeds "
+        f"MAX_CPSAT_EXPERIMENT_WALL_CLOCK_MS={MAX_CPSAT_EXPERIMENT_WALL_CLOCK_MS} ms. "
+        f"Breakdown (slowest attempt): attempt_count={len(attempts)}, "
+        f"max_parallel_attempts={max_parallel_attempts}, batches={batches}, "
+        f"per_attempt_timeout_ms={slowest.timeout_ms}, "
+        f"checker_timeout_ms={slowest.checker_timeout_ms}, "
+        f"attempt_budget_ms={slowest.attempt_budget_ms}, "
+        f"checker_budget_ms={slowest.checker_budget_ms}, "
+        f"overhead_ms={_child_timeout_overhead_ms()}, "
+        f"total_budget_ms={projected_ms}, "
+        f"max_budget_ms={MAX_CPSAT_EXPERIMENT_WALL_CLOCK_MS} ({hint})"
+    )
+
+
+# Bounds the stderr tail folded into an errored attempt's ``message``, so a
+# runaway traceback (or a script that dumps megabytes to stderr) can't blow up
+# the attempt table.
+_STDERR_SNIPPET_MAX_CHARS: int = 500
+
+
+def _stderr_snippet(stderr: str) -> str | None:
+    """Return the last couple of non-blank stderr lines, bounded, or ``None`` if empty.
+
+    A Python traceback's most useful line — the exception type and message — is
+    the last line printed, so tailing stderr surfaces it without parsing the
+    traceback structure itself.
+    """
+    lines = [line for line in stderr.splitlines() if line.strip()]
+    if not lines:
+        return None
+    snippet = "\n".join(lines[-2:])
+    if len(snippet) > _STDERR_SNIPPET_MAX_CHARS:
+        snippet = snippet[-_STDERR_SNIPPET_MAX_CHARS:]
+    return snippet
 
 
 def _run_attempt(
@@ -300,6 +371,10 @@ def _run_attempt(
     accepted = False
     checker_status = None
     message = base_reject_reason
+    if not base_eligible and result.status == "error":
+        snippet = _stderr_snippet(result.stderr)
+        if snippet is not None:
+            message = f"{base_reject_reason}: {snippet}"
     if base_eligible and checker is not None:
         report = run_checker(
             checker=checker,

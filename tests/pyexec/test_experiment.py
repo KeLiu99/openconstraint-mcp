@@ -28,13 +28,14 @@ def _result(
     objective: float | int | None = 1.0,
     timed_out: bool = False,
     truncated: bool = False,
+    stderr: str = "",
 ) -> CpsatPythonResult:
     return CpsatPythonResult(
         status=status,  # type: ignore[arg-type]
         solution=solution if solution is not None else {"x": 1},
         objective=objective,
         stdout="",
-        stderr="",
+        stderr=stderr,
         return_code=None if timed_out else 0,
         timed_out=timed_out,
         truncated=truncated,
@@ -276,6 +277,32 @@ def test_failed_attempts_recorded_but_ignored(monkeypatch: pytest.MonkeyPatch) -
     assert len(result.attempts) == 3
     rejected = {a.name for a in result.attempts if not a.accepted}
     assert rejected == {"attempt-0", "attempt-1"}
+
+
+def test_errored_attempt_message_includes_stderr_tail(monkeypatch: pytest.MonkeyPatch) -> None:
+    traceback = 'Traceback (most recent call last):\n  File "script.py", line 1\nValueError: boom'
+    _patch_runner(
+        monkeypatch,
+        {"a": _result(status="error", solution=None, objective=None, stderr=traceback)},
+    )
+
+    result = run_cpsat_python_experiment([_attempt("a")], objective_sense="minimize")
+
+    assert result.attempts[0].message is not None
+    assert result.attempts[0].message.startswith("status='error':")
+    assert "ValueError: boom" in result.attempts[0].message
+
+
+def test_errored_attempt_with_empty_stderr_keeps_bare_status_message(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _patch_runner(
+        monkeypatch, {"a": _result(status="error", solution=None, objective=None, stderr="")}
+    )
+
+    result = run_cpsat_python_experiment([_attempt("a")], objective_sense="minimize")
+
+    assert result.attempts[0].message == "status='error'"
 
 
 def test_optimization_rejects_missing_objective_with_reason(
@@ -713,11 +740,53 @@ def test_max_parallel_attempts_bool_rejected() -> None:
 
 def test_projected_budget_over_cap_rejected(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(experiment, "_max_parallel_attempts_cap", lambda: 4)
-    with pytest.raises(ValueError, match="MAX_CPSAT_EXPERIMENT_WALL_CLOCK_MS"):
+    with pytest.raises(ValueError, match="MAX_CPSAT_EXPERIMENT_WALL_CLOCK_MS") as exc_info:
         run_cpsat_python_experiment(
             [_attempt("a", timeout_ms=MAX_CPSAT_EXPERIMENT_WALL_CLOCK_MS)],
             objective_sense="minimize",
         )
+
+    message = str(exc_info.value)
+    for field in (
+        "attempt_count=1",
+        "max_parallel_attempts=",
+        "batches=",
+        "per_attempt_timeout_ms=",
+        "checker_timeout_ms=",
+        "attempt_budget_ms=",
+        "checker_budget_ms=",
+        "overhead_ms=",
+        "total_budget_ms=",
+        "max_budget_ms=",
+    ):
+        assert field in message, f"missing {field!r} in: {message}"
+    # A single attempt this slow already exceeds the cap by itself; no
+    # attempt-count/parallelism change can fit it.
+    assert "use run_cpsat_python instead" in message
+
+
+def test_budget_rejection_from_batching_hints_at_attempt_count_not_swap(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """When only the batching (not any single attempt) is over budget, the hint
+    should point at attempt count/parallelism, not at swapping tools."""
+    monkeypatch.setattr(experiment, "_max_parallel_attempts_cap", lambda: 4)
+    per_attempt_timeout = (MAX_CPSAT_EXPERIMENT_WALL_CLOCK_MS // 2) - 1000
+    attempts = [_attempt("a", timeout_ms=per_attempt_timeout) for _ in range(3)]
+
+    with pytest.raises(ValueError, match="MAX_CPSAT_EXPERIMENT_WALL_CLOCK_MS") as exc_info:
+        experiment._check_wall_clock_budget(
+            attempts,
+            default_timeout_ms=30_000,
+            max_parallel_attempts=1,
+            checker_present=False,
+            checker_timeout_ms=None,
+        )
+
+    message = str(exc_info.value)
+    assert "attempt_count=3" in message
+    assert "reduce attempt count or per-attempt timeout_ms" in message
+    assert "use run_cpsat_python instead" not in message
 
 
 def test_budget_gate_fires_before_any_child_runs(monkeypatch: pytest.MonkeyPatch) -> None:
