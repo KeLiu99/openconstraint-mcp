@@ -163,19 +163,21 @@ def write_config_file(directory: Path, config: dict[str, Any]) -> Path:
     return path
 
 
-def seed_config_env(*, seed: int | None, config_path: Path | None) -> dict[str, str] | None:
+def seed_config_env(*, seed: int | None, config_path: Path | None) -> dict[str, str | None]:
     """Build the child env overlay for an optional seed and/or config file path.
 
-    Returns ``None`` when neither is present, so callers can pass the result
-    straight through to ``run_cpsat_python``'s ``env=`` without an extra
-    None-vs-empty-dict branch.
+    Always returns both protocol keys — set to the requested value, or
+    explicitly ``None`` when not requested. ``execute_child`` treats a ``None``
+    value as "delete this key from the inherited environment", so an
+    attempt/replay documented as seed=None/config=None actually clears any
+    ``OPENCONSTRAINT_MCP_CPSAT_SEED``/``_CONFIG`` the *parent* (server) process
+    happens to have inherited from its own launch environment, instead of
+    silently letting a stale value leak into the child.
     """
-    env: dict[str, str] = {}
-    if seed is not None:
-        env[CPSAT_SEED_ENV_VAR] = str(seed)
-    if config_path is not None:
-        env[CPSAT_CONFIG_ENV_VAR] = str(config_path)
-    return env or None
+    return {
+        CPSAT_SEED_ENV_VAR: str(seed) if seed is not None else None,
+        CPSAT_CONFIG_ENV_VAR: str(config_path) if config_path is not None else None,
+    }
 
 
 def normalize_status(raw: object) -> CpsatStatus:
@@ -338,7 +340,7 @@ def run_cpsat_python(
     timeout_ms: int = DEFAULT_PYEXEC_TIMEOUT_MS,
     tracker: ChildProcessTracker | None = None,
     on_start: Callable[[Popen[str]], None] | None = None,
-    env: dict[str, str] | None = None,
+    env: dict[str, str | None] | None = None,
 ) -> CpsatPythonResult:
     """Execute OR-Tools CP-SAT Python ``source`` in a child process.
 
@@ -357,9 +359,11 @@ def run_cpsat_python(
     path (clean, timeout-kill, or output-cap kill).
 
     ``env`` is an INTERNAL environment overlay merged on top of the parent's
-    environment for the child (the only caller is the seeded save replay,
-    which injects ``OPENCONSTRAINT_MCP_CPSAT_SEED``). It is NOT an MCP-facing
-    parameter — the server never exposes arbitrary environment variables.
+    environment for the child (callers are the experiment attempt runner and
+    the seeded/configured save replay, which inject ``OPENCONSTRAINT_MCP_CPSAT_SEED``
+    / ``_CONFIG``, or explicitly clear them via a ``None`` value — see
+    ``seed_config_env``). It is NOT an MCP-facing parameter — the server never
+    exposes arbitrary environment variables.
 
     For an existing local file, use ``run_cpsat_python_file`` instead — it runs
     the script in its own directory so relative file/import references resolve.
@@ -386,7 +390,7 @@ def run_cpsat_python_file(
     timeout_ms: int = DEFAULT_PYEXEC_TIMEOUT_MS,
     tracker: ChildProcessTracker | None = None,
     on_start: Callable[[Popen[str]], None] | None = None,
-    env: dict[str, str] | None = None,
+    env: dict[str, str | None] | None = None,
 ) -> CpsatPythonResult:
     """Execute an existing OR-Tools CP-SAT Python file in its own directory.
 

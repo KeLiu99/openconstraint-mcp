@@ -820,7 +820,10 @@ def test_save_with_seed_reruns_with_seed_env_and_records_it(
     result = save_verified_cpsat_python(_SCRIPT, target_dir=target, seed=7)
 
     assert result.saved is True
-    assert captured["env"] == {"OPENCONSTRAINT_MCP_CPSAT_SEED": "7"}
+    assert captured["env"] == {
+        "OPENCONSTRAINT_MCP_CPSAT_SEED": "7",
+        "OPENCONSTRAINT_MCP_CPSAT_CONFIG": None,
+    }
 
     manifest = json.loads((target / MANIFEST_FILENAME).read_text())
     verification = manifest["verification"]
@@ -846,7 +849,10 @@ def test_save_without_seed_passes_no_env_and_omits_seed_from_manifest(
 
     save_verified_cpsat_python(_SCRIPT, target_dir=target)
 
-    assert captured["env"] is None
+    assert captured["env"] == {
+        "OPENCONSTRAINT_MCP_CPSAT_SEED": None,
+        "OPENCONSTRAINT_MCP_CPSAT_CONFIG": None,
+    }
     manifest = json.loads((target / MANIFEST_FILENAME).read_text())
     assert "replay_seed" not in manifest["verification"]
 
@@ -897,7 +903,10 @@ def test_save_with_negative_seed_reruns_with_seed_env_and_records_it(
     result = save_verified_cpsat_python(_SCRIPT, target_dir=target, seed=-1)
 
     assert result.saved is True
-    assert captured["env"] == {"OPENCONSTRAINT_MCP_CPSAT_SEED": "-1"}
+    assert captured["env"] == {
+        "OPENCONSTRAINT_MCP_CPSAT_SEED": "-1",
+        "OPENCONSTRAINT_MCP_CPSAT_CONFIG": None,
+    }
 
     manifest = json.loads((target / MANIFEST_FILENAME).read_text())
     assert manifest["verification"]["replay_seed"] == -1
@@ -975,7 +984,10 @@ def test_save_without_config_passes_no_config_env_and_writes_no_artifact(
 
     save_verified_cpsat_python(_SCRIPT, target_dir=target)
 
-    assert captured["env"] is None
+    assert captured["env"] == {
+        "OPENCONSTRAINT_MCP_CPSAT_SEED": None,
+        "OPENCONSTRAINT_MCP_CPSAT_CONFIG": None,
+    }
     assert not (target / "replay-config.json").exists()
     manifest = json.loads((target / MANIFEST_FILENAME).read_text())
     assert "replay_config_sha256" not in manifest["verification"]
@@ -998,7 +1010,10 @@ def test_save_with_empty_config_dict_equivalent_to_omitted(
 
     save_verified_cpsat_python(_SCRIPT, target_dir=target, config={})
 
-    assert captured["env"] is None
+    assert captured["env"] == {
+        "OPENCONSTRAINT_MCP_CPSAT_SEED": None,
+        "OPENCONSTRAINT_MCP_CPSAT_CONFIG": None,
+    }
     assert not (target / "replay-config.json").exists()
 
 

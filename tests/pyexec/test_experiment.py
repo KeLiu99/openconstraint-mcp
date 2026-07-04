@@ -319,16 +319,27 @@ def test_seed_forwarded_as_env(monkeypatch: pytest.MonkeyPatch) -> None:
 
     run_cpsat_python_experiment([_attempt("a", seed=7)], objective_sense="minimize")
 
-    assert calls[0]["env"] == {"OPENCONSTRAINT_MCP_CPSAT_SEED": "7"}
+    assert calls[0]["env"] == {
+        "OPENCONSTRAINT_MCP_CPSAT_SEED": "7",
+        "OPENCONSTRAINT_MCP_CPSAT_CONFIG": None,
+    }
 
 
-def test_no_seed_no_config_passes_no_env(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_no_seed_no_config_explicitly_clears_both_protocol_vars(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     calls: list[dict[str, Any]] = []
     _patch_runner(monkeypatch, {"a": _result()}, calls=calls)
 
     run_cpsat_python_experiment([_attempt("a")], objective_sense="minimize")
 
-    assert calls[0]["env"] is None
+    # Both keys are present but explicitly None, not omitted — this is what tells
+    # execute_child to clear any stale value the server process inherited, rather
+    # than passing env=None (full, unfiltered inheritance).
+    assert calls[0]["env"] == {
+        "OPENCONSTRAINT_MCP_CPSAT_SEED": None,
+        "OPENCONSTRAINT_MCP_CPSAT_CONFIG": None,
+    }
 
 
 def test_bool_seed_rejected_at_attempt_construction() -> None:
@@ -360,7 +371,9 @@ def test_config_written_to_temp_file_and_env_points_at_it(monkeypatch: pytest.Mo
     # assertion runs (after the call returns) the TemporaryDirectory is already
     # cleaned up, proving the config file does not outlive its attempt.
     assert not config_path.exists()
-    assert "OPENCONSTRAINT_MCP_CPSAT_SEED" not in env
+    # Key is present but explicitly None (clears any stale inherited value),
+    # not omitted from the overlay.
+    assert env["OPENCONSTRAINT_MCP_CPSAT_SEED"] is None
 
 
 def test_config_file_contents_are_the_supplied_json(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -403,7 +416,10 @@ def test_empty_config_dict_normalizes_to_no_config(monkeypatch: pytest.MonkeyPat
 
     result = run_cpsat_python_experiment([_attempt("a", config={})], objective_sense="minimize")
 
-    assert calls[0]["env"] is None
+    assert calls[0]["env"] == {
+        "OPENCONSTRAINT_MCP_CPSAT_SEED": None,
+        "OPENCONSTRAINT_MCP_CPSAT_CONFIG": None,
+    }
     assert result.attempts[0].config_sha256 is None
 
 

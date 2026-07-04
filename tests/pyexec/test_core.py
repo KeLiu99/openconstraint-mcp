@@ -16,6 +16,7 @@ from openconstraint_mcp.pyexec.core import (
     effective_checker_timeout_ms,
     run_cpsat_python,
     run_cpsat_python_file,
+    seed_config_env,
     validate_checker_args,
     validate_cpsat_random_seed,
 )
@@ -907,7 +908,9 @@ def test_normalize_objective_accepts_huge_int_without_overflow() -> None:
 # --- internal env overlay ----------------------------------------------------
 
 
-def _capture_popen_env(source: str, *, env: dict[str, str] | None) -> dict[str, str] | None:
+def _capture_popen_env(
+    source: str, *, env: dict[str, str | None] | None
+) -> dict[str, str] | None:
     """Run run_cpsat_python with a fake Popen and return the env kwarg it received."""
     captured: dict[str, Any] = {}
 
@@ -939,6 +942,63 @@ def test_env_overlay_merged_on_top_of_parent_environment() -> None:
 def test_no_env_overlay_leaves_child_environment_inherited() -> None:
     # env=None must pass env=None to Popen so the child inherits os.environ as before.
     assert _capture_popen_env("print('x')", env=None) is None
+
+
+def test_seed_config_env_always_returns_both_keys() -> None:
+    # Both protocol keys are always present, set to the requested value or
+    # explicit None — never omitted — so a caller can't accidentally build an
+    # overlay that leaves an unrequested key to whatever the parent process
+    # happens to have inherited.
+    assert seed_config_env(seed=None, config_path=None) == {
+        "OPENCONSTRAINT_MCP_CPSAT_SEED": None,
+        "OPENCONSTRAINT_MCP_CPSAT_CONFIG": None,
+    }
+    assert seed_config_env(seed=7, config_path=None) == {
+        "OPENCONSTRAINT_MCP_CPSAT_SEED": "7",
+        "OPENCONSTRAINT_MCP_CPSAT_CONFIG": None,
+    }
+
+
+def test_env_overlay_none_value_clears_stale_parent_env_var(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Regression test: a server process launched from a shell that already
+    # exports OPENCONSTRAINT_MCP_CPSAT_CONFIG (e.g. leftover from manual
+    # testing) must not leak that stale value into a child whose caller
+    # explicitly requested no config. Before the fix, execute_child's env
+    # overlay only ever added keys on top of os.environ, so an unrequested key
+    # silently passed through from the parent's environment; seed_config_env
+    # now emits an explicit None for it, and execute_child must delete it.
+    monkeypatch.setenv("OPENCONSTRAINT_MCP_CPSAT_CONFIG", "/stale/leftover-config.json")
+
+    env = _capture_popen_env(
+        "print('x')",
+        env=seed_config_env(seed=None, config_path=None),
+    )
+
+    assert env is not None
+    assert "OPENCONSTRAINT_MCP_CPSAT_CONFIG" not in env
+    assert "OPENCONSTRAINT_MCP_CPSAT_SEED" not in env
+    # Unrelated inherited variables are untouched.
+    assert "PATH" in env
+
+
+def test_env_overlay_none_value_clears_stale_var_even_with_other_key_set(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Same leak, but for the "seed requested, config not" combination: only
+    # setting the seed key in the overlay must not let a stale config var
+    # ride along from the parent's environment.
+    monkeypatch.setenv("OPENCONSTRAINT_MCP_CPSAT_CONFIG", "/stale/leftover-config.json")
+
+    env = _capture_popen_env(
+        "print('x')",
+        env=seed_config_env(seed=7, config_path=None),
+    )
+
+    assert env is not None
+    assert env["OPENCONSTRAINT_MCP_CPSAT_SEED"] == "7"
+    assert "OPENCONSTRAINT_MCP_CPSAT_CONFIG" not in env
 
 
 def test_run_cpsat_python_file_forwards_env_overlay(tmp_path: Path) -> None:

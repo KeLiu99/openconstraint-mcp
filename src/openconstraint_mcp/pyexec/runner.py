@@ -87,7 +87,7 @@ def execute_child(
     timeout_ms: int,
     tracker: ChildProcessTracker | None,
     on_start: Callable[[Popen[str]], None] | None = None,
-    env: dict[str, str] | None = None,
+    env: dict[str, str | None] | None = None,
 ) -> ChildExecutionResult:
     """Run a prepared child command, capturing bounded output.
 
@@ -103,13 +103,25 @@ def execute_child(
     ``env`` is an optional overlay merged ON TOP of the parent's ``os.environ``
     (the child still inherits the server's full environment, with these keys
     overriding/adding). The seeded save replay uses it to inject
-    ``OPENCONSTRAINT_MCP_CPSAT_SEED`` without dropping the interpreter's existing
-    environment; ``None`` leaves the inherited environment untouched (the default
+    ``OPENCONSTRAINT_MCP_CPSAT_SEED``. A key mapped to ``None`` is explicitly
+    deleted from the inherited environment instead of being left alone — this is
+    what lets a caller force-clear a protocol var the *parent* process happens to
+    have inherited from its own launch environment, rather than silently letting
+    it pass through to the child. ``env=None`` (as opposed to a dict with ``None``
+    values) leaves the inherited environment completely untouched (the default
     subprocess behaviour).
     """
     if timeout_ms <= 0:
         raise ValueError("timeout_ms must be positive")
-    child_env = {**os.environ, **env} if env is not None else None
+    child_env: dict[str, str] | None = None
+    if env is not None:
+        merged_env = dict(os.environ)
+        for key, value in env.items():
+            if value is None:
+                merged_env.pop(key, None)
+            else:
+                merged_env[key] = value
+        child_env = merged_env
     timeout_s = timeout_ms / 1000.0
     start = time.monotonic()
     timed_out = False
