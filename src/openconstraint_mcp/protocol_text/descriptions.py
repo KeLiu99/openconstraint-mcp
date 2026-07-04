@@ -534,8 +534,7 @@ RUN_CPSAT_PYTHON_DESCRIPTION = (
     "emitted from a CpSolverSolutionCallback survives), else null. For a HARD "
     "instance — status is unknown/timeout, or incumbent quality is unclear — "
     "consider the MiniZinc portfolio path (`submit_portfolio_job`) to race "
-    "multiple formulations, solvers, and seeds for the same problem. "
-    + _CPSAT_CHILD_POSTURE
+    "multiple formulations, solvers, and seeds for the same problem. " + _CPSAT_CHILD_POSTURE
 )
 
 RUN_CPSAT_PYTHON_FILE_DESCRIPTION = (
