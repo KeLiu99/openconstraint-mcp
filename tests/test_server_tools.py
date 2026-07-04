@@ -2718,6 +2718,97 @@ async def test_run_cpsat_python_routes_to_cpsat_result(
     assert result["solution"] == {"x": 3}
 
 
+# --- run_cpsat_python_experiment ---------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_run_cpsat_python_experiment_tool_is_listed() -> None:
+    mcp = create_mcp_server()
+    tools = await mcp.list_tools()
+    names = {tool.name for tool in tools}
+    assert "run_cpsat_python_experiment" in names
+
+
+@pytest.mark.asyncio
+async def test_run_cpsat_python_experiment_routes_to_experiment_result(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from openconstraint_mcp.schemas import (
+        CpsatPythonExperimentAttempt,
+        CpsatPythonExperimentAttemptResult,
+        CpsatPythonExperimentResult,
+        CpsatPythonResult,
+    )
+
+    winner = CpsatPythonResult(
+        status="optimal",
+        solution={"x": 4},
+        objective=4,
+        stdout='{"status":"optimal","objective":4,"solution":{"x":4}}',
+        stderr="",
+        return_code=0,
+        timed_out=False,
+        truncated=False,
+        duration_ms=42,
+    )
+    fake_result = CpsatPythonExperimentResult(
+        status="winner",
+        winner_index=0,
+        winner_name="baseline",
+        winner=winner,
+        attempts=[
+            CpsatPythonExperimentAttemptResult(
+                index=0,
+                name="baseline",
+                seed=7,
+                config_sha256=None,
+                source_sha256="abc123",
+                timeout_ms=1000,
+                status="optimal",
+                objective=4,
+                accepted=True,
+                timed_out=False,
+                truncated=False,
+                duration_ms=42,
+            )
+        ],
+        elapsed_ms=42,
+        objective_sense="maximize",
+        selection_policy="best_accepted_incumbent_objective_then_status_then_attempt_order",
+        source_sha256=["abc123"],
+    )
+    seen: dict[str, object] = {}
+
+    def _fake(
+        attempts: list[CpsatPythonExperimentAttempt],
+        **kw: object,
+    ) -> CpsatPythonExperimentResult:
+        seen["attempts"] = attempts
+        seen.update(kw)
+        return fake_result
+
+    monkeypatch.setattr("openconstraint_mcp.server.run_cpsat_python_experiment", _fake)
+
+    mcp = create_mcp_server()
+    result = _structured(
+        await mcp.call_tool(
+            "run_cpsat_python_experiment",
+            {
+                "attempts": [{"name": "baseline", "source": "print('hi')", "seed": 7}],
+                "objective_sense": "maximize",
+            },
+        )
+    )
+
+    assert result["status"] == "winner"
+    assert result["winner_name"] == "baseline"
+    assert result["winner"]["solution"] == {"x": 4}
+    assert seen["objective_sense"] == "maximize"
+    assert seen["attempts"] == [
+        CpsatPythonExperimentAttempt(name="baseline", source="print('hi')", seed=7)
+    ]
+
+
 # --- run_cpsat_python_file ----------------------------------------------------
 
 
