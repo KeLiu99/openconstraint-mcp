@@ -807,10 +807,12 @@ class SaveVerifiedPythonResult(BaseModel):
 CpsatExperimentStatus = Literal["winner", "no_winner"]
 
 # How an experiment winner is chosen, surfaced as a typed (not free-form) value:
-# best objective for the requested sense, then stronger status (optimal >
-# feasible > timeout), then earliest attempt order (never completion order).
+# optimization: best objective for the requested sense, then stronger status
+# (optimal > feasible > timeout), then earliest attempt order. Feasibility:
+# stronger status, then earliest attempt order. Never completion order.
 CpsatExperimentSelectionPolicy = Literal[
-    "best_accepted_incumbent_objective_then_status_then_attempt_order"
+    "best_accepted_incumbent_objective_then_status_then_attempt_order",
+    "accepted_status_then_attempt_order",
 ]
 
 # A per-attempt checker verdict (None when no checker was supplied for the
@@ -909,7 +911,7 @@ class CpsatPythonExperimentResult(BaseModel):
     winner: CpsatPythonResult | None = None
     attempts: list[CpsatPythonExperimentAttemptResult] = Field(default_factory=list)
     elapsed_ms: int
-    objective_sense: CpsatObjectiveSense
+    objective_sense: CpsatObjectiveSense | None
     selection_policy: CpsatExperimentSelectionPolicy
     source_sha256: list[str] = Field(default_factory=list)
     checker_sha256: str | None = None

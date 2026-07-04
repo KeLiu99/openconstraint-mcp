@@ -279,7 +279,11 @@ def _format_cpsat_experiment_content(result: CpsatPythonExperimentResult) -> str
     lines.extend(
         [
             "",
-            f"Objective sense: {result.objective_sense}",
+            (
+                f"Objective sense: {result.objective_sense}"
+                if result.objective_sense is not None
+                else "Mode: feasibility"
+            ),
             f"Selection policy: {result.selection_policy}",
             "",
             "Attempts:",
@@ -1013,7 +1017,7 @@ def create_mcp_server() -> FastMCP:
     @_as_mcp_error(ValueError)
     async def run_cpsat_python_experiment_tool(
         attempts: list[CpsatPythonExperimentAttempt],
-        objective_sense: CpsatObjectiveSense,
+        objective_sense: CpsatObjectiveSense | None = None,
         default_timeout_ms: int = DEFAULT_PYEXEC_TIMEOUT_MS,
         max_parallel_attempts: int = 1,
         problem: str | None = None,

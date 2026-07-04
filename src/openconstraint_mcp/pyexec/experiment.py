@@ -87,11 +87,14 @@ _MAX_PARALLEL_ATTEMPTS_CAP_LIMIT: int = 4
 # gate ({optimal, feasible}) still rejects it.
 _BASE_ACCEPT_STATUSES: frozenset[str] = frozenset({"optimal", "feasible", "timeout"})
 
-# Stronger status wins a tie at equal objective; lower rank is better.
+# Stronger status wins ties; lower rank is better.
 _STATUS_RANK: dict[str, int] = {"optimal": 0, "feasible": 1, "timeout": 2}
 
-_SELECTION_POLICY: CpsatExperimentSelectionPolicy = (
+_OPTIMIZATION_SELECTION_POLICY: CpsatExperimentSelectionPolicy = (
     "best_accepted_incumbent_objective_then_status_then_attempt_order"
+)
+_FEASIBILITY_SELECTION_POLICY: CpsatExperimentSelectionPolicy = (
+    "accepted_status_then_attempt_order"
 )
 
 
@@ -99,7 +102,9 @@ def _max_parallel_attempts_cap() -> int:
     return min(os.cpu_count() or 1, _MAX_PARALLEL_ATTEMPTS_CAP_LIMIT)
 
 
-def _base_eligibility(result: CpsatPythonResult) -> tuple[bool, str | None]:
+def _attempt_eligibility(
+    result: CpsatPythonResult, objective_sense: CpsatObjectiveSense | None
+) -> tuple[bool, str | None]:
     """Return ``(eligible, reject_reason)``; ``reject_reason`` is set iff not eligible.
 
     Single source of truth for base acceptance, so the accept/reject verdict and
@@ -109,15 +114,28 @@ def _base_eligibility(result: CpsatPythonResult) -> tuple[bool, str | None]:
         return False, f"status={result.status!r}"
     if not result.solution:
         return False, "solution is missing or empty"
-    if result.objective is None:
+    if objective_sense is None:
+        return True, None
+    objective = result.objective
+    if objective is None or isinstance(objective, bool) or not math.isfinite(objective):
         return False, "objective is missing or non-numeric"
     return True, None
 
 
-def _validate_objective_sense(objective_sense: object) -> CpsatObjectiveSense:
+def _validate_objective_sense(objective_sense: object) -> CpsatObjectiveSense | None:
+    if objective_sense is None:
+        return None
     if objective_sense not in ("maximize", "minimize"):
-        raise ValueError("objective_sense must be 'maximize' or 'minimize'")
+        raise ValueError("objective_sense must be 'maximize', 'minimize', or None")
     return cast("CpsatObjectiveSense", objective_sense)
+
+
+def _selection_policy(
+    objective_sense: CpsatObjectiveSense | None,
+) -> CpsatExperimentSelectionPolicy:
+    if objective_sense is None:
+        return _FEASIBILITY_SELECTION_POLICY
+    return _OPTIMIZATION_SELECTION_POLICY
 
 
 def _resolved_name(attempt: CpsatPythonExperimentAttempt, index: int) -> str:
@@ -251,6 +269,7 @@ def _run_attempt(
     name: str,
     *,
     default_timeout_ms: int,
+    objective_sense: CpsatObjectiveSense | None,
     checker: str | None,
     problem: str | None,
     checker_timeout_ms: int | None,
@@ -279,7 +298,7 @@ def _run_attempt(
         env = seed_config_env(seed=attempt.seed, config_path=None)
         result = run_cpsat_python(attempt.source, timeout_ms=timeout_ms, tracker=tracker, env=env)
 
-    base_eligible, base_reject_reason = _base_eligibility(result)
+    base_eligible, base_reject_reason = _attempt_eligibility(result, objective_sense)
     accepted = False
     checker_status = None
     message = base_reject_reason
@@ -322,25 +341,28 @@ def _run_attempt(
 
 
 def _winner_sort_key(
-    item: tuple[int, CpsatPythonResult], objective_sense: CpsatObjectiveSense
+    item: tuple[int, CpsatPythonResult], objective_sense: CpsatObjectiveSense | None
 ) -> tuple[float, int, int]:
     """Sort key for accepted candidates; the minimum is the winner (lower is better).
 
-    Base acceptance guarantees ``objective`` is a finite number, so negating it
-    for ``maximize`` is safe. Ties break by stronger status, then earliest
-    attempt order (the index component) — never completion order.
+    In feasibility mode, status wins first. In optimization mode, base
+    acceptance guarantees ``objective`` is a finite number, so negating it for
+    ``maximize`` is safe. Ties break by stronger status, then earliest attempt
+    order (the index component) — never completion order.
     """
     index, result = item
+    if objective_sense is None:
+        return 0.0, _STATUS_RANK[result.status], index
     objective = result.objective
-    assert objective is not None  # guaranteed by base acceptance
+    assert objective is not None  # guaranteed by optimization-mode acceptance
     objective_key = -objective if objective_sense == "maximize" else objective
-    return (objective_key, _STATUS_RANK[result.status], index)
+    return objective_key, _STATUS_RANK[result.status], index
 
 
 def run_cpsat_python_experiment(
     attempts: Sequence[CpsatPythonExperimentAttempt],
     *,
-    objective_sense: CpsatObjectiveSense,
+    objective_sense: CpsatObjectiveSense | None = None,
     default_timeout_ms: int = DEFAULT_PYEXEC_TIMEOUT_MS,
     max_parallel_attempts: int = 1,
     problem: str | None = None,
@@ -358,14 +380,17 @@ def run_cpsat_python_experiment(
     assembled in original attempt order regardless of completion order.
 
     Acceptance is two ordered gates (short-circuiting like the save path): base
-    acceptance (status ∈ {optimal, feasible, timeout}, non-empty solution, finite
-    numeric objective), then — only for base-eligible attempts — the optional
-    checker gate (accepted iff the checker returns ``accepted``). The checker is
-    never spent on an attempt that already failed base acceptance.
+    acceptance (status ∈ {optimal, feasible, timeout}, non-empty solution, and
+    in optimization mode only a finite numeric objective), then — only for
+    base-eligible attempts — the optional checker gate (accepted iff the checker
+    returns ``accepted``). The checker is never spent on an attempt that already
+    failed base acceptance.
 
-    The winner is the accepted attempt with the best objective for
-    ``objective_sense``, breaking ties by stronger status (optimal > feasible >
-    timeout) then earliest attempt order. Returns a
+    In optimization mode (``objective_sense`` set), the winner is the accepted
+    attempt with the best objective for ``objective_sense``, breaking ties by
+    stronger status then earliest attempt order. In feasibility mode
+    (``objective_sense`` omitted/``None``), the winner is the accepted attempt
+    with the strongest status, then earliest attempt order. Returns a
     ``CpsatPythonExperimentResult`` with ``status="winner"`` and the winning
     ``CpsatPythonResult``/index/name, or ``status="no_winner"`` when nothing was
     accepted. A ``timeout`` winner is a reportable best incumbent, not a savable
@@ -401,6 +426,7 @@ def run_cpsat_python_experiment(
             attempt,
             names[index],
             default_timeout_ms=default_timeout_ms,
+            objective_sense=validated_objective_sense,
             checker=checker,
             problem=problem,
             checker_timeout_ms=checker_timeout_ms,
@@ -425,28 +451,22 @@ def run_cpsat_python_experiment(
     checker_sha = text_sha256(checker) if checker is not None else None
     problem_sha = text_sha256(problem) if problem is not None else None
 
-    if winner is None:
-        return CpsatPythonExperimentResult(
-            status="no_winner",
-            attempts=attempt_rows,
-            elapsed_ms=elapsed_ms,
-            objective_sense=validated_objective_sense,
-            selection_policy=_SELECTION_POLICY,
-            source_sha256=source_sha256,
-            checker_sha256=checker_sha,
-            problem_sha256=problem_sha,
-        )
+    winner_index = None
+    winner_name = None
+    winner_result = None
+    if winner is not None:
+        winner_index, winner_result = winner
+        winner_name = names[winner_index]
 
-    winner_index, winner_result = winner
     return CpsatPythonExperimentResult(
-        status="winner",
+        status="winner" if winner is not None else "no_winner",
         winner_index=winner_index,
-        winner_name=names[winner_index],
+        winner_name=winner_name,
         winner=winner_result,
         attempts=attempt_rows,
         elapsed_ms=elapsed_ms,
         objective_sense=validated_objective_sense,
-        selection_policy=_SELECTION_POLICY,
+        selection_policy=_selection_policy(validated_objective_sense),
         source_sha256=source_sha256,
         checker_sha256=checker_sha,
         problem_sha256=problem_sha,

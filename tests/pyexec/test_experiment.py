@@ -42,6 +42,10 @@ def _result(
     )
 
 
+def _result_without_solution() -> CpsatPythonResult:
+    return _result(objective=None).model_copy(update={"solution": None})
+
+
 def _checker_report(status: str = "accepted") -> CpsatCheckerReport:
     return CpsatCheckerReport(
         status=status,  # type: ignore[arg-type]
@@ -130,6 +134,52 @@ def test_maximize_picks_largest_objective(monkeypatch: pytest.MonkeyPatch) -> No
 
     assert result.winner_index == 0
     assert result.winner.objective == 10  # type: ignore[union-attr]
+
+
+def test_feasibility_accepts_solution_without_objective(monkeypatch: pytest.MonkeyPatch) -> None:
+    _patch_runner(monkeypatch, {"a": _result(objective=None)})
+
+    result = run_cpsat_python_experiment([_attempt("a")])
+
+    assert result.status == "winner"
+    assert result.objective_sense is None
+    assert result.winner.objective is None  # type: ignore[union-attr]
+    assert result.attempts[0].accepted is True
+
+
+@pytest.mark.parametrize(
+    "run_result",
+    [_result_without_solution(), _result(solution={}, objective=None)],
+    ids=["missing", "empty"],
+)
+def test_feasibility_rejects_missing_or_empty_solution(
+    monkeypatch: pytest.MonkeyPatch, run_result: CpsatPythonResult
+) -> None:
+    _patch_runner(monkeypatch, {"a": run_result})
+
+    result = run_cpsat_python_experiment([_attempt("a")])
+
+    assert result.status == "no_winner"
+    assert result.attempts[0].accepted is False
+    assert result.attempts[0].message == "solution is missing or empty"
+
+
+def test_feasibility_tie_break_prefers_status_then_attempt_order(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _patch_runner(
+        monkeypatch,
+        {
+            "a": _result(status="feasible", objective=None),
+            "b": _result(status="optimal", objective=None),
+            "c": _result(status="optimal", objective=None),
+        },
+    )
+
+    result = run_cpsat_python_experiment([_attempt("a"), _attempt("b"), _attempt("c")])
+
+    assert result.winner_index == 1
+    assert result.selection_policy == "accepted_status_then_attempt_order"
 
 
 def test_tie_break_prefers_stronger_status_then_attempt_order(
@@ -228,7 +278,9 @@ def test_failed_attempts_recorded_but_ignored(monkeypatch: pytest.MonkeyPatch) -
     assert rejected == {"attempt-0", "attempt-1"}
 
 
-def test_missing_objective_rejected_with_reason(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_optimization_rejects_missing_objective_with_reason(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     _patch_runner(monkeypatch, {"a": _result(status="optimal", solution={"x": 1}, objective=None)})
 
     result = run_cpsat_python_experiment([_attempt("a")], objective_sense="minimize")

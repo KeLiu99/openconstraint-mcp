@@ -967,7 +967,7 @@ server runs it in a **local child process**.
 
 ### Explicit experiments
 
-- **`run_cpsat_python_experiment(attempts, objective_sense, …)`** — run a list
+- **`run_cpsat_python_experiment(attempts, objective_sense=None, …)`** — run a list
   of **explicit attempts** and return the best accepted result plus the full
   attempt table. Each attempt is
   `{name, source, seed, config, timeout_ms}`: `source` is a complete,
@@ -993,12 +993,16 @@ server runs it in a **local child process**.
   completion order.
 
   Acceptance is the same two ordered gates as the save path: base acceptance
-  (`status` in `optimal`/`feasible`/`timeout`, non-empty `solution`, finite
-  numeric `objective`), then — only for base-eligible attempts — the optional
-  checker gate (`checker`/`checker_timeout_ms`, same contract as
-  `save_verified_cpsat_python`'s checker). The winner is the accepted attempt
-  with the best objective for `objective_sense`, ties broken by stronger
-  status (`optimal` > `feasible` > `timeout`) then earliest attempt order.
+  (`status` in `optimal`/`feasible`/`timeout`, non-empty `solution`, and in
+  optimization mode only a finite numeric `objective`), then — only for
+  base-eligible attempts — the optional checker gate (`checker`/
+  `checker_timeout_ms`, same contract as `save_verified_cpsat_python`'s
+  checker). In optimization mode (`objective_sense` is `"maximize"` or
+  `"minimize"`), the winner is the accepted attempt with the best objective,
+  ties broken by stronger status (`optimal` > `feasible` > `timeout`) then
+  earliest attempt order. In feasibility mode (`objective_sense` omitted/null),
+  objective is not required and winner selection uses stronger status, then
+  earliest attempt order.
 
   The request is **synchronous and budget-gated**: it is rejected up front
   (before any child runs) when its projected wall-clock budget — batched by
@@ -1011,9 +1015,9 @@ server runs it in a **local child process**.
   `"no_winner"`), `winner_index`/`winner_name`/`winner` (a full
   `CpsatPythonResult`, all present iff `"winner"`), `attempts` (every attempt,
   accepted or not, each with its resolved `name`, `source_sha256`,
-  `config_sha256`), `elapsed_ms`, `objective_sense`, `selection_policy`,
-  `source_sha256` (index-aligned with `attempts`), `checker_sha256`,
-  `problem_sha256`. A `timeout` winner is **reportable, not savable** —
+  `config_sha256`), `elapsed_ms`, `objective_sense` (or null for feasibility),
+  `selection_policy`, `source_sha256` (index-aligned with `attempts`),
+  `checker_sha256`, `problem_sha256`. A `timeout` winner is **reportable, not savable** —
   `save_verified_cpsat_python`'s reported gate still requires
   `optimal`/`feasible`.
 
