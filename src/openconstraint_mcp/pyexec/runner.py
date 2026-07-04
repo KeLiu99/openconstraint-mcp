@@ -102,9 +102,10 @@ def execute_child(
 
     ``env`` is an optional overlay merged ON TOP of the parent's ``os.environ``
     (the child still inherits the server's full environment, with these keys
-    overriding/adding). The sweep uses it to inject ``OPENCONSTRAINT_MCP_CPSAT_SEED``
-    without dropping the interpreter's existing environment; ``None`` leaves the
-    inherited environment untouched (the default subprocess behaviour).
+    overriding/adding). The seeded save replay uses it to inject
+    ``OPENCONSTRAINT_MCP_CPSAT_SEED`` without dropping the interpreter's existing
+    environment; ``None`` leaves the inherited environment untouched (the default
+    subprocess behaviour).
     """
     if timeout_ms <= 0:
         raise ValueError("timeout_ms must be positive")

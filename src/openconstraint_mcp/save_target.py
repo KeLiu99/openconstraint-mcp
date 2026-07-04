@@ -19,9 +19,8 @@ from .schemas import SavedModelArtifact
 # The manifest doubles as the managed-directory marker: only a directory whose
 # marker parses (see _prior_manifest_filenames) may ever be overwritten.
 MANIFEST_FILENAME: str = ".openconstraint-model.json"
-# The durable experiment-log artifact shares one filename across both save
-# layouts (MiniZinc portfolio and CP-SAT sweep) — a documented contract, so it
-# lives here rather than per-backend.
+# The durable experiment-log artifact filename for the MiniZinc portfolio save
+# layout — a documented contract, so it lives here rather than per-backend.
 EXPERIMENT_LOG_FILENAME: str = "experiment-log.json"
 
 _MANIFEST_MANAGED_BY: str = "openconstraint-mcp"

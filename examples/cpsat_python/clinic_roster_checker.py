@@ -1,4 +1,4 @@
-"""Checker script for clinic_roster_sweep.py.
+"""Checker script for a 7-day urgent-care nurse roster CP-SAT script.
 
 Validates a 7-day urgent-care nurse rota against the fixed instance data and
 recomputes the objective independently.

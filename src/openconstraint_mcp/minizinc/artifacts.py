@@ -70,12 +70,11 @@ def _build_experiment_log(portfolio_result: PortfolioSolveResult) -> dict[str, o
 
     Deliberately not a ``model_dump`` passthrough of ``PortfolioSolveResult`` —
     the log is a considered export shape, not an implementation detail of the
-    portfolio schema, so it is built explicitly field by field (mirroring
-    ``pyexec.save._build_experiment_log``'s approach for the CP-SAT sweep
-    side). MiniZinc's ``PortfolioSolveResult`` has no top-level
-    ``objective_sense`` or per-run-budget field (CP-SAT-sweep-only concepts,
-    each attempt row already carries its own ``timeout_ms``) and no top-level
-    ``winner_seed`` (read instead off the winning attempt).
+    portfolio schema, so it is built explicitly field by field. MiniZinc's
+    ``PortfolioSolveResult`` has no top-level ``objective_sense`` or
+    per-run-budget field (each attempt row already carries its own
+    ``timeout_ms``) and no top-level ``winner_seed`` (read instead off the
+    winning attempt).
     """
     winner = _winning_attempt(portfolio_result)
     return {

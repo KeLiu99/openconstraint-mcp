@@ -54,10 +54,10 @@ from .runner import python_script_argv as _python_script_argv
 
 DEFAULT_PYEXEC_TIMEOUT_MS: int = 30_000
 
-# Environment variable the seed sweep (and seeded save replay) sets for the child,
-# carrying the per-attempt CP-SAT random seed. The client-generated script must read
-# it and assign ``solver.parameters.random_seed``; the server cannot force a seed
-# into arbitrary Python. One definition shared by the sweep and save replay paths.
+# Environment variable the seeded save replay sets for the child, carrying the
+# replay CP-SAT random seed. The client-generated script must read it and assign
+# ``solver.parameters.random_seed``; the server cannot force a seed into arbitrary
+# Python.
 CPSAT_SEED_ENV_VAR: str = "OPENCONSTRAINT_MCP_CPSAT_SEED"
 
 # OR-Tools CP-SAT's random_seed parameter is a signed int32. Reject values outside
@@ -283,7 +283,7 @@ def run_cpsat_python(
     path (clean, timeout-kill, or output-cap kill).
 
     ``env`` is an INTERNAL environment overlay merged on top of the parent's
-    environment for the child (the only caller is the seed sweep / save replay,
+    environment for the child (the only caller is the seeded save replay,
     which injects ``OPENCONSTRAINT_MCP_CPSAT_SEED``). It is NOT an MCP-facing
     parameter — the server never exposes arbitrary environment variables.
 
