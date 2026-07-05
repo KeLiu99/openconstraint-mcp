@@ -988,7 +988,12 @@ server runs it in a **local child process**.
   (default `1` = serial; capped at `min(server CPU count, 4)` and rejected
   above that). Coordinate it with each script's own
   `solver.parameters.num_workers` — oversubscribing the machine makes runs
-  slower and less stable, not faster. Results are always returned in
+  slower and less stable, not faster. When an attempt's `config` sets a
+  `num_workers` key, the server checks `max_parallel_attempts * num_workers`
+  against this machine's CPU count and adds a non-blocking advisory to the
+  result's `warnings` list if it's exceeded — a best-effort heuristic limited
+  to that one cooperative convention; it cannot see `num_workers` set any
+  other way (e.g. hardcoded in the script). Results are always returned in
   **original attempt order**, and winner tie-breaks use that same order, never
   completion order.
 
@@ -999,10 +1004,11 @@ server runs it in a **local child process**.
   `checker_timeout_ms`, same contract as `save_verified_cpsat_python`'s
   checker). In optimization mode (`objective_sense` is `"maximize"` or
   `"minimize"`), the winner is the accepted attempt with the best objective,
-  ties broken by stronger status (`optimal` > `feasible` > `timeout`) then
-  earliest attempt order. In feasibility mode (`objective_sense` omitted/null),
-  objective is not required and winner selection uses stronger status, then
-  earliest attempt order.
+  ties broken by stronger status (`optimal` > `feasible` > `timeout`), then
+  fastest `duration_ms`, then earliest attempt order. In feasibility mode
+  (`objective_sense` omitted/null), objective is not required and winner
+  selection uses stronger status, then fastest `duration_ms`, then earliest
+  attempt order.
 
   The request is **synchronous and budget-gated**: it is rejected up front
   (before any child runs) when its projected wall-clock budget — batched by
@@ -1015,22 +1021,33 @@ server runs it in a **local child process**.
   `"no_winner"`), `winner_index`/`winner_name`/`winner` (a full
   `CpsatPythonResult`, all present iff `"winner"`), `attempts` (every attempt,
   accepted or not, each with its resolved `name`, `source_sha256`,
-  `config_sha256`), `elapsed_ms`, `objective_sense` (or null for feasibility),
+  `config_sha256`, and — for a `status="error"` attempt — a bounded
+  `stderr_tail` for debugging, in addition to the concise one-line `message`),
+  `elapsed_ms`, `objective_sense` (or null for feasibility),
   `selection_policy`, `source_sha256` (index-aligned with `attempts`),
-  `checker_sha256`, `problem_sha256`. A `timeout` winner is **reportable, not savable** —
-  `save_verified_cpsat_python`'s reported gate still requires
+  `checker_sha256`, `problem_sha256`, `warnings` (non-blocking advisory
+  strings — currently only the `num_workers`-oversubscription check above;
+  empty when nothing is flagged). A `timeout` winner is **reportable, not
+  savable** — `save_verified_cpsat_python`'s reported gate still requires
   `optimal`/`feasible`.
 
-  Pass the result as `experiment_result` to `save_verified_cpsat_python` (with
-  the winning attempt's exact replay `config`, if any) to persist the winner
-  with full provenance — see below.
+  Pass `include_winner_stdout=False` to omit the winner's raw `stdout` from
+  the returned result — `solution`/`objective` (the parsed, structured answer)
+  are unaffected; for a well-behaved script `stdout` is a redundant raw-text
+  copy of the same JSON. Defaults to `true` (today's behavior, `stdout`
+  included).
 
-#### Persisting an experiment's winner
+  Pass the result as `experiment_result` to `save_verified_cpsat_python` (with
+  the saved attempt's exact replay `config`, if any) to persist it with full
+  provenance — see below. This works for the experiment's winner or any other
+  accepted attempt you choose to save instead.
+
+#### Persisting an attempt from an experiment
 
 `save_verified_cpsat_python` accepts two additional, optional arguments for
 experiment provenance:
 
-- **`config`** — the winning attempt's exact replay config (`{}`/omitted if it
+- **`config`** — the saved attempt's exact replay config (`{}`/omitted if it
   ran without one). Like `seed`, this is a replay aid: the re-run writes it to
   a temp file and sets `OPENCONSTRAINT_MCP_CPSAT_CONFIG`, then — on a
   successful save — persists it as `replay-config.json` alongside its sha256
@@ -1038,18 +1055,21 @@ experiment provenance:
 - **`experiment_result`** — the `CpsatPythonExperimentResult` from
   `run_cpsat_python_experiment`. This is **provenance only, never verification
   evidence**: when supplied, it must be self-consistent with this save request
-  (`status == "winner"`, the winning attempt's `source_sha256` matching
-  `source`, its `seed` matching the supplied `seed`, its `config_sha256`
-  matching the canonical hash of the supplied `config`) or the save is
-  **rejected before any child runs**; the fresh re-run and save gates below
-  still decide everything. On a successful save, the full attempt table is
-  written as `experiment-log.json` — a **provenance summary**, not an archive:
-  every attempt row carries only hashes and scalar outcomes (`index`, `name`,
-  `seed`, `source_sha256`, `config_sha256`, `timeout_ms`, `status`,
-  `objective`, `accepted`, `checker_status`, `message`, `timed_out`,
-  `truncated`, `duration_ms`). **Non-winning attempts' full `config` objects
-  are never persisted** — only the winning attempt's config is, via
-  `replay-config.json`.
+  — `status == "winner"` (i.e. the experiment produced at least one accepted
+  attempt) and at least one **accepted** attempt in `experiment_result.attempts`
+  whose `source_sha256` matches `source`, `seed` matches the supplied `seed`,
+  and `config_sha256` matches the canonical hash of the supplied `config` —
+  not necessarily the experiment's own `winner_index`; you can attach
+  provenance for the winner or for any other accepted attempt you choose to
+  save instead. A mismatch is **rejected before any child runs**; the fresh
+  re-run and save gates below still decide everything. On a successful save,
+  the full attempt table is written as `experiment-log.json` — a
+  **provenance summary**, not an archive: every attempt row carries only
+  hashes and scalar outcomes (`index`, `name`, `seed`, `source_sha256`,
+  `config_sha256`, `timeout_ms`, `status`, `objective`, `accepted`,
+  `checker_status`, `message`, `timed_out`, `truncated`, `duration_ms`).
+  **Non-saved attempts' full `config` objects are never persisted** — only
+  the saved attempt's own config is, via `replay-config.json`.
 
   Saved seed/config provenance **improves replayability but does not
   guarantee bit-for-bit reproducibility** — CP-SAT randomness, parallel
@@ -1306,10 +1326,11 @@ The stdio server exposes two MCP prompts for client-side LLMs:
      (optional): a Python checker script that reads payload JSON from
      `sys.argv[1]` and returns `{"status": "accepted"|"rejected"|"error",
      "errors": [...], "details": {}}` — `accepted` + empty errors is the only
-     passing verdict. The checker is not sandboxed. If the winner came from
-     `run_cpsat_python_experiment`, also pass its `config` and
-     `experiment_result` so the full attempt table is persisted as
-     `experiment-log.json` — a provenance summary, not an archive.
+     passing verdict. The checker is not sandboxed. If the saved script came
+     from `run_cpsat_python_experiment` — the winner, or any other attempt you
+     chose to save instead — also pass its `config` and `experiment_result` so
+     the full attempt table is persisted as `experiment-log.json` — a
+     provenance summary, not an archive.
 
   The server makes no LLM call. The prompt structures how the *client's*
   LLM should write the script; the script is then executed locally by
