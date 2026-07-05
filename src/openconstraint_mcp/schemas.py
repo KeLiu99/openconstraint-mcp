@@ -859,6 +859,13 @@ class CpsatPythonExperimentAttemptResult(BaseModel):
     provenance for a later save's replay-consistency check. ``checker_status``
     is ``None`` when no checker was supplied for the experiment, or this
     attempt failed base acceptance before the checker could run.
+    ``stderr_tail`` is a bounded tail of ``stderr``, populated only when
+    ``status == "error"`` and ``stderr`` is non-empty — ``None`` for every
+    other status (including ``timeout``, ``infeasible``, ``feasible``,
+    ``optimal``, or an ``error`` with empty ``stderr``). This is separate
+    from ``message``'s short single-line snippet: ``message`` stays concise
+    for the printed attempt table, ``stderr_tail`` is a larger bounded tail
+    for debugging, carried only in ``structuredContent``.
     """
 
     index: int
@@ -875,6 +882,7 @@ class CpsatPythonExperimentAttemptResult(BaseModel):
     timed_out: bool
     truncated: bool
     duration_ms: int
+    stderr_tail: str | None = None
 
 
 class CpsatPythonExperimentResult(BaseModel):

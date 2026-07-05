@@ -364,6 +364,70 @@ def test_errored_attempt_message_is_single_line_for_multiline_stderr(
     assert "\n" not in result.attempts[0].message
 
 
+def test_errored_attempt_stderr_tail_matches_full_stderr_when_short(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    traceback = 'Traceback (most recent call last):\n  File "script.py", line 1\nValueError: boom'
+    _patch_runner(
+        monkeypatch,
+        {"a": _result(status="error", solution=None, objective=None, stderr=traceback)},
+    )
+
+    result = run_cpsat_python_experiment([_attempt("a")], objective_sense="minimize")
+
+    assert result.attempts[0].stderr_tail == traceback
+
+
+def test_errored_attempt_with_empty_stderr_has_no_stderr_tail(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _patch_runner(
+        monkeypatch, {"a": _result(status="error", solution=None, objective=None, stderr="")}
+    )
+
+    result = run_cpsat_python_experiment([_attempt("a")], objective_sense="minimize")
+
+    assert result.attempts[0].stderr_tail is None
+
+
+def test_non_error_status_never_populates_stderr_tail(monkeypatch: pytest.MonkeyPatch) -> None:
+    _patch_runner(
+        monkeypatch,
+        {
+            "a": _result(status="optimal", stderr="noisy diagnostic output"),
+            "b": _result(status="timeout", timed_out=True, stderr="noisy diagnostic output"),
+        },
+    )
+
+    result = run_cpsat_python_experiment(
+        [_attempt("a"), _attempt("b")], objective_sense="minimize"
+    )
+
+    assert result.attempts[0].status == "optimal"
+    assert result.attempts[0].stderr_tail is None
+    assert result.attempts[1].status == "timeout"
+    assert result.attempts[1].stderr_tail is None
+
+
+def test_errored_attempt_stderr_tail_is_truncated_tail_not_head(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    marker = "UNIQUE_TAIL_MARKER_END"
+    long_stderr = ("x" * (experiment._ATTEMPT_STDERR_TAIL_MAX_CHARS + 500)) + marker
+    _patch_runner(
+        monkeypatch,
+        {"a": _result(status="error", solution=None, objective=None, stderr=long_stderr)},
+    )
+
+    result = run_cpsat_python_experiment([_attempt("a")], objective_sense="minimize")
+
+    tail = result.attempts[0].stderr_tail
+    assert tail is not None
+    assert len(tail) == experiment._ATTEMPT_STDERR_TAIL_MAX_CHARS
+    assert tail == long_stderr[-experiment._ATTEMPT_STDERR_TAIL_MAX_CHARS :]
+    assert marker in tail
+
+
 def test_optimization_rejects_missing_objective_with_reason(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

@@ -1232,6 +1232,17 @@ def _experiment_attempt_row(**overrides: object) -> CpsatPythonExperimentAttempt
     return CpsatPythonExperimentAttemptResult(**defaults)  # type: ignore[arg-type]
 
 
+def test_experiment_attempt_result_stderr_tail_defaults_to_none() -> None:
+    row = _experiment_attempt_row()
+    assert row.stderr_tail is None
+
+
+def test_experiment_attempt_result_stderr_tail_round_trips() -> None:
+    row = _experiment_attempt_row(status="error", accepted=False, stderr_tail="Traceback: boom")
+    dumped = row.model_dump()
+    assert dumped["stderr_tail"] == "Traceback: boom"
+
+
 def test_cpsat_python_experiment_result_winner_round_trips() -> None:
     result = CpsatPythonExperimentResult(
         status="winner",

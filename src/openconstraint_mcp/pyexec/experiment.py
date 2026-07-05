@@ -356,6 +356,13 @@ _STDERR_SNIPPET_MAX_CHARS: int = 500
 # attempt row should show.
 _STDERR_SNIPPET_MAX_LINES: int = 2
 
+# Bounds the raw stderr tail carried in structuredContent for a
+# status="error" attempt — a much larger allowance than the one-line
+# _STDERR_SNIPPET_MAX_CHARS used for the attempt table's `message`, so a
+# client debugging a script exception can see the full traceback (not just
+# its final line) without the printed table growing.
+_ATTEMPT_STDERR_TAIL_MAX_CHARS: int = 4000
+
 
 def _stderr_snippet(stderr: str) -> str | None:
     """Return the last couple of non-blank stderr lines, bounded, or ``None`` if empty.
@@ -420,6 +427,11 @@ def _run_attempt(
         snippet = _stderr_snippet(result.stderr)
         if snippet is not None:
             message = f"{base_reject_reason}: {snippet}"
+    stderr_tail = (
+        result.stderr[-_ATTEMPT_STDERR_TAIL_MAX_CHARS:]
+        if result.status == "error" and result.stderr
+        else None
+    )
     if base_eligible and checker is not None:
         report = run_checker(
             checker=checker,
@@ -454,6 +466,7 @@ def _run_attempt(
         timed_out=result.timed_out,
         truncated=result.truncated,
         duration_ms=result.duration_ms,
+        stderr_tail=stderr_tail,
     )
     return row, (result if accepted else None)
 
