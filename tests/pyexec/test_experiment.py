@@ -961,11 +961,13 @@ def test_budget_rejection_reuses_overhead_from_breakdown_without_recomputing(
     assert f"overhead_ms={original_overhead}" in str(exc_info.value)
 
 
-def test_budget_rejection_from_batching_hints_at_attempt_count_not_swap(
+def test_budget_rejection_from_batching_hints_at_concrete_fit_values(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """When only the batching (not any single attempt) is over budget, the hint
-    should point at attempt count/parallelism, not at swapping tools."""
+    gives concrete single-lever fit values instead of a bare "adjust these
+    knobs" suggestion — a caller can act on them without inverting the budget
+    formula by hand."""
     monkeypatch.setattr(experiment, "_max_parallel_attempts_cap", lambda: 4)
     per_attempt_timeout = (MAX_CPSAT_EXPERIMENT_WALL_CLOCK_MS // 2) - 1000
     attempts = [_attempt("a", timeout_ms=per_attempt_timeout) for _ in range(3)]
@@ -981,8 +983,41 @@ def test_budget_rejection_from_batching_hints_at_attempt_count_not_swap(
 
     message = str(exc_info.value)
     assert "attempt_count=3" in message
-    assert "reduce attempt count or per-attempt timeout_ms" in message
+    # attempts=3, max_parallel_attempts=1, per-attempt total_ms=65250 (59000 +
+    # 6000 process-tree grace + 250 executor slack) => batches_max=1,
+    # max_attempts_to_fit=1*1=1, min_parallel_to_fit=ceil(3/1)=3,
+    # max_slowest_total_ms=120000//3=40000.
+    assert "reduce attempt count to <= 1" in message
+    assert "increase max_parallel_attempts to >= 3" in message
+    assert (
+        "reduce the slowest attempt's timeout_ms + overhead + checker budget "
+        "to <= 40000 ms total" in message
+    )
+    assert "exceeds this machine's max_parallel_attempts cap" not in message
     assert "use run_cpsat_python instead" not in message
+
+
+def test_budget_rejection_hint_flags_unfittable_parallelism_cap(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """When even the min parallelism needed to fit exceeds this machine's own
+    cap, the hint says so instead of silently suggesting an unreachable value."""
+    monkeypatch.setattr(experiment, "_max_parallel_attempts_cap", lambda: 2)
+    per_attempt_timeout = (MAX_CPSAT_EXPERIMENT_WALL_CLOCK_MS // 2) - 1000
+    attempts = [_attempt("a", timeout_ms=per_attempt_timeout) for _ in range(3)]
+
+    with pytest.raises(ValueError, match="MAX_CPSAT_EXPERIMENT_WALL_CLOCK_MS") as exc_info:
+        experiment._check_wall_clock_budget(
+            attempts,
+            default_timeout_ms=30_000,
+            max_parallel_attempts=1,
+            checker_present=False,
+            checker_timeout_ms=None,
+        )
+
+    message = str(exc_info.value)
+    assert "increase max_parallel_attempts to >= 3" in message
+    assert "exceeds this machine's max_parallel_attempts cap of 2" in message
 
 
 def test_budget_gate_fires_before_any_child_runs(monkeypatch: pytest.MonkeyPatch) -> None:

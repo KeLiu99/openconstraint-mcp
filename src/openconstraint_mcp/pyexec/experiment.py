@@ -275,7 +275,11 @@ def _check_wall_clock_budget(
     this bound, never exceed it). On rejection, the error breaks the total down
     by the slowest attempt's own components so a caller can see whether the
     culprit is attempt count, per-attempt timeout, or the checker timeout —
-    instead of only a single opaque "over budget" total.
+    instead of only a single opaque "over budget" total. When batching (not a
+    single attempt alone) is the culprit, the hint also names concrete
+    single-lever fixes (a max attempt count, a min ``max_parallel_attempts``,
+    or a max per-attempt total) derived from the same breakdown, so a caller
+    does not have to invert the budget formula by hand.
     """
     breakdowns = [
         _attempt_budget_breakdown(
@@ -302,7 +306,35 @@ def _check_wall_clock_budget(
             "instead of run_cpsat_python_experiment"
         )
     else:
-        hint = "reduce attempt count or per-attempt timeout_ms, or increase max_parallel_attempts"
+        # Each lever is solved holding the other two fixed, from the same
+        # batches/slowest values the projection above already used:
+        #   - batches_max: the most batches of the slowest attempt that fit
+        #     the cap; every other bound follows from it.
+        #   - max_attempts_to_fit: batches_max * max_parallel_attempts (the
+        #     largest attempt count admitted at today's parallelism).
+        #   - min_parallel_to_fit: ceil(attempt_count / batches_max) (the
+        #     least parallelism that admits today's attempt count), flagged
+        #     when it exceeds this machine's own parallelism cap.
+        #   - max_slowest_total_ms: MAX_CPSAT_EXPERIMENT_WALL_CLOCK_MS //
+        #     batches (today's batches, not batches_max) — the ceiling the
+        #     slowest attempt's timeout_ms + overhead + checker budget must
+        #     drop under at today's attempt count and parallelism.
+        batches_max = MAX_CPSAT_EXPERIMENT_WALL_CLOCK_MS // slowest.total_ms
+        max_attempts_to_fit = batches_max * max_parallel_attempts
+        min_parallel_to_fit = math.ceil(len(attempts) / batches_max)
+        max_slowest_total_ms = MAX_CPSAT_EXPERIMENT_WALL_CLOCK_MS // batches
+        parallel_cap = _max_parallel_attempts_cap()
+        parallel_note = (
+            f" (exceeds this machine's max_parallel_attempts cap of {parallel_cap})"
+            if min_parallel_to_fit > parallel_cap
+            else ""
+        )
+        hint = (
+            f"reduce attempt count to <= {max_attempts_to_fit}, or increase "
+            f"max_parallel_attempts to >= {min_parallel_to_fit}{parallel_note}, or "
+            "reduce the slowest attempt's timeout_ms + overhead + checker budget "
+            f"to <= {max_slowest_total_ms} ms total"
+        )
     raise ValueError(
         f"projected experiment budget {projected_ms} ms exceeds "
         f"MAX_CPSAT_EXPERIMENT_WALL_CLOCK_MS={MAX_CPSAT_EXPERIMENT_WALL_CLOCK_MS} ms. "
