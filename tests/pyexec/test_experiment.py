@@ -30,12 +30,13 @@ def _result(
     truncated: bool = False,
     stderr: str = "",
     duration_ms: int = 5,
+    stdout: str = "",
 ) -> CpsatPythonResult:
     return CpsatPythonResult(
         status=status,  # type: ignore[arg-type]
         solution=solution if solution is not None else {"x": 1},
         objective=objective,
-        stdout="",
+        stdout=stdout,
         stderr=stderr,
         return_code=None if timed_out else 0,
         timed_out=timed_out,
@@ -266,6 +267,51 @@ def test_unnamed_attempt_defaults_to_attempt_index(monkeypatch: pytest.MonkeyPat
     )
 
     assert result.attempts[1].name == "attempt-1"
+
+
+# --- include_winner_stdout ----------------------------------------------------
+
+
+def test_include_winner_stdout_false_suppresses_winner_stdout(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    raw_stdout = '{"x": 1}'
+    _patch_runner(monkeypatch, {"a": _result(objective=3, stdout=raw_stdout)})
+
+    result = run_cpsat_python_experiment(
+        [_attempt("a")], objective_sense="minimize", include_winner_stdout=False
+    )
+
+    assert result.winner is not None
+    assert result.winner.stdout == experiment._WINNER_STDOUT_OMITTED_SENTINEL
+    assert result.winner.solution == {"x": 1}
+    assert result.winner.objective == 3
+
+
+@pytest.mark.parametrize("include_winner_stdout_kwargs", [{}, {"include_winner_stdout": True}])
+def test_include_winner_stdout_default_or_explicit_true_keeps_stdout(
+    monkeypatch: pytest.MonkeyPatch, include_winner_stdout_kwargs: dict[str, Any]
+) -> None:
+    raw_stdout = '{"x": 1}'
+    _patch_runner(monkeypatch, {"a": _result(objective=3, stdout=raw_stdout)})
+
+    result = run_cpsat_python_experiment(
+        [_attempt("a")], objective_sense="minimize", **include_winner_stdout_kwargs
+    )
+
+    assert result.winner is not None
+    assert result.winner.stdout == raw_stdout
+
+
+def test_include_winner_stdout_false_with_no_winner_is_a_no_op(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _patch_runner(monkeypatch, {"a": _result(status="infeasible", solution=None, objective=None)})
+
+    result = run_cpsat_python_experiment([_attempt("a")], include_winner_stdout=False)
+
+    assert result.status == "no_winner"
+    assert result.winner is None
 
 
 # --- name uniqueness ----------------------------------------------------------

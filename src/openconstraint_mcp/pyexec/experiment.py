@@ -77,6 +77,12 @@ EXECUTOR_POLL_SLACK_MS: int = 250
 # its canonical JSON encoding well under the 1 MiB child-output cap.
 MAX_EXPERIMENT_CONFIG_BYTES: int = 64 * 1024
 
+# Placeholder written into a suppressed winner's stdout when the caller opts
+# out via include_winner_stdout=False. A fixed, recognizable sentinel (not an
+# empty string) so a client can tell "the script printed nothing" apart from
+# "the server omitted this by request".
+_WINNER_STDOUT_OMITTED_SENTINEL: str = "<omitted: include_winner_stdout=False>"
+
 # The hard ceiling on max_parallel_attempts, independent of any client-requested
 # value: never oversubscribe the local machine by more than a handful of
 # concurrent CP-SAT children (each of which may itself use multiple workers).
@@ -500,6 +506,7 @@ def run_cpsat_python_experiment(
     problem: str | None = None,
     checker: str | None = None,
     checker_timeout_ms: int | None = None,
+    include_winner_stdout: bool = True,
     tracker: ChildProcessTracker | None = None,
 ) -> CpsatPythonExperimentResult:
     """Run every explicit attempt and return the best accepted incumbent plus the table.
@@ -590,6 +597,9 @@ def run_cpsat_python_experiment(
     if winner is not None:
         winner_index, winner_result = winner
         winner_name = names[winner_index]
+
+    if not include_winner_stdout and winner_result is not None:
+        winner_result = winner_result.model_copy(update={"stdout": _WINNER_STDOUT_OMITTED_SENTINEL})
 
     return CpsatPythonExperimentResult(
         status="winner" if winner is not None else "no_winner",

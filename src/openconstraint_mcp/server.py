@@ -1027,6 +1027,7 @@ def create_mcp_server() -> FastMCP:
         problem: str | None = None,
         checker: str | None = None,
         checker_timeout_ms: int | None = None,
+        include_winner_stdout: bool = True,
         ctx: Context | None = None,
     ) -> Annotated[CallToolResult, CpsatPythonExperimentResult]:
         await _status_starting(ctx, status.CPSAT_EXPERIMENT_STAGES)
@@ -1040,6 +1041,7 @@ def create_mcp_server() -> FastMCP:
                 problem=problem,
                 checker=checker,
                 checker_timeout_ms=checker_timeout_ms,
+                include_winner_stdout=include_winner_stdout,
                 tracker=child_tracker,
             )
         )
