@@ -211,7 +211,7 @@ User problem:
      environment variable for the replay re-run; a script that hardcodes the
      seed instead of reading this env var silently ignores the replay. The
      server cannot force a seed into arbitrary Python.
-   - Solve: `status_code = solver.Solve(model)`.
+   - Solve: `status_code = solver.solve(model)`.
    - Emit exactly ONE JSON object as the LAST line of stdout:
      ```
      status_map = {{
@@ -222,29 +222,54 @@ User problem:
      }}
      solution = {{}}
      if status_code in (cp_model.OPTIMAL, cp_model.FEASIBLE):
-         solution = {{"var1": solver.Value(var1), ...}}
+         solution = {{"var1": solver.value(var1), ...}}
      print(json.dumps({{
          "status": status_map.get(status_code, "error"),
-         "objective": float(solver.ObjectiveValue()) if model.HasObjective() else None,
+         "objective": float(solver.objective_value) if model.has_objective() else None,
          "solution": solution,
+         "best_objective_bound": (
+             float(solver.best_objective_bound) if model.has_objective() else None
+         ),
      }}))
      ```
+     `best_objective_bound` (OR-Tools' `solver.best_objective_bound` — a
+     PROPERTY, not a method) is a diagnostic bound, not a proven objective.
+     Include it for every optimization model so a `status="unknown"` result
+     still carries search-progress information even with no incumbent.
+     CRITICAL for a PURE FEASIBILITY problem (no `model.minimize`/`maximize`
+     call — a satisfaction-only CSP, e.g. a scheduling or CSP-only model with
+     no cost to optimize): `model.has_objective()` is `False`, and BOTH
+     `solver.objective_value` AND `solver.best_objective_bound` then return
+     `0.0` WITHOUT raising — never omit the `if model.has_objective() else
+     None` guard, or a feasibility problem's `unknown`/`error` result would
+     misleadingly report a "bound" of `0.0` instead of `null`. There is no
+     meaningful bound for a satisfaction-only problem; `null` is the correct
+     value, not `0.0`.
    - For a long or optimization run that may hit `timeout_ms`, ALSO emit an
      intermediate JSON object of the SAME shape on each improved solution,
      from a `cp_model.CpSolverSolutionCallback`, e.g.:
      ```
      class _Best(cp_model.CpSolverSolutionCallback):
-         def __init__(self, variables):
+         def __init__(self, variables, has_objective):
              super().__init__()
              self._variables = variables
+             self._has_objective = has_objective
          def on_solution_callback(self):
              print(json.dumps({{
                  "status": "feasible",
-                 "objective": self.ObjectiveValue(),
-                 "solution": {{name: self.Value(v) for name, v in self._variables.items()}},
+                 "objective": self.objective_value if self._has_objective else None,
+                 "solution": {{name: self.value(v) for name, v in self._variables.items()}},
+                 "best_objective_bound": (
+                     self.best_objective_bound if self._has_objective else None
+                 ),
              }}))
-     solver.Solve(model, _Best({{"var1": var1, ...}}))
+     solver.solve(model, _Best({{"var1": var1, ...}}, model.has_objective()))
      ```
+     Pass `model.has_objective()` into the callback (not just `model`/`solver`
+     module-level) so the SAME `0.0`-vs-`null` guard from the final block
+     above applies here too — a feasibility problem's callback fires on every
+     found solution during a long satisfaction search, not just optimization
+     runs, so it needs the identical guard.
      The child runs unbuffered, so on a timeout the server recovers the last
      such block as the best-so-far. The final block (printed after `Solve`
      returns) remains the authoritative result on a clean run.
@@ -255,7 +280,8 @@ User problem:
 
 4. Call `run_cpsat_python` with the script as `source`. The server runs it
    locally in a child process (not remote, not sandboxed) and returns a
-   `CpsatPythonResult` with `status`, `solution`, `objective`, `stdout`,
+   `CpsatPythonResult` with `status`, `solution`, `objective`,
+   `best_objective_bound` (diagnostic only — see step 3), `stdout`,
    `stderr`, `timed_out`, `truncated`, and `duration_ms`.
 
 5. Present the result clearly:
@@ -265,6 +291,9 @@ User problem:
      `error`. For `timeout`, the child process exceeded `timeout_ms`; if
      `solution` is populated it is the best found so far (unproven, treat as
      feasible-not-optimal), otherwise none was reached in time.
+   - For `unknown` (no incumbent found), mention `best_objective_bound` when
+     present — it shows the solver made bound progress even though no
+     feasible solution was found; it is a diagnostic hint, not a solution.
    - Describe the solution in the user's own terms (task names, variable
      semantics), not as a raw JSON dump.
    - For a HARD instance where CP-SAT's own result quality is unclear, also
@@ -274,7 +303,38 @@ User problem:
      shape, and the server's structured results and checkers from both let
      you compare outcomes before committing to one.
 
-6. Persist only if the user asks. Call `save_verified_cpsat_python` with
+6. For MULTIPLE explicit attempts — comparing model/source variants, or the
+   same source under different cooperative configs — use
+   `run_cpsat_python_experiment` instead of calling `run_cpsat_python`
+   repeatedly yourself. YOU always write every attempt's complete `source`;
+   the server never generates, diffs, or merges attempts — it only executes
+   what you give it, verifies acceptance, and selects a winner.
+   - Each attempt is `{{name, source, seed, config, timeout_ms}}`. `source`
+     is a full, independent script (same SAFETY rule as step 3: model,
+     solve, and stdout JSON only — no network access, file writes/deletes,
+     or subprocess spawning unless the user explicitly requested it). `seed`
+     and `config` are optional cooperative protocols: a script must opt in
+     to read them, and a non-cooperating script simply ignores them.
+   - To vary the SAME script by a cooperative config instead of pasting it
+     multiple times, have the script read
+     `os.environ.get("OPENCONSTRAINT_MCP_CPSAT_CONFIG")`, load that path as
+     JSON, and apply whichever fields it defines, e.g.:
+       `config_path = os.environ.get("OPENCONSTRAINT_MCP_CPSAT_CONFIG")`
+       `config = json.load(open(config_path)) if config_path else {{}}`
+       `solver.parameters.num_workers = config.get("num_workers", 1)`
+     The server only writes this JSON to a temp file and points the env var
+     at it — it never sets OR-Tools parameters itself. An empty `config`
+     (`{{}}`) behaves identically to omitting it.
+   - If you set `max_parallel_attempts > 1`, keep each attempt's own
+     `solver.parameters.num_workers` conservative: `max_parallel_attempts *
+     num_workers` oversubscribing the machine's CPUs makes runs slower and
+     less stable, not faster.
+   - Present the winner plus the full attempt table (every attempt's status,
+     objective, and whether it was accepted/rejected and why). A `timeout`
+     winner is a best-so-far incumbent, not proven optimal, and is not yet
+     savable — re-run just that attempt with a larger `timeout_ms` first.
+
+7. Persist only if the user asks. Call `save_verified_cpsat_python` with
    the script as `source`, the original problem text as `problem`, and the
    user's chosen save directory as an explicit absolute `target_dir`. You
    ask the user for that path; the server opens no file dialog. The server
@@ -286,6 +346,17 @@ User problem:
    re-run it to optimal/feasible first. A saved seeded model reproduces by
    hand only when you set `OPENCONSTRAINT_MCP_CPSAT_SEED` to the recorded
    seed; the saved `solution.py` carries only its own seed fallback.
+   If the script you are saving came from `run_cpsat_python_experiment` —
+   the winner, or any other attempt you chose to save instead — also pass
+   its `config` (that attempt's exact config, `{{}}`/omitted if it ran
+   without one) and that tool's result as `experiment_result`, so the full
+   attempt table is persisted alongside the saved script as
+   `experiment-log.json` — a provenance SUMMARY (hashes and scalar outcomes
+   per attempt), not an archive of every attempt's full config. The server
+   still re-verifies independently and never trusts the attached result as
+   proof; `experiment_result` must describe an ACCEPTED attempt matching
+   THIS exact save (matching source, seed, and config) or the save is
+   rejected before it re-runs anything.
 
    Save gate options (in order of strictness):
    a. Reported gate (always applied): `status` in `optimal`/`feasible` and

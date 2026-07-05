@@ -1,0 +1,8 @@
+{
+  "num_workers": 8,
+  "search_branching": "PORTFOLIO_SEARCH",
+  "randomize_search": true,
+  "use_lns": true,
+  "diversify_lns_params": false,
+  "symmetry_level": 2
+}

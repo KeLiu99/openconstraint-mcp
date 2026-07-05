@@ -1,0 +1,47 @@
+{
+  "managed_by": "openconstraint-mcp",
+  "tool_version": "0.1.0",
+  "created_at": "2026-07-04T22:26:57.969600+00:00",
+  "verification": {
+    "level": "checked",
+    "reported_status": "optimal",
+    "objective": null,
+    "replay_seed": 7,
+    "reproducibility_note": "This result was verified with the replay seed above. The saved solution.py carries its own seed fallback, not this seed; to reproduce the saved incumbent, set OPENCONSTRAINT_MCP_CPSAT_SEED=7 before running solution.py by hand.",
+    "checker": {
+      "status": "accepted",
+      "error_count": 0,
+      "duration_ms": 50,
+      "timed_out": false,
+      "truncated": false
+    },
+    "replay_config_sha256": "a98217b6b93b506167006df5eb5190b7cd0e205012a9b959a6ad388fd81f9bb8"
+  },
+  "artifacts": [
+    {
+      "role": "model",
+      "path": "solution.py",
+      "sha256": "211fb8e58af5c7dfe879eb5dd39d8b43fc0f395a498347804c96480ea80209f1"
+    },
+    {
+      "role": "problem",
+      "path": "problem.txt",
+      "sha256": "0bae194ae630c91788dec0872c7da04af6e8a816f789e3096e8ae8c9b187a82a"
+    },
+    {
+      "role": "checker",
+      "path": "checker.py",
+      "sha256": "02de14cddd747f7f181517ddf6bd7b3eea994b1e4c402cca575950565c73e46a"
+    },
+    {
+      "role": "solution",
+      "path": "solution.json",
+      "sha256": "c54af846dbee2155d9230a30077859810248b3498b4e2e090f18a77d36c308ce"
+    },
+    {
+      "role": "replay_config",
+      "path": "replay-config.json",
+      "sha256": "5abd4629c0bf797a36bfd96c89e267453544ad5c682ca7ec592ebb0b2fb13fa3"
+    }
+  ]
+}

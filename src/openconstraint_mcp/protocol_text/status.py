@@ -43,6 +43,12 @@ CPSAT_PYTHON_STAGES = (
     "Child finished; parsing result",
     "CP-SAT Python execution complete",
 )
+CPSAT_EXPERIMENT_STAGES = (
+    "Validating experiment attempts and admission budget",
+    "Running attempts in child processes",
+    "Attempts finished; selecting winner",
+    "Experiment complete",
+)
 
 
 def cpsat_save_stages(with_checker: bool) -> tuple[str, str, str, str]:

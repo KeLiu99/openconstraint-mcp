@@ -879,10 +879,11 @@ server runs it in a **local child process**.
 - **`run_cpsat_python(source: str, timeout_ms: int = 30000)`** — execute
   LLM-generated OR-Tools CP-SAT Python source in a bounded child process and
   return a `CpsatPythonResult`. The script must emit a single JSON object as
-  its last stdout line:
+  its last stdout line with `status`, `objective`, and `solution`; it may also
+  include an optional `best_objective_bound` for diagnostics:
 
   ```json
-  {"status": "optimal", "objective": 42.0, "solution": {"x": 3, "y": 7}}
+  {"status": "optimal", "objective": 42.0, "solution": {"x": 3, "y": 7}, "best_objective_bound": 42.0}
   ```
 
   Valid `status` values: `optimal`, `feasible`, `infeasible`, `unknown`,
@@ -891,17 +892,25 @@ server runs it in a **local child process**.
   The child process runs under the server's own Python interpreter (the
   project venv, which already ships `ortools`), launched unbuffered (`-u`).
   Output beyond 1 MB is truncated and the child killed. Returns
-  `CpsatPythonResult`: `status`, `solution`, `objective`, `stdout`, `stderr`,
-  `return_code` (null on timeout), `timed_out`, `truncated`, `duration_ms`.
+  `CpsatPythonResult`: `status`, `solution`, `objective`, `best_objective_bound`,
+  `stdout`, `stderr`, `return_code` (null on timeout), `timed_out`, `truncated`,
+  `duration_ms`.
+
+  `best_objective_bound` (OR-Tools' `solver.best_objective_bound` property) is
+  optional and diagnostic only — never used for acceptance, winner selection,
+  or save verification. It is `null` for a script that doesn't emit it
+  (backward compatible) or reports a non-finite/non-numeric value, and it is
+  most useful on `status="unknown"`, where `objective` is `null` but the
+  solver may still have made bound progress.
 
   **Partial result on timeout.** A long or optimization run can also print an
   intermediate JSON object of the same shape on each improved solution (from a
   `cp_model.CpSolverSolutionCallback`). Because the child is unbuffered, the
   last such block survives the timeout kill: on `status="timeout"` the
-  server recovers it into `solution`/`objective` as the best-so-far (unproven —
-  treat as feasible, not optimal), or leaves them null if none was printed in
-  time. On a clean run the final block (printed after `Solve` returns) is the
-  authoritative result.
+  server recovers it into `solution`/`objective`/`best_objective_bound` as the
+  best-so-far (unproven — treat as feasible, not optimal), or leaves them null
+  if none was printed in time. On a clean run the final block (printed after
+  `Solve` returns) is the authoritative result.
 
 - **`run_cpsat_python_file(script_path: str, timeout_ms: int = 30000)`** —
   path-based sibling of `run_cpsat_python`. Pass a local `.py` path instead of
@@ -964,6 +973,133 @@ server runs it in a **local child process**.
   `solution.py` is byte-for-byte the script and carries only its own seed
   fallback, so to reproduce a seeded save by hand you must set
   `OPENCONSTRAINT_MCP_CPSAT_SEED` to the recorded seed.
+
+### Explicit experiments
+
+- **`run_cpsat_python_experiment(attempts, objective_sense=None, …)`** — run a list
+  of **explicit attempts** and return the best accepted result plus the full
+  attempt table. Each attempt is
+  `{name, source, seed, config, timeout_ms}`: `source` is a complete,
+  independent script (the server never generates, diffs, or merges attempts —
+  it only executes what the client supplies); `name` defaults to
+  `attempt-{index}` when omitted, and every resolved name (explicit or
+  defaulted) must be unique. `seed` and `config` are both **cooperative,
+  opt-in** protocols, not server-enforced parameters:
+  - `seed` sets `OPENCONSTRAINT_MCP_CPSAT_SEED`, identically to the save path's
+    seeded replay.
+  - `config` (a JSON object, `{}` treated identically to omitted) is written to
+    a temp file and its path set as `OPENCONSTRAINT_MCP_CPSAT_CONFIG`; a
+    cooperating script reads it and applies whichever fields it understands
+    (e.g. `solver.parameters.num_workers`). The server never sets OR-Tools
+    parameters itself.
+
+  Attempts run through a bounded worker pool sized by `max_parallel_attempts`
+  (default `1` = serial; capped at `min(server CPU count, 4)` and rejected
+  above that). Coordinate it with each script's own
+  `solver.parameters.num_workers` — oversubscribing the machine makes runs
+  slower and less stable, not faster. When an attempt's `config` sets a
+  `num_workers` key, the server checks `max_parallel_attempts * num_workers`
+  against this machine's CPU count and adds a non-blocking advisory to the
+  result's `warnings` list if it's exceeded — a best-effort heuristic limited
+  to that one cooperative convention; it cannot see `num_workers` set any
+  other way (e.g. hardcoded in the script). Results are always returned in
+  **original attempt order**, and winner tie-breaks use that same order, never
+  completion order.
+
+  Acceptance is the same two ordered gates as the save path: base acceptance
+  (`status` in `optimal`/`feasible`/`timeout`, non-empty `solution`, and in
+  optimization mode only a finite numeric `objective`), then — only for
+  base-eligible attempts — the optional checker gate (`checker`/
+  `checker_timeout_ms`, same contract as `save_verified_cpsat_python`'s
+  checker). In optimization mode (`objective_sense` is `"maximize"` or
+  `"minimize"`), the winner is the accepted attempt with the best objective,
+  ties broken by stronger status (`optimal` > `feasible` > `timeout`), then
+  fastest `duration_ms`, then earliest attempt order. In feasibility mode
+  (`objective_sense` omitted/null), objective is not required and winner
+  selection uses stronger status, then fastest `duration_ms`, then earliest
+  attempt order.
+
+  The request is **synchronous and budget-gated**: it is rejected up front
+  (before any child runs) when its projected wall-clock budget — batched by
+  `max_parallel_attempts`, using each attempt's effective timeout, checker
+  timeout when present, and a conservative per-child timeout/kill overhead —
+  exceeds a fixed cap. Reduce attempt count/timeouts or raise
+  `max_parallel_attempts` to fit.
+
+  Returns `CpsatPythonExperimentResult`: `status` (`"winner"` or
+  `"no_winner"`), `winner_index`/`winner_name`/`winner` (a full
+  `CpsatPythonResult`, all present iff `"winner"`), `attempts` (every attempt,
+  accepted or not, each with its resolved `name`, `source_sha256`,
+  `config_sha256`, a diagnostic `best_objective_bound` (useful even for a
+  rejected `"unknown"` attempt with no incumbent; never used for acceptance or
+  winner selection), and — for a `status="error"` attempt — a bounded
+  `stderr_tail` for debugging, in addition to the concise one-line `message`),
+  `elapsed_ms`, `objective_sense` (or null for feasibility),
+  `selection_policy`, `source_sha256` (index-aligned with `attempts`),
+  `checker_sha256`, `problem_sha256`, `warnings` (non-blocking advisory
+  strings: the `num_workers`-oversubscription check above when triggered,
+  plus — whenever there is a winner — an unconditional reproducibility
+  disclaimer; empty only when there is no winner and nothing else is
+  flagged). A `timeout` winner is **reportable, not savable** —
+  `save_verified_cpsat_python`'s reported gate still requires
+  `optimal`/`feasible`.
+
+  **Reproducibility:** an experiment winner reflects **one observed run**,
+  not a guarantee. CP-SAT's randomized search, LNS, restarts, parallel
+  portfolio search (`num_workers > 1`), and short time limits can all
+  make a winner fail to reproduce its objective when
+  `save_verified_cpsat_python` re-runs it fresh — this is expected solver
+  behavior, not a bug, and is why the save path always re-verifies rather
+  than trusting the experiment result. For stronger reproducibility, set
+  explicit solver parameters such as `random_seed`, consider
+  `num_workers = 1`, and verify with the same timeout — exact
+  determinism is still not guaranteed.
+
+  Pass `include_winner_stdout=False` to omit the winner's raw `stdout` from
+  the returned result — `solution`/`objective` (the parsed, structured answer)
+  are unaffected; for a well-behaved script `stdout` is a redundant raw-text
+  copy of the same JSON. Defaults to `true` (today's behavior, `stdout`
+  included).
+
+  Pass the result as `experiment_result` to `save_verified_cpsat_python` (with
+  the saved attempt's exact replay `config`, if any) to persist it with full
+  provenance — see below. This works for the experiment's winner or any other
+  accepted attempt you choose to save instead.
+
+#### Persisting an attempt from an experiment
+
+`save_verified_cpsat_python` accepts two additional, optional arguments for
+experiment provenance:
+
+- **`config`** — the saved attempt's exact replay config (`{}`/omitted if it
+  ran without one). Like `seed`, this is a replay aid: the re-run writes it to
+  a temp file and sets `OPENCONSTRAINT_MCP_CPSAT_CONFIG`, then — on a
+  successful save — persists it as `replay-config.json` alongside its sha256
+  in the manifest.
+- **`experiment_result`** — the `CpsatPythonExperimentResult` from
+  `run_cpsat_python_experiment`. This is **provenance only, never verification
+  evidence**: when supplied, it must be self-consistent with this save request
+  — `status == "winner"` (i.e. the experiment produced at least one accepted
+  attempt) and at least one **accepted** attempt in `experiment_result.attempts`
+  whose `source_sha256` matches `source`, `seed` matches the supplied `seed`,
+  and `config_sha256` matches the canonical hash of the supplied `config` —
+  not necessarily the experiment's own `winner_index`; you can attach
+  provenance for the winner or for any other accepted attempt you choose to
+  save instead. A mismatch is **rejected before any child runs**; the fresh
+  re-run and save gates below still decide everything. On a successful save,
+  the full attempt table is written as `experiment-log.json` — a
+  **provenance summary**, not an archive: every attempt row carries only
+  hashes and scalar outcomes (`index`, `name`, `seed`, `source_sha256`,
+  `config_sha256`, `timeout_ms`, `status`, `objective`, `best_objective_bound`,
+  `accepted`, `checker_status`, `message`, `timed_out`, `truncated`, `duration_ms`).
+  **Non-saved attempts' full `config` objects are never persisted** — only
+  the saved attempt's own config is, via `replay-config.json`.
+
+  Saved seed/config provenance **improves replayability but does not
+  guarantee bit-for-bit reproducibility** — CP-SAT randomness, parallel
+  search, solver version changes, and script-level nondeterminism can still
+  produce a different incumbent; the fresh save-time verification run is
+  always the authority.
 
 ### Background CP-SAT jobs
 
@@ -1053,7 +1189,29 @@ The `examples/cpsat_python/` scripts can be run standalone
 (`python examples/cpsat_python/assignment.py`), and the first two are used as
 integration-test anchors for `run_cpsat_python`. The clinic roster checker is
 exercised directly (independent of any specific CP-SAT script) as a
-standalone checker-protocol test.
+standalone checker-protocol test. `run_cpsat_python_experiment`'s own
+integration test (`tests/pyexec/test_experiment_integration.py`) is
+self-contained rather than reusing the files above: a tiny two-variable
+optimization problem solved by two distinct explicit source variants, plus a
+script that reads the cooperative `OPENCONSTRAINT_MCP_CPSAT_CONFIG` protocol
+for real — both fast and fully deterministic.
+
+#### Comparing explicit source variants
+
+```python
+# The client writes every attempt's complete source; the server never
+# generates, diffs, or merges them — it only executes, verifies, and picks
+# the winner.
+result = await mcp.call_tool("run_cpsat_python_experiment", {
+    "attempts": [
+        {"name": "baseline", "source": open("model_v1.py").read()},
+        {"name": "redundant_constraint", "source": open("model_v2.py").read()},
+    ],
+    "objective_sense": "minimize",
+})
+# result["status"] == "winner" and result["winner_name"] name the best accepted
+# attempt; result["attempts"] carries every attempt's status/objective/verdict.
+```
 
 #### Satisfaction save with a checker
 
@@ -1162,19 +1320,27 @@ The stdio server exposes two MCP prompts for client-side LLMs:
   1. Identify decision variables, domains, constraints, and the objective.
   2. Ask concise clarifying questions if the problem is underspecified.
   3. Write a complete, runnable OR-Tools CP-SAT Python script that emits
-     the required JSON object (`{"status", "objective", "solution"}`) as its
-     last stdout line, using `status_map` to translate `cp_model.OPTIMAL`
-     etc. to vocabulary strings. For reproducible saved artifacts, set a
-     fixed `solver.parameters.random_seed` and prefer a single search
-     worker. **Safety instruction:** generate only CP-SAT modeling code —
-     no network access, no file writes or deletes, no subprocess spawning —
-     unless the user explicitly asked. The server executes this code locally
-     and does not sandbox it.
+     the required JSON object (`{"status", "objective", "solution",
+     "best_objective_bound"}`) as its last stdout line, using `status_map` to
+     translate `cp_model.OPTIMAL` etc. to vocabulary strings. For
+     reproducible saved artifacts, set a fixed `solver.parameters.random_seed`
+     and prefer a single search worker. **Safety instruction:** generate only
+     CP-SAT modeling code — no network access, no file writes or deletes, no
+     subprocess spawning — unless the user explicitly asked. The server
+     executes this code locally and does not sandbox it.
   4. Call `run_cpsat_python` with the script as `source`.
   5. Present the `CpsatPythonResult`: distinguish `optimal` (proven best)
      from `feasible` (valid but not proven optimal); point at `stderr` on
-     `error`; explain `timeout` clearly.
-  6. Optionally — only when the user asks — call `save_verified_cpsat_python`
+     `error`; explain `timeout` clearly; for `unknown`, mention
+     `best_objective_bound` when present as a diagnostic hint (not a solution).
+  6. For MULTIPLE explicit attempts (comparing source variants, or the same
+     source under different cooperative configs), call
+     `run_cpsat_python_experiment` instead of calling `run_cpsat_python`
+     repeatedly — the client always writes every attempt's complete source;
+     the server only executes, verifies, and selects a winner. Coordinate
+     `max_parallel_attempts` with each script's own
+     `solver.parameters.num_workers` to avoid oversubscribing the machine.
+  7. Optionally — only when the user asks — call `save_verified_cpsat_python`
      with the script and an explicit absolute `target_dir`. The client asks
      the user for that path; the server opens no file dialog and re-runs the
      script to evaluate the save gate before writing anything. Three gate
@@ -1185,7 +1351,11 @@ The stdio server exposes two MCP prompts for client-side LLMs:
      (optional): a Python checker script that reads payload JSON from
      `sys.argv[1]` and returns `{"status": "accepted"|"rejected"|"error",
      "errors": [...], "details": {}}` — `accepted` + empty errors is the only
-     passing verdict. The checker is not sandboxed.
+     passing verdict. The checker is not sandboxed. If the saved script came
+     from `run_cpsat_python_experiment` — the winner, or any other attempt you
+     chose to save instead — also pass its `config` and `experiment_result` so
+     the full attempt table is persisted as `experiment-log.json` — a
+     provenance summary, not an archive.
 
   The server makes no LLM call. The prompt structures how the *client's*
   LLM should write the script; the script is then executed locally by

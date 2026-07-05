@@ -10,7 +10,25 @@ would require a real sandbox.
 
 Output contract (executor ↔ script): the script must print, as its **last**
 stdout block, one JSON object:
-    {"status": "<CpsatStatus value>", "objective": <number|null>, "solution": {...}}
+    {"status": "<CpsatStatus value>", "objective": <number|null>, "solution": {...},
+     "best_objective_bound": <number|null>}
+
+``best_objective_bound`` is optional (a script predating it is parsed as
+``None``) and diagnostic only — it is OR-Tools' ``solver.best_objective_bound``,
+not a proven objective, and is never consulted for acceptance or winner
+selection. It is most useful on ``status="unknown"``, where ``objective`` is
+``None`` but the solver may still have made bound progress.
+
+FEASIBILITY-PROBLEM PITFALL: for a pure satisfaction model with no
+``model.minimize``/``maximize`` call, ``model.has_objective()`` is ``False``,
+and OR-Tools does NOT raise for that case — both ``solver.objective_value``
+and ``solver.best_objective_bound`` silently return ``0.0``. A script that
+omits the ``if model.has_objective() else None`` guard would report a
+meaningless ``best_objective_bound: 0.0`` instead of ``null`` for a
+feasibility problem. The executor cannot detect or correct this server-side
+(it only parses whatever number the script prints) — the guard must live in
+the script itself, which is why the canonical snippet and the
+``solve_cpsat_python`` prompt both apply it.
 
 The executor parses the last JSON object it finds in stdout and maps the
 ``status`` field to ``CpsatStatus``; any unrecognized value becomes ``"error"``.
@@ -19,7 +37,8 @@ The child runs unbuffered (``python -u``), so a script MAY print intermediate
 result blocks of the same shape during search (e.g. one per improved solution
 from a ``CpSolverSolutionCallback``). On a clean exit the final block wins as
 usual; on a timeout the executor recovers the last intermediate block's
-``solution``/``objective`` (status stays ``"timeout"`` — a partial is unproven).
+``solution``/``objective``/``best_objective_bound`` (status stays ``"timeout"``
+— a partial is unproven).
 
 Canonical emit snippet (inlined in scripts, never imported from here):
 
@@ -32,20 +51,23 @@ Canonical emit snippet (inlined in scripts, never imported from here):
         "MODEL_INVALID": "error",
     }
     print(json.dumps({
-        "status": status_map.get(solver.StatusName(status), "error"),
-        "objective": solver.ObjectiveValue() if model.HasObjective() else None,
-        "solution": {v.Name(): solver.Value(v) for v in variables},
+        "status": status_map.get(solver.status_name(status), "error"),
+        "objective": solver.objective_value if model.has_objective() else None,
+        "solution": {v.name: solver.value(v) for v in variables},
+        "best_objective_bound": solver.best_objective_bound if model.has_objective() else None,
     }))
 """
 
 from __future__ import annotations
 
+import hashlib
 import json
 import math
 import tempfile
 from collections.abc import Callable
 from pathlib import Path
 from subprocess import Popen
+from typing import Any
 
 from ..childproc import ChildProcessTracker
 from ..schemas import CpsatPythonResult, CpsatStatus
@@ -64,6 +86,12 @@ CPSAT_SEED_ENV_VAR: str = "OPENCONSTRAINT_MCP_CPSAT_SEED"
 # that range before they reach a child process.
 CPSAT_RANDOM_SEED_MIN: int = -2_147_483_648
 CPSAT_RANDOM_SEED_MAX: int = 2_147_483_647
+
+# Environment variable an experiment attempt (or a config-carrying save replay)
+# sets for the child, carrying the path to a temporary JSON config file. A
+# cooperating script reads it and applies whichever fields it understands; the
+# server never sets OR-Tools parameters itself — see CpsatPythonExperimentAttempt.
+CPSAT_CONFIG_ENV_VAR: str = "OPENCONSTRAINT_MCP_CPSAT_CONFIG"
 
 VERIFIED_STATUSES: frozenset[CpsatStatus] = frozenset({"optimal", "feasible"})
 
@@ -102,6 +130,74 @@ def validate_cpsat_random_seed(seed: object, *, label: str = "seed") -> int:
             f"{CPSAT_RANDOM_SEED_MIN}..{CPSAT_RANDOM_SEED_MAX}, got {seed!r}"
         )
     return seed
+
+
+def _canonical_json_dumps(value: dict[str, Any]) -> str:
+    """Serialize value with sorted keys and no extra whitespace.
+
+    The single definition of "canonical" for CP-SAT config hashing, so
+    ``canonical_json_sha256`` and ``canonical_json_byte_length`` can never
+    disagree about what they are hashing/measuring.
+    """
+    return json.dumps(value, sort_keys=True, separators=(",", ":"))
+
+
+def canonical_json_sha256(value: dict[str, Any]) -> str:
+    """Return the sha256 hex digest of value's canonical JSON serialization.
+
+    Sorted keys mean two dicts with the same keys in different insertion order
+    hash identically. Shared by the experiment executor (execution-time config
+    hash) and the save gate (save-time mismatch check) so the two can never
+    drift apart — see ``config_sha256`` for the "no config" normalization atop
+    this.
+    """
+    return hashlib.sha256(_canonical_json_dumps(value).encode("utf-8")).hexdigest()
+
+
+def canonical_json_byte_length(value: dict[str, Any]) -> int:
+    """Return the byte length of value's canonical JSON encoding (for size bounds)."""
+    return len(_canonical_json_dumps(value).encode("utf-8"))
+
+
+def config_sha256(config: dict[str, Any] | None) -> str | None:
+    """Return config's canonical hash, or ``None`` for the "no config" state.
+
+    An empty dict (``{}``) and an omitted config (``None``) both mean "no
+    config" — no temp file, no env var, and this returns ``None`` for both, so
+    hashes and the save replay gate never have to distinguish ``{}`` from absent.
+    """
+    if not config:
+        return None
+    return canonical_json_sha256(config)
+
+
+def write_config_file(directory: Path, config: dict[str, Any]) -> Path:
+    """Write config as JSON into directory and return the file path.
+
+    The caller supplies directory — typically a per-attempt or per-save-run
+    ``tempfile.TemporaryDirectory()`` — so the file's lifetime is scoped to that
+    context and cleaned up on every exit path, including a timeout tree-kill.
+    """
+    path = directory / "config.json"
+    path.write_text(json.dumps(config), encoding="utf-8")
+    return path
+
+
+def seed_config_env(*, seed: int | None, config_path: Path | None) -> dict[str, str | None]:
+    """Build the child env overlay for an optional seed and/or config file path.
+
+    Always returns both protocol keys — set to the requested value, or
+    explicitly ``None`` when not requested. ``execute_child`` treats a ``None``
+    value as "delete this key from the inherited environment", so an
+    attempt/replay documented as seed=None/config=None actually clears any
+    ``OPENCONSTRAINT_MCP_CPSAT_SEED``/``_CONFIG`` the *parent* (server) process
+    happens to have inherited from its own launch environment, instead of
+    silently letting a stale value leak into the child.
+    """
+    return {
+        CPSAT_SEED_ENV_VAR: str(seed) if seed is not None else None,
+        CPSAT_CONFIG_ENV_VAR: str(config_path) if config_path is not None else None,
+    }
 
 
 def normalize_status(raw: object) -> CpsatStatus:
@@ -147,15 +243,20 @@ def parse_last_json(text: str) -> dict | None:
     return found
 
 
-def _extract_solution_objective(parsed: dict) -> tuple[dict | None, float | int | None]:
-    """Pull the solution dict and numeric objective out of a parsed result block.
+def _extract_solution_objective(
+    parsed: dict,
+) -> tuple[dict | None, float | int | None, float | int | None]:
+    """Pull the solution dict, objective, and best_objective_bound out of a result block.
 
     One site for the shape rules so the clean-exit and timeout (partial-recovery)
-    paths can never drift: ``solution`` must be a dict, ``objective`` a real number.
+    paths can never drift: ``solution`` must be a dict, ``objective`` and
+    ``best_objective_bound`` each a real number (same normalization rule for both —
+    a diagnostic bound is just as invalid as a bad objective if it isn't finite/numeric).
     """
     solution = parsed.get("solution") if isinstance(parsed.get("solution"), dict) else None
     objective = normalize_objective(parsed.get("objective"))
-    return solution, objective
+    best_objective_bound = normalize_objective(parsed.get("best_objective_bound"))
+    return solution, objective, best_objective_bound
 
 
 def _result_from_child(child: ChildExecutionResult) -> CpsatPythonResult:
@@ -172,13 +273,14 @@ def _result_from_child(child: ChildExecutionResult) -> CpsatPythonResult:
         # kill. Status stays the executor-owned "timeout" — a partial is unproven,
         # never "optimal".
         partial = parse_last_json(child.stdout)
-        solution, objective = (
-            _extract_solution_objective(partial) if partial is not None else (None, None)
+        solution, objective, best_objective_bound = (
+            _extract_solution_objective(partial) if partial is not None else (None, None, None)
         )
         return CpsatPythonResult(
             status="timeout",
             solution=solution,
             objective=objective,
+            best_objective_bound=best_objective_bound,
             stdout=child.stdout,
             stderr=child.stderr,
             # The child was killed; its exit code (SIGTERM -> -15 on POSIX) is not a
@@ -218,11 +320,12 @@ def _result_from_child(child: ChildExecutionResult) -> CpsatPythonResult:
         )
 
     status = normalize_status(parsed.get("status"))
-    solution, objective = _extract_solution_objective(parsed)
+    solution, objective, best_objective_bound = _extract_solution_objective(parsed)
     return CpsatPythonResult(
         status=status,
         solution=solution,
         objective=objective,
+        best_objective_bound=best_objective_bound,
         stdout=child.stdout,
         stderr=child.stderr,
         return_code=child.return_code,
@@ -264,7 +367,7 @@ def run_cpsat_python(
     timeout_ms: int = DEFAULT_PYEXEC_TIMEOUT_MS,
     tracker: ChildProcessTracker | None = None,
     on_start: Callable[[Popen[str]], None] | None = None,
-    env: dict[str, str] | None = None,
+    env: dict[str, str | None] | None = None,
 ) -> CpsatPythonResult:
     """Execute OR-Tools CP-SAT Python ``source`` in a child process.
 
@@ -283,9 +386,11 @@ def run_cpsat_python(
     path (clean, timeout-kill, or output-cap kill).
 
     ``env`` is an INTERNAL environment overlay merged on top of the parent's
-    environment for the child (the only caller is the seeded save replay,
-    which injects ``OPENCONSTRAINT_MCP_CPSAT_SEED``). It is NOT an MCP-facing
-    parameter — the server never exposes arbitrary environment variables.
+    environment for the child (callers are the experiment attempt runner and
+    the seeded/configured save replay, which inject ``OPENCONSTRAINT_MCP_CPSAT_SEED``
+    / ``_CONFIG``, or explicitly clear them via a ``None`` value — see
+    ``seed_config_env``). It is NOT an MCP-facing parameter — the server never
+    exposes arbitrary environment variables.
 
     For an existing local file, use ``run_cpsat_python_file`` instead — it runs
     the script in its own directory so relative file/import references resolve.
@@ -312,7 +417,7 @@ def run_cpsat_python_file(
     timeout_ms: int = DEFAULT_PYEXEC_TIMEOUT_MS,
     tracker: ChildProcessTracker | None = None,
     on_start: Callable[[Popen[str]], None] | None = None,
-    env: dict[str, str] | None = None,
+    env: dict[str, str | None] | None = None,
 ) -> CpsatPythonResult:
     """Execute an existing OR-Tools CP-SAT Python file in its own directory.
 

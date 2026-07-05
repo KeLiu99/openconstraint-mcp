@@ -13,7 +13,7 @@ from typing import Annotated, Any, ParamSpec, TypeVar, cast
 from anyio import to_thread
 from mcp.server.fastmcp import Context, FastMCP
 from mcp.types import CallToolResult, TextContent
-from pydantic import StrictInt
+from pydantic import JsonValue, StrictInt
 
 from .childproc import ChildProcessTracker
 from .job_errors import JobRejectedError
@@ -58,6 +58,7 @@ from .protocol_text.descriptions import (
     LIST_SOLVE_JOBS_DESCRIPTION,
     MCP_SERVER_INSTRUCTIONS,
     RUN_CPSAT_PYTHON_DESCRIPTION,
+    RUN_CPSAT_PYTHON_EXPERIMENT_DESCRIPTION,
     RUN_CPSAT_PYTHON_FILE_DESCRIPTION,
     SAVE_VERIFIED_CPSAT_PYTHON_DESCRIPTION,
     SAVE_VERIFIED_MINIZINC_MODEL_DESCRIPTION,
@@ -84,12 +85,16 @@ from .pyexec.core import (
     run_cpsat_python,
     run_cpsat_python_file,
 )
+from .pyexec.experiment import run_cpsat_python_experiment
 from .pyexec.jobs import CpsatJobRegistry
 from .pyexec.save import save_verified_cpsat_python
 from .runtime import RuntimeMissingError, get_runtime_status
 from .schemas import (
     CheckResult,
     CpsatExpectation,
+    CpsatObjectiveSense,
+    CpsatPythonExperimentAttempt,
+    CpsatPythonExperimentResult,
     CpsatPythonJobStatus,
     CpsatPythonResult,
     ModelInspectionResult,
@@ -245,6 +250,69 @@ def _wrap_save_result(result: SaveVerifiedModelResult) -> CallToolResult:
     """Wrap a SaveVerifiedModelResult as concise text plus full structured output."""
     return CallToolResult(
         content=[TextContent(type="text", text=_format_save_result_content(result))],
+        structuredContent=result.model_dump(mode="json"),
+    )
+
+
+def _format_cpsat_experiment_content(result: CpsatPythonExperimentResult) -> str:
+    """Return model-visible experiment output: winner first, then the attempt table.
+
+    Concise — the full per-attempt ``CpsatPythonResult`` winner and metadata ride in
+    ``structuredContent``. Notes when a ``timeout`` winner is not savable.
+    """
+    if result.status == "winner":
+        assert result.winner is not None  # guaranteed by the result's status invariant
+        lines = [
+            f"Experiment status: winner ({result.winner_name!r}, "
+            f"objective {result.winner.objective}, status {result.winner.status})",
+        ]
+        if result.winner.status == "timeout":
+            lines.append(
+                "Note: the winner is a best-so-far incumbent (status=timeout) and is "
+                "NOT savable as-is — save_verified_cpsat_python requires "
+                "optimal/feasible. Re-run this attempt with a larger timeout_ms "
+                "until it reports optimal/feasible, then save it."
+            )
+    else:
+        lines = ["Experiment status: no_winner (no attempt was accepted)"]
+
+    lines.extend(
+        [
+            "",
+            (
+                f"Objective sense: {result.objective_sense}"
+                if result.objective_sense is not None
+                else "Mode: feasibility"
+            ),
+            f"Selection policy: {result.selection_policy}",
+            "",
+            "Attempts:",
+        ]
+    )
+    for attempt in result.attempts:
+        verdict = "accepted" if attempt.accepted else "rejected"
+        checker = f", checker={attempt.checker_status}" if attempt.checker_status else ""
+        reason = f" — {attempt.message}" if attempt.message and not attempt.accepted else ""
+        bound = (
+            f", best_bound={attempt.best_objective_bound}"
+            if attempt.best_objective_bound is not None
+            else ""
+        )
+        lines.append(
+            f"- {attempt.name!r} (seed {attempt.seed}): status={attempt.status}, "
+            f"objective={attempt.objective}{bound}, {verdict}{checker}{reason}"
+        )
+    if result.warnings:
+        lines.append("")
+        lines.append("Warnings:")
+        lines.extend(f"- {w}" for w in result.warnings)
+    return "\n".join(lines)
+
+
+def _wrap_cpsat_experiment_result(result: CpsatPythonExperimentResult) -> CallToolResult:
+    """Wrap a CpsatPythonExperimentResult as concise text plus full structured output."""
+    return CallToolResult(
+        content=[TextContent(type="text", text=_format_cpsat_experiment_content(result))],
         structuredContent=result.model_dump(mode="json"),
     )
 
@@ -952,6 +1020,39 @@ def create_mcp_server() -> FastMCP:
         await _status_finished(ctx, status.CPSAT_PYTHON_STAGES)
         return result
 
+    @mcp.tool(
+        name="run_cpsat_python_experiment", description=RUN_CPSAT_PYTHON_EXPERIMENT_DESCRIPTION
+    )
+    @_as_mcp_error(ValueError)
+    async def run_cpsat_python_experiment_tool(
+        attempts: list[CpsatPythonExperimentAttempt],
+        objective_sense: CpsatObjectiveSense | None = None,
+        default_timeout_ms: int = DEFAULT_PYEXEC_TIMEOUT_MS,
+        max_parallel_attempts: int = 1,
+        problem: str | None = None,
+        checker: str | None = None,
+        checker_timeout_ms: int | None = None,
+        include_winner_stdout: bool = True,
+        ctx: Context | None = None,
+    ) -> Annotated[CallToolResult, CpsatPythonExperimentResult]:
+        await _status_starting(ctx, status.CPSAT_EXPERIMENT_STAGES)
+        result = await _run_blocking(
+            functools.partial(
+                run_cpsat_python_experiment,
+                attempts,
+                objective_sense=objective_sense,
+                default_timeout_ms=default_timeout_ms,
+                max_parallel_attempts=max_parallel_attempts,
+                problem=problem,
+                checker=checker,
+                checker_timeout_ms=checker_timeout_ms,
+                include_winner_stdout=include_winner_stdout,
+                tracker=child_tracker,
+            )
+        )
+        await _status_finished(ctx, status.CPSAT_EXPERIMENT_STAGES)
+        return _wrap_cpsat_experiment_result(result)
+
     @mcp.tool(name="save_verified_cpsat_python", description=SAVE_VERIFIED_CPSAT_PYTHON_DESCRIPTION)
     @_as_mcp_error(ValueError)
     async def save_verified_cpsat_python_tool(
@@ -964,6 +1065,8 @@ def create_mcp_server() -> FastMCP:
         timeout_ms: int = DEFAULT_PYEXEC_TIMEOUT_MS,
         overwrite: bool = False,
         seed: StrictInt | None = None,
+        config: dict[str, JsonValue] | None = None,
+        experiment_result: CpsatPythonExperimentResult | None = None,
         ctx: Context | None = None,
     ) -> SaveVerifiedPythonResult:
         stages = status.cpsat_save_stages(with_checker=checker is not None)
@@ -980,6 +1083,8 @@ def create_mcp_server() -> FastMCP:
                 timeout_ms=timeout_ms,
                 overwrite=overwrite,
                 seed=seed,
+                config=config,
+                experiment_result=experiment_result,
                 tracker=child_tracker,
             )
         )

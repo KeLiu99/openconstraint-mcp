@@ -11,6 +11,8 @@ from openconstraint_mcp.schemas import (
     CheckResult,
     CpsatCheckerReport,
     CpsatExpectation,
+    CpsatPythonExperimentAttemptResult,
+    CpsatPythonExperimentResult,
     CpsatPythonJobStatus,
     CpsatPythonResult,
     CpsatStatus,
@@ -1190,3 +1192,194 @@ def test_save_verified_python_result_with_expectation_echoed() -> None:
     assert result.expectation is not None
     assert result.expectation.objective_sense == "maximize"
     assert result.expectation_passed is True
+
+
+# --- CpsatPythonExperimentResult ---------------------------------------------
+
+
+def _experiment_winner_result() -> CpsatPythonResult:
+    return CpsatPythonResult(
+        status="optimal",
+        solution={"x": 3},
+        objective=3.0,
+        stdout="",
+        stderr="",
+        return_code=0,
+        timed_out=False,
+        truncated=False,
+        duration_ms=5,
+    )
+
+
+def _experiment_attempt_row(**overrides: object) -> CpsatPythonExperimentAttemptResult:
+    defaults: dict[str, object] = {
+        "index": 0,
+        "name": "attempt-0",
+        "seed": None,
+        "config_sha256": None,
+        "source_sha256": "hash0",
+        "timeout_ms": 5000,
+        "status": "optimal",
+        "objective": 3.0,
+        "accepted": True,
+        "checker_status": None,
+        "message": None,
+        "timed_out": False,
+        "truncated": False,
+        "duration_ms": 5,
+    }
+    defaults.update(overrides)
+    return CpsatPythonExperimentAttemptResult(**defaults)  # type: ignore[arg-type]
+
+
+def test_experiment_attempt_result_stderr_tail_defaults_to_none() -> None:
+    row = _experiment_attempt_row()
+    assert row.stderr_tail is None
+
+
+def test_experiment_attempt_result_stderr_tail_round_trips() -> None:
+    row = _experiment_attempt_row(status="error", accepted=False, stderr_tail="Traceback: boom")
+    dumped = row.model_dump()
+    assert dumped["stderr_tail"] == "Traceback: boom"
+
+
+def test_cpsat_python_experiment_result_winner_round_trips() -> None:
+    result = CpsatPythonExperimentResult(
+        status="winner",
+        winner_index=0,
+        winner_name="attempt-0",
+        winner=_experiment_winner_result(),
+        attempts=[_experiment_attempt_row()],
+        elapsed_ms=42,
+        objective_sense="maximize",
+        selection_policy="best_accepted_incumbent_objective_then_status_then_duration_then_attempt_order",
+        source_sha256=["hash0"],
+        checker_sha256=None,
+        problem_sha256=None,
+    )
+    dumped = result.model_dump(mode="json")
+    assert dumped["status"] == "winner"
+    assert dumped["winner_name"] == "attempt-0"
+    assert dumped["winner_index"] == 0
+
+
+def test_cpsat_python_experiment_result_warnings_defaults_to_empty_list() -> None:
+    result = CpsatPythonExperimentResult(
+        status="winner",
+        winner_index=0,
+        winner_name="attempt-0",
+        winner=_experiment_winner_result(),
+        attempts=[_experiment_attempt_row()],
+        elapsed_ms=42,
+        objective_sense="maximize",
+        selection_policy="best_accepted_incumbent_objective_then_status_then_duration_then_attempt_order",
+        source_sha256=["hash0"],
+        checker_sha256=None,
+        problem_sha256=None,
+    )
+    assert result.warnings == []
+
+
+def test_cpsat_python_experiment_result_warnings_round_trips() -> None:
+    result = CpsatPythonExperimentResult(
+        status="winner",
+        winner_index=0,
+        winner_name="attempt-0",
+        winner=_experiment_winner_result(),
+        attempts=[_experiment_attempt_row()],
+        elapsed_ms=42,
+        objective_sense="maximize",
+        selection_policy="best_accepted_incumbent_objective_then_status_then_duration_then_attempt_order",
+        source_sha256=["hash0"],
+        checker_sha256=None,
+        problem_sha256=None,
+        warnings=["some warning"],
+    )
+    dumped = result.model_dump(mode="json")
+    assert dumped["warnings"] == ["some warning"]
+
+
+def test_cpsat_python_experiment_result_no_winner_round_trips() -> None:
+    result = CpsatPythonExperimentResult(
+        status="no_winner",
+        attempts=[_experiment_attempt_row(accepted=False, status="infeasible", objective=None)],
+        elapsed_ms=10,
+        objective_sense="minimize",
+        selection_policy="best_accepted_incumbent_objective_then_status_then_duration_then_attempt_order",
+        source_sha256=["hash0"],
+        checker_sha256=None,
+        problem_sha256=None,
+    )
+    dumped = result.model_dump(mode="json")
+    assert dumped["status"] == "no_winner"
+    assert dumped["winner_index"] is None
+    assert dumped["winner_name"] is None
+    assert dumped["winner"] is None
+
+
+def test_cpsat_python_experiment_result_rejects_winner_status_without_a_winner() -> None:
+    with pytest.raises(ValidationError):
+        CpsatPythonExperimentResult(
+            status="winner",
+            winner_index=None,
+            winner_name=None,
+            winner=None,
+            attempts=[],
+            elapsed_ms=1,
+            objective_sense="minimize",
+            selection_policy="best_accepted_incumbent_objective_then_status_then_duration_then_attempt_order",
+            source_sha256=[],
+            checker_sha256=None,
+            problem_sha256=None,
+        )
+
+
+def test_cpsat_python_experiment_result_rejects_no_winner_carrying_a_winner() -> None:
+    with pytest.raises(ValidationError):
+        CpsatPythonExperimentResult(
+            status="no_winner",
+            winner_index=0,
+            winner_name="attempt-0",
+            winner=_experiment_winner_result(),
+            attempts=[_experiment_attempt_row()],
+            elapsed_ms=1,
+            objective_sense="minimize",
+            selection_policy="best_accepted_incumbent_objective_then_status_then_duration_then_attempt_order",
+            source_sha256=["hash0"],
+            checker_sha256=None,
+            problem_sha256=None,
+        )
+
+
+def test_cpsat_python_experiment_result_rejects_out_of_range_winner_index() -> None:
+    with pytest.raises(ValidationError, match="winner_index"):
+        CpsatPythonExperimentResult(
+            status="winner",
+            winner_index=1,
+            winner_name="attempt-0",
+            winner=_experiment_winner_result(),
+            attempts=[_experiment_attempt_row()],
+            elapsed_ms=1,
+            objective_sense="minimize",
+            selection_policy="best_accepted_incumbent_objective_then_status_then_duration_then_attempt_order",
+            source_sha256=["hash0"],
+            checker_sha256=None,
+            problem_sha256=None,
+        )
+
+
+def test_cpsat_python_experiment_result_rejects_winner_name_mismatch() -> None:
+    with pytest.raises(ValidationError, match="winner_name"):
+        CpsatPythonExperimentResult(
+            status="winner",
+            winner_index=0,
+            winner_name="not-the-right-name",
+            winner=_experiment_winner_result(),
+            attempts=[_experiment_attempt_row(name="attempt-0")],
+            elapsed_ms=1,
+            objective_sense="minimize",
+            selection_policy="best_accepted_incumbent_objective_then_status_then_duration_then_attempt_order",
+            source_sha256=["hash0"],
+            checker_sha256=None,
+            problem_sha256=None,
+        )

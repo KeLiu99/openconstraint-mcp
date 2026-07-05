@@ -9,20 +9,24 @@ from __future__ import annotations
 
 import hashlib
 import json
+import tempfile
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
 from ..childproc import ChildProcessTracker
 from ..save_target import (
+    EXPERIMENT_LOG_FILENAME,
     MANIFEST_FILENAME,
     commit_staged_dir,
+    text_sha256,
     validate_save_target,
 )
 from ..save_target import tool_version as _tool_version
 from ..schemas import (
     CpsatCheckerReport,
     CpsatExpectation,
+    CpsatPythonExperimentResult,
     CpsatPythonResult,
     CpsatVerificationLevel,
     SavedArtifactRole,
@@ -34,16 +38,20 @@ from .core import (
     CPSAT_SEED_ENV_VAR,
     DEFAULT_PYEXEC_TIMEOUT_MS,
     VERIFIED_STATUSES,
+    config_sha256,
     effective_checker_timeout_ms,
     run_cpsat_python,
+    seed_config_env,
     validate_checker_args,
     validate_cpsat_random_seed,
+    write_config_file,
 )
 
 SCRIPT_FILENAME: str = "solution.py"
 PROBLEM_FILENAME: str = "problem.txt"
 CHECKER_FILENAME: str = "checker.py"
 SOLUTION_FILENAME: str = "solution.json"
+REPLAY_CONFIG_FILENAME: str = "replay-config.json"
 
 
 def _sha256_of(path: Path) -> str:
@@ -97,6 +105,126 @@ def _failure(
     )
 
 
+def _validate_experiment_result_consistency(
+    experiment_result: CpsatPythonExperimentResult,
+    *,
+    source: str,
+    seed: int | None,
+    config: dict[str, Any] | None,
+) -> None:
+    """Eagerly reject an ``experiment_result`` that cannot describe this save request.
+
+    Unlike a bare ``winner_index`` lookup, this matches CONTENT: it accepts any
+    ``experiment_result.attempts`` row that is ``accepted`` and whose
+    ``source_sha256``/``seed``/``config_sha256`` all match this save request —
+    not only the experiment's own ``winner_index``. This lets a client save a
+    different accepted attempt than the one the experiment picked as its
+    winner (e.g. a faster feasible attempt it prefers over the incumbent-best
+    one), while still refusing to attach provenance for a script this
+    experiment never accepted. This guards only against *accidental* mismatch
+    (wrong script attached, a stale experiment, a seed/config that doesn't
+    match any accepted attempt) — it is not, and cannot be, a proof that
+    ``experiment_result`` is honest. The save decision itself never reads
+    ``experiment_result``; only the fresh re-run below and its gates decide
+    whether this save succeeds. ``config`` here is already normalized
+    (``{}`` -> ``None``) by the caller.
+    """
+    if experiment_result.status != "winner":
+        raise ValueError(
+            "experiment_result.status must be 'winner' to attach an experiment log "
+            f"(got {experiment_result.status!r}); a no_winner experiment has nothing "
+            "to attach"
+        )
+
+    source_hash = text_sha256(source)
+    expected_config_sha256 = config_sha256(config)
+
+    source_matches = [a for a in experiment_result.attempts if a.source_sha256 == source_hash]
+    if not source_matches:
+        raise ValueError(
+            "no attempt in experiment_result has source_sha256 matching the supplied "
+            "source: the experiment_result was attached to a different script"
+        )
+
+    accepted_matches = [a for a in source_matches if a.accepted]
+    if not accepted_matches:
+        candidate = source_matches[0]
+        raise ValueError(
+            f"attempt {candidate.name!r} in experiment_result matches the supplied "
+            f"source but was not accepted (status={candidate.status!r}) — the save "
+            "must replay an accepted attempt"
+        )
+
+    full_match = next(
+        (
+            a
+            for a in accepted_matches
+            if a.seed == seed and a.config_sha256 == expected_config_sha256
+        ),
+        None,
+    )
+    if full_match is not None:
+        return
+
+    candidate = accepted_matches[0]
+    if candidate.seed != seed:
+        raise ValueError(
+            f"experiment_result's accepted attempt {candidate.name!r} has seed "
+            f"({candidate.seed!r}) that does not match the supplied save seed "
+            f"({seed!r})"
+        )
+    raise ValueError(
+        f"experiment_result's accepted attempt {candidate.name!r} has config_sha256 "
+        f"({candidate.config_sha256!r}) that does not match the canonical hash of the "
+        f"supplied save config ({expected_config_sha256!r}); the save must replay "
+        "that attempt's config exactly — this rejects both a save that supplies a "
+        "config the attempt ran without, and one that omits a config the attempt used"
+    )
+
+
+def _build_experiment_log(experiment_result: CpsatPythonExperimentResult) -> dict[str, Any]:
+    """Build the ``experiment-log.json`` content for a ``CpsatPythonExperimentResult``.
+
+    A provenance SUMMARY, not an archive: every attempt row carries only hashes
+    and scalar outcomes — never a full ``config`` object for every attempt.
+    The saved attempt's own replay config is persisted separately as
+    ``replay-config.json`` (see ``_write_staged_artifacts``).
+    """
+    return {
+        "managed_by": "openconstraint-mcp",
+        "tool_version": _tool_version(),
+        "created_at": datetime.now(UTC).isoformat(),
+        "exploration_type": "cpsat_python_experiment",
+        "objective_sense": experiment_result.objective_sense,
+        "selection_policy": experiment_result.selection_policy,
+        "winner_index": experiment_result.winner_index,
+        "winner_name": experiment_result.winner_name,
+        "source_sha256": experiment_result.source_sha256,
+        "checker_sha256": experiment_result.checker_sha256,
+        "problem_sha256": experiment_result.problem_sha256,
+        "elapsed_ms": experiment_result.elapsed_ms,
+        "attempts": [
+            {
+                "index": attempt.index,
+                "name": attempt.name,
+                "seed": attempt.seed,
+                "source_sha256": attempt.source_sha256,
+                "config_sha256": attempt.config_sha256,
+                "timeout_ms": attempt.timeout_ms,
+                "status": attempt.status,
+                "objective": attempt.objective,
+                "accepted": attempt.accepted,
+                "checker_status": attempt.checker_status,
+                "message": attempt.message,
+                "timed_out": attempt.timed_out,
+                "truncated": attempt.truncated,
+                "duration_ms": attempt.duration_ms,
+            }
+            for attempt in experiment_result.attempts
+        ],
+    }
+
+
 def _write_staged_artifacts(
     staging: Path,
     *,
@@ -109,6 +237,8 @@ def _write_staged_artifacts(
     expectation_passed: bool | None,
     checker_report: CpsatCheckerReport | None,
     seed: int | None,
+    config: dict[str, Any] | None,
+    experiment_result: CpsatPythonExperimentResult | None,
 ) -> list[SavedModelArtifact]:
     texts: list[tuple[SavedArtifactRole, str, str]] = [("model", SCRIPT_FILENAME, source)]
     if problem is not None:
@@ -121,6 +251,19 @@ def _write_staged_artifacts(
                 "solution",
                 SOLUTION_FILENAME,
                 json.dumps(run_result.solution or {}, indent=2) + "\n",
+            )
+        )
+    if config is not None:
+        # The saved attempt's own replay config, persisted for auditability and
+        # best-effort replay — not every attempt's config (see
+        # _build_experiment_log).
+        texts.append(("replay_config", REPLAY_CONFIG_FILENAME, json.dumps(config, indent=2) + "\n"))
+    if experiment_result is not None:
+        texts.append(
+            (
+                "experiment_log",
+                EXPERIMENT_LOG_FILENAME,
+                json.dumps(_build_experiment_log(experiment_result), indent=2) + "\n",
             )
         )
 
@@ -161,6 +304,20 @@ def _write_staged_artifacts(
             "timed_out": checker_report.timed_out,
             "truncated": checker_report.truncated,
         }
+    if config is not None:
+        verification["replay_config_sha256"] = config_sha256(config)
+    if experiment_result is not None:
+        # Compact summary only — the full attempt table lives in
+        # experiment-log.json, not duplicated here, so the manifest stays skimmable.
+        verification["experiment_log"] = {
+            "exploration_type": "cpsat_python_experiment",
+            "winner_index": experiment_result.winner_index,
+            "winner_name": experiment_result.winner_name,
+            "attempt_count": len(experiment_result.attempts),
+            "accepted_attempt_count": sum(1 for a in experiment_result.attempts if a.accepted),
+            "statuses_seen": sorted({a.status for a in experiment_result.attempts}),
+            "selection_policy": experiment_result.selection_policy,
+        }
 
     manifest = {
         "managed_by": "openconstraint-mcp",
@@ -190,6 +347,8 @@ def save_verified_cpsat_python(
     timeout_ms: int = DEFAULT_PYEXEC_TIMEOUT_MS,
     overwrite: bool = False,
     seed: int | None = None,
+    config: dict[str, Any] | None = None,
+    experiment_result: CpsatPythonExperimentResult | None = None,
     tracker: ChildProcessTracker | None = None,
 ) -> SaveVerifiedPythonResult:
     """Re-run ``source`` and persist it when it passes all supplied save gates.
@@ -204,19 +363,51 @@ def save_verified_cpsat_python(
     a cooperating script replays that seed, and the manifest records it. This is a
     single-run replay aid only: the save gates are UNCHANGED, and the reported gate
     still requires ``optimal``/``feasible``.
+
+    ``config`` is likewise a replay aid: a non-empty dict is written to a temp file
+    and its path injected via ``OPENCONSTRAINT_MCP_CPSAT_CONFIG`` for the re-run,
+    then persisted as ``replay-config.json`` on a successful save (``{}`` is
+    normalized to "no config", identically to the experiment executor).
+
+    ``experiment_result`` is PROVENANCE ONLY, never verification evidence — like
+    ``portfolio_result`` on the MiniZinc save path. When supplied, it is validated
+    eagerly for self-consistency with this request (winner status, matching
+    ``source``/``seed``/``config`` hashes — see
+    ``_validate_experiment_result_consistency``) but every save decision still
+    comes from the fresh run/gates below. On a successful save, its attempt table
+    is copied into ``experiment-log.json`` as a provenance summary (hashes and
+    scalar outcomes only, never a non-winning attempt's full ``config``).
     """
     validate_checker_args(checker=checker, checker_timeout_ms=checker_timeout_ms)
     if seed is not None:
         seed = validate_cpsat_random_seed(seed)
+    normalized_config = config if config else None
+    if experiment_result is not None:
+        _validate_experiment_result_consistency(
+            experiment_result,
+            source=source,
+            seed=seed,
+            config=normalized_config,
+        )
 
     effective_checker_timeout = effective_checker_timeout_ms(
         checker_timeout_ms=checker_timeout_ms,
         default_timeout_ms=timeout_ms,
     )
-    seed_env = {CPSAT_SEED_ENV_VAR: str(seed)} if seed is not None else None
 
     target = validate_save_target(target_dir, overwrite=overwrite)
-    run_result = run_cpsat_python(source, timeout_ms=timeout_ms, tracker=tracker, env=seed_env)
+    if normalized_config is not None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            config_path = write_config_file(Path(tmp_dir), normalized_config)
+            replay_env = seed_config_env(seed=seed, config_path=config_path)
+            run_result = run_cpsat_python(
+                source, timeout_ms=timeout_ms, tracker=tracker, env=replay_env
+            )
+    else:
+        replay_env = seed_config_env(seed=seed, config_path=None)
+        run_result = run_cpsat_python(
+            source, timeout_ms=timeout_ms, tracker=tracker, env=replay_env
+        )
 
     # --- Reported gate ---
     reported_passed = run_result.status in VERIFIED_STATUSES and bool(run_result.solution)
@@ -293,6 +484,8 @@ def save_verified_cpsat_python(
             expectation_passed=exp_passed,
             checker_report=checker_report,
             seed=seed,
+            config=normalized_config,
+            experiment_result=experiment_result,
         )
 
     files, _ = commit_staged_dir(target, overwrite=overwrite, write_files=_writer)
