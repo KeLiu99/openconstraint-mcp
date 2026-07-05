@@ -114,16 +114,19 @@ def _validate_experiment_result_consistency(
 ) -> None:
     """Eagerly reject an ``experiment_result`` that cannot describe this save request.
 
-    Mirrors ``minizinc/core.py``'s ``_validate_portfolio_result_consistency``, minus
-    the bounds recheck that function needs: unlike ``PortfolioSolveResult``,
-    ``CpsatPythonExperimentResult``'s own model_validator already guarantees
-    ``winner_index`` is in range whenever ``status == "winner"``, so this trusts
-    that invariant instead of re-checking it (see the schema's docstring). This
-    guards only against *accidental* mismatch (wrong script attached, a stale
-    experiment, a seed/config that doesn't match the winning attempt) — it is not,
-    and cannot be, a proof that ``experiment_result`` is honest. The save decision
-    itself never reads ``experiment_result``; only the fresh re-run below and its
-    gates decide whether this save succeeds. ``config`` here is already normalized
+    Unlike a bare ``winner_index`` lookup, this matches CONTENT: it accepts any
+    ``experiment_result.attempts`` row that is ``accepted`` and whose
+    ``source_sha256``/``seed``/``config_sha256`` all match this save request —
+    not only the experiment's own ``winner_index``. This lets a client save a
+    different accepted attempt than the one the experiment picked as its
+    winner (e.g. a faster feasible attempt it prefers over the incumbent-best
+    one), while still refusing to attach provenance for a script this
+    experiment never accepted. This guards only against *accidental* mismatch
+    (wrong script attached, a stale experiment, a seed/config that doesn't
+    match any accepted attempt) — it is not, and cannot be, a proof that
+    ``experiment_result`` is honest. The save decision itself never reads
+    ``experiment_result``; only the fresh re-run below and its gates decide
+    whether this save succeeds. ``config`` here is already normalized
     (``{}`` -> ``None``) by the caller.
     """
     if experiment_result.status != "winner":
@@ -132,29 +135,51 @@ def _validate_experiment_result_consistency(
             f"(got {experiment_result.status!r}); a no_winner experiment has nothing "
             "to attach"
         )
-    winner_index = experiment_result.winner_index
-    assert winner_index is not None  # guaranteed by status=="winner" (schema invariant)
-    winning_attempt = experiment_result.attempts[winner_index]
-    if winning_attempt.source_sha256 != text_sha256(source):
-        raise ValueError(
-            "experiment_result's winning attempt's source_sha256 does not match "
-            "the supplied source: the experiment_result was attached to a different script"
-        )
-    if winning_attempt.seed != seed:
-        raise ValueError(
-            f"experiment_result's winning attempt's seed ({winning_attempt.seed!r}) "
-            f"does not match the supplied save seed ({seed!r})"
-        )
+
+    source_hash = text_sha256(source)
     expected_config_sha256 = config_sha256(config)
-    if winning_attempt.config_sha256 != expected_config_sha256:
+
+    source_matches = [a for a in experiment_result.attempts if a.source_sha256 == source_hash]
+    if not source_matches:
         raise ValueError(
-            "experiment_result's winning attempt's config_sha256 "
-            f"({winning_attempt.config_sha256!r}) does not match the canonical hash of "
-            f"the supplied save config ({expected_config_sha256!r}); the save must "
-            "replay the winning attempt's config exactly — this rejects both a save "
-            "that supplies a config the winner ran without, and one that omits a "
-            "config the winner used"
+            "no attempt in experiment_result has source_sha256 matching the supplied "
+            "source: the experiment_result was attached to a different script"
         )
+
+    accepted_matches = [a for a in source_matches if a.accepted]
+    if not accepted_matches:
+        candidate = source_matches[0]
+        raise ValueError(
+            f"attempt {candidate.name!r} in experiment_result matches the supplied "
+            f"source but was not accepted (status={candidate.status!r}) — the save "
+            "must replay an accepted attempt"
+        )
+
+    full_match = next(
+        (
+            a
+            for a in accepted_matches
+            if a.seed == seed and a.config_sha256 == expected_config_sha256
+        ),
+        None,
+    )
+    if full_match is not None:
+        return
+
+    candidate = accepted_matches[0]
+    if candidate.seed != seed:
+        raise ValueError(
+            f"experiment_result's accepted attempt {candidate.name!r} has seed "
+            f"({candidate.seed!r}) that does not match the supplied save seed "
+            f"({seed!r})"
+        )
+    raise ValueError(
+        f"experiment_result's accepted attempt {candidate.name!r} has config_sha256 "
+        f"({candidate.config_sha256!r}) that does not match the canonical hash of the "
+        f"supplied save config ({expected_config_sha256!r}); the save must replay "
+        "that attempt's config exactly — this rejects both a save that supplies a "
+        "config the attempt ran without, and one that omits a config the attempt used"
+    )
 
 
 def _build_experiment_log(experiment_result: CpsatPythonExperimentResult) -> dict[str, Any]:

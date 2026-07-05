@@ -317,16 +317,17 @@ User problem:
    re-run it to optimal/feasible first. A saved seeded model reproduces by
    hand only when you set `OPENCONSTRAINT_MCP_CPSAT_SEED` to the recorded
    seed; the saved `solution.py` carries only its own seed fallback.
-   If the winner came from `run_cpsat_python_experiment`, also pass its
-   `config` (the winning attempt's exact config, `{{}}`/omitted if it ran
+   If the script you are saving came from `run_cpsat_python_experiment` —
+   the winner, or any other attempt you chose to save instead — also pass
+   its `config` (that attempt's exact config, `{{}}`/omitted if it ran
    without one) and that tool's result as `experiment_result`, so the full
    attempt table is persisted alongside the saved script as
    `experiment-log.json` — a provenance SUMMARY (hashes and scalar outcomes
    per attempt), not an archive of every attempt's full config. The server
    still re-verifies independently and never trusts the attached result as
-   proof; `experiment_result` must describe THIS exact save (matching
-   source, seed, and config) or the save is rejected before it re-runs
-   anything.
+   proof; `experiment_result` must describe an ACCEPTED attempt matching
+   THIS exact save (matching source, seed, and config) or the save is
+   rejected before it re-runs anything.
 
    Save gate options (in order of strictness):
    a. Reported gate (always applied): `status` in `optimal`/`feasible` and
