@@ -7,22 +7,12 @@ this module supplies the CP-SAT-specific writer and the public function.
 
 from __future__ import annotations
 
-import hashlib
 import json
 import tempfile
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-from ..childproc import ChildProcessTracker
-from ..save_target import (
-    EXPERIMENT_LOG_FILENAME,
-    MANIFEST_FILENAME,
-    commit_staged_dir,
-    text_sha256,
-    validate_save_target,
-)
-from ..save_target import tool_version as _tool_version
 from ..schemas import (
     CpsatCheckerReport,
     CpsatExpectation,
@@ -33,6 +23,16 @@ from ..schemas import (
     SavedModelArtifact,
     SaveVerifiedPythonResult,
 )
+from ..shared.childproc import ChildProcessTracker
+from ..shared.save_target import (
+    EXPERIMENT_LOG_FILENAME,
+    MANIFEST_FILENAME,
+    commit_staged_dir,
+    path_sha256,
+    text_sha256,
+    validate_save_target,
+)
+from ..shared.save_target import tool_version as _tool_version
 from .checker import run_checker
 from .core import (
     CPSAT_SEED_ENV_VAR,
@@ -52,10 +52,6 @@ PROBLEM_FILENAME: str = "problem.txt"
 CHECKER_FILENAME: str = "checker.py"
 SOLUTION_FILENAME: str = "solution.json"
 REPLAY_CONFIG_FILENAME: str = "replay-config.json"
-
-
-def _sha256_of(path: Path) -> str:
-    return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
 def _expectation_passes(
@@ -271,7 +267,9 @@ def _write_staged_artifacts(
     for role, filename, text in texts:
         file_path = staging / filename
         file_path.write_text(text, encoding="utf-8")
-        artifacts.append(SavedModelArtifact(role=role, path=filename, sha256=_sha256_of(file_path)))
+        artifacts.append(
+            SavedModelArtifact(role=role, path=filename, sha256=path_sha256(file_path))
+        )
 
     verification: dict[str, Any] = {
         "level": verification_level,
@@ -330,7 +328,7 @@ def _write_staged_artifacts(
     manifest_path.write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
     artifacts.append(
         SavedModelArtifact(
-            role="manifest", path=MANIFEST_FILENAME, sha256=_sha256_of(manifest_path)
+            role="manifest", path=MANIFEST_FILENAME, sha256=path_sha256(manifest_path)
         )
     )
     return artifacts

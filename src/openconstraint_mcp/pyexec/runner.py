@@ -27,8 +27,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from subprocess import Popen
 
-from ..childproc import ChildProcessTracker
-from ..proc import popen_process_group, terminate_process_tree
+from ..shared.childproc import ChildProcessTracker
+from ..shared.proc import popen_process_group, terminate_process_tree
 
 MAX_OUTPUT_BYTES: int = 1 * 1024 * 1024  # 1 MiB
 

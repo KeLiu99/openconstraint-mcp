@@ -5,14 +5,13 @@ execution path. One ``CpsatJobRegistry`` instance is created per server and
 captured by the tool closures; it is never a module-level singleton.
 
 Layering: imports ``pyexec.core`` (executor), ``schemas`` (output models),
-``proc`` (tree-kill), ``job_errors`` (shared rejection error). Never imports
-``minizinc``, ``runtime``, ``server``, or ``jobs``.
+``proc`` (tree-kill), ``job_errors`` (shared rejection error + job-registry
+primitives). Never imports ``minizinc``, ``runtime``, ``server``, or ``jobs``.
 """
 
 from __future__ import annotations
 
 import threading
-import time
 from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
@@ -20,8 +19,6 @@ from subprocess import Popen
 from typing import cast
 from uuid import uuid4
 
-from ..job_errors import JobRejectedError
-from ..proc import terminate_process_tree as _terminate_process_tree
 from ..schemas import (
     _CPSAT_RESULT_BEARING_STATES,
     CpsatJobState,
@@ -29,6 +26,8 @@ from ..schemas import (
     CpsatPythonResult,
     cpsat_job_state_for_result,
 )
+from ..shared.job_errors import JobRejectedError, exception_summary, now_ms
+from ..shared.proc import terminate_process_tree as _terminate_process_tree
 
 # These are package-internal helpers not promoted to the public API.
 # noinspection PyProtectedMember
@@ -74,14 +73,6 @@ class _CpsatJobRecord:
     handle: Popen[str] | None = None
     future: Future[None] | None = None
     cancel_requested: bool = False
-
-
-def _now_ms() -> int:
-    return int(time.time() * 1000)
-
-
-def _exception_summary(exc: Exception) -> str:
-    return f"{type(exc).__name__}: {exc}"
 
 
 class CpsatJobRegistry:
@@ -227,7 +218,7 @@ class CpsatJobRegistry:
 
     def _admit_locked(self, request: _CpsatJobRequest) -> str:
         job_id = uuid4().hex
-        now = _now_ms()
+        now = now_ms()
         runs_now = self._in_flight < self._max_running
         record = _CpsatJobRecord(
             job_id=job_id,
@@ -252,7 +243,7 @@ class CpsatJobRegistry:
         if record.state in _TERMINAL_STATES:
             elapsed_ms = record.elapsed_ms
         elif record.started_at_ms is not None:
-            elapsed_ms = max(_now_ms() - record.started_at_ms, 0)
+            elapsed_ms = max(now_ms() - record.started_at_ms, 0)
         else:
             elapsed_ms = None
         return CpsatPythonJobStatus(
@@ -276,7 +267,7 @@ class CpsatJobRegistry:
     ) -> None:
         if record.state in _TERMINAL_STATES:
             return
-        now = _now_ms()
+        now = now_ms()
         record.state = state
         record.finished_at_ms = now
         if record.started_at_ms is not None:
@@ -311,7 +302,7 @@ class CpsatJobRegistry:
             request = record.request
             record.state = "running"
             if record.started_at_ms is None:
-                record.started_at_ms = _now_ms()
+                record.started_at_ms = now_ms()
         try:
             if request.is_file:
                 assert request.script_path is not None
@@ -329,7 +320,7 @@ class CpsatJobRegistry:
                 )
         except Exception as exc:  # noqa: BLE001 - worker boundary: never leak; record as failed
             with self._lock:
-                self._finalize(record, "failed", None, _exception_summary(exc))
+                self._finalize(record, "failed", None, exception_summary(exc))
             return
         with self._lock:
             if record.cancel_requested:

@@ -15,8 +15,6 @@ from mcp.server.fastmcp import Context, FastMCP
 from mcp.types import CallToolResult, TextContent
 from pydantic import JsonValue, StrictInt
 
-from .childproc import ChildProcessTracker
-from .job_errors import JobRejectedError
 from .jobs import JobRegistry
 from .minizinc.core import (
     DEFAULT_CHECK_TIMEOUT_MS,
@@ -73,12 +71,10 @@ from .protocol_text.descriptions import (
 )
 from .protocol_text.prompts import SOLVE_CONSTRAINT_PROBLEM_PROMPT, SOLVE_CPSAT_PYTHON_PROMPT
 from .protocol_text.results import (
-    SOLUTION_CHECK_NON_ADJUDICATION_NOTE,
-    SOLVER_CAPABILITY_METADATA_NOTE,
-    SOLVER_INVENTORY_PRESENTATION_REQUIREMENT,
-    SOLVER_NUM_SOLUTIONS_NOTE,
-    SOLVER_RUNTIME_CONFIG_CAUTION,
-    STATS_PRESENTATION_REQUIREMENT,
+    _format_cpsat_experiment_content,
+    _format_save_result_content,
+    _format_solve_result_content,
+    _format_solver_list_content,
 )
 from .pyexec.core import (
     DEFAULT_PYEXEC_TIMEOUT_MS,
@@ -108,16 +104,10 @@ from .schemas import (
     SolverList,
     UnsatCoreResult,
 )
+from .shared.childproc import ChildProcessTracker
+from .shared.job_errors import JobRejectedError
 
 _PACKAGE_NAME = "openconstraint-mcp"
-_PREFERRED_STAT_KEYS = (
-    "objective",
-    "objectiveBound",
-    "nSolutions",
-    "failures",
-    "propagations",
-    "solveTime",
-)
 
 
 def _homepage_url() -> str | None:
@@ -168,82 +158,12 @@ def _log_boot_diagnostic() -> None:
     print("\n".join(lines), file=sys.stderr, flush=True)
 
 
-def _format_solve_result_content(result: SolveResult) -> str:
-    """Return model-visible solve output that leads with the solution, stats last."""
-    lines = [
-        f"Status: {result.status}",
-        f"Solver: {result.solver}",
-        f"Return code: {result.return_code}",
-        f"Timed out: {str(result.timed_out).lower()}",
-        f"Elapsed: {result.elapsed_ms} ms",
-    ]
-
-    if result.stdout:
-        lines.extend(["", "Stdout:", result.stdout.rstrip()])
-    if result.stderr:
-        lines.extend(["", "Stderr:", result.stderr.rstrip()])
-
-    if result.statistics:
-        lines.extend(["", STATS_PRESENTATION_REQUIREMENT, "Statistics:"])
-        preferred = [k for k in _PREFERRED_STAT_KEYS if k in result.statistics]
-        others = [k for k in result.statistics if k not in _PREFERRED_STAT_KEYS]
-        lines.extend([f"- {key}: {result.statistics[key]}" for key in (preferred + others)])
-
-    solve_text = "\n".join(lines)
-    if result.checker is None:
-        return solve_text
-
-    violations = sum(1 for check in result.checker.checks if check.violation)
-    return "\n".join(
-        [
-            f"Checker status: {result.checker.status}",
-            f"Solve status: {result.status}",
-            f"Solutions produced: {len(result.solutions)}",
-            f"Violations: {violations}",
-            "",
-            SOLUTION_CHECK_NON_ADJUDICATION_NOTE,
-            "",
-            solve_text,
-        ]
-    )
-
-
 def _wrap_solve_result(result: SolveResult) -> CallToolResult:
     """Wrap a SolveResult as prose text content plus the full structured output."""
     return CallToolResult(
         content=[TextContent(type="text", text=_format_solve_result_content(result))],
         structuredContent=result.model_dump(mode="json"),
     )
-
-
-def _format_save_result_content(result: SaveVerifiedModelResult) -> str:
-    """Return model-visible save output: the outcome and target first, files after.
-
-    Deliberately concise — the verifying ``SolveResult`` (solutions, statistics,
-    checker transcript) rides in ``structuredContent``; the text content states
-    what happened, where, and which files exist.
-    """
-    lines = [
-        f"Status: {result.status}",
-        f"Target directory: {result.target_dir}",
-        result.message,
-    ]
-    if result.files:
-        lines.extend(["", "Saved files:"])
-        lines.extend(
-            f"- {artifact.path} ({artifact.role}, sha256 {artifact.sha256})"
-            for artifact in result.files
-        )
-    lines.extend(["", f"Check status: {result.check.status}"])
-
-    solve = result.solve
-    if solve is None:
-        return "\n".join(lines)
-
-    lines.append(f"Solve status: {solve.status}")
-    if solve.checker is not None:
-        lines.append(f"Checker status: {solve.checker.status}")
-    return "\n".join(lines)
 
 
 def _wrap_save_result(result: SaveVerifiedModelResult) -> CallToolResult:
@@ -254,97 +174,11 @@ def _wrap_save_result(result: SaveVerifiedModelResult) -> CallToolResult:
     )
 
 
-def _format_cpsat_experiment_content(result: CpsatPythonExperimentResult) -> str:
-    """Return model-visible experiment output: winner first, then the attempt table.
-
-    Concise — the full per-attempt ``CpsatPythonResult`` winner and metadata ride in
-    ``structuredContent``. Notes when a ``timeout`` winner is not savable.
-    """
-    if result.status == "winner":
-        assert result.winner is not None  # guaranteed by the result's status invariant
-        lines = [
-            f"Experiment status: winner ({result.winner_name!r}, "
-            f"objective {result.winner.objective}, status {result.winner.status})",
-        ]
-        if result.winner.status == "timeout":
-            lines.append(
-                "Note: the winner is a best-so-far incumbent (status=timeout) and is "
-                "NOT savable as-is — save_verified_cpsat_python requires "
-                "optimal/feasible. Re-run this attempt with a larger timeout_ms "
-                "until it reports optimal/feasible, then save it."
-            )
-    else:
-        lines = ["Experiment status: no_winner (no attempt was accepted)"]
-
-    lines.extend(
-        [
-            "",
-            (
-                f"Objective sense: {result.objective_sense}"
-                if result.objective_sense is not None
-                else "Mode: feasibility"
-            ),
-            f"Selection policy: {result.selection_policy}",
-            "",
-            "Attempts:",
-        ]
-    )
-    for attempt in result.attempts:
-        verdict = "accepted" if attempt.accepted else "rejected"
-        checker = f", checker={attempt.checker_status}" if attempt.checker_status else ""
-        reason = f" — {attempt.message}" if attempt.message and not attempt.accepted else ""
-        bound = (
-            f", best_bound={attempt.best_objective_bound}"
-            if attempt.best_objective_bound is not None
-            else ""
-        )
-        lines.append(
-            f"- {attempt.name!r} (seed {attempt.seed}): status={attempt.status}, "
-            f"objective={attempt.objective}{bound}, {verdict}{checker}{reason}"
-        )
-    if result.warnings:
-        lines.append("")
-        lines.append("Warnings:")
-        lines.extend(f"- {w}" for w in result.warnings)
-    return "\n".join(lines)
-
-
 def _wrap_cpsat_experiment_result(result: CpsatPythonExperimentResult) -> CallToolResult:
     """Wrap a CpsatPythonExperimentResult as concise text plus full structured output."""
     return CallToolResult(
         content=[TextContent(type="text", text=_format_cpsat_experiment_content(result))],
         structuredContent=result.model_dump(mode="json"),
-    )
-
-
-def _format_solver_list_content(result: SolverList) -> str:
-    """Return model-visible solver inventory: a complete id/name/version table.
-
-    Leads with a presentation requirement so a client renders every row instead
-    of summarizing or grouping, then appends advisory notes. The full
-    ``capabilities`` object is deliberately kept out of this text — it lives in
-    ``structuredContent`` and is surfaced only on request — so the default
-    presentation stays compact and never dumps raw ``std_flags``.
-    """
-    return "\n".join(
-        [
-            SOLVER_INVENTORY_PRESENTATION_REQUIREMENT,
-            "",
-            "| id | name | version |",
-            "| --- | --- | --- |",
-            *(
-                f"| {solver.id} | {solver.name} | "
-                f"{solver.version if solver.version is not None else '<unknown version>'} |"
-                for solver in result.solvers
-            ),
-            "",
-            result.capability_note,
-            SOLVER_CAPABILITY_METADATA_NOTE,
-            "",
-            SOLVER_NUM_SOLUTIONS_NOTE,
-            "",
-            SOLVER_RUNTIME_CONFIG_CAUTION,
-        ]
     )
 
 

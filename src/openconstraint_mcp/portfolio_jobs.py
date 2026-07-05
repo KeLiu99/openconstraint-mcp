@@ -28,12 +28,10 @@ never imports ``server``.
 from __future__ import annotations
 
 import threading
-import time
 from collections.abc import Sequence
 from dataclasses import dataclass, field
 from uuid import uuid4
 
-from .job_errors import JobRejectedError
 from .jobs import JobRegistry
 from .minizinc.core import DEFAULT_SOLVE_TIMEOUT_MS
 
@@ -48,10 +46,7 @@ from .schemas import (
     PortfolioSolveControls,
     PortfolioSolveResult,
 )
-
-
-def _now_ms() -> int:
-    return int(time.time() * 1000)
+from .shared.job_errors import JobRejectedError, now_ms
 
 
 @dataclass
@@ -96,7 +91,7 @@ def _to_status(record: _PortfolioRecord) -> PortfolioJobStatus:
     if record.state != "running":
         elapsed_ms = record.elapsed_ms
     else:
-        elapsed_ms = max(_now_ms() - record.started_at_ms, 0)
+        elapsed_ms = max(now_ms() - record.started_at_ms, 0)
     return PortfolioJobStatus(
         job_id=record.job_id,
         state=record.state,
@@ -197,7 +192,7 @@ class PortfolioJobRegistry:
         )
         try:
             job_id = uuid4().hex
-            now = _now_ms()
+            now = now_ms()
             record = _PortfolioRecord(
                 job_id=job_id,
                 submitted_at_ms=now,
@@ -299,7 +294,7 @@ class PortfolioJobRegistry:
     ) -> None:
         # Caller holds record.lock. Records the terminal state and registers the job
         # for retention eviction under the registry lock.
-        now = _now_ms()
+        now = now_ms()
         record.state = state
         record.finished_at_ms = now
         record.elapsed_ms = max(now - record.started_at_ms, 0)

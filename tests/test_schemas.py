@@ -5,7 +5,6 @@ import hashlib
 import pytest
 from pydantic import ValidationError
 
-from openconstraint_mcp.save_target import text_sha256
 from openconstraint_mcp.schemas import (
     CheckerReport,
     CheckResult,
@@ -34,6 +33,7 @@ from openconstraint_mcp.schemas import (
     cpsat_job_state_for_result,
     job_state_for_result,
 )
+from openconstraint_mcp.shared.save_target import text_sha256
 
 
 def test_solve_result_round_trips() -> None:

@@ -447,9 +447,7 @@ def test_non_error_status_never_populates_stderr_tail(monkeypatch: pytest.Monkey
         },
     )
 
-    result = run_cpsat_python_experiment(
-        [_attempt("a"), _attempt("b")], objective_sense="minimize"
-    )
+    result = run_cpsat_python_experiment([_attempt("a"), _attempt("b")], objective_sense="minimize")
 
     assert result.attempts[0].status == "optimal"
     assert result.attempts[0].stderr_tail is None

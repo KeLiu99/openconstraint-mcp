@@ -17,8 +17,8 @@ from openconstraint_mcp.minizinc.artifacts import (
     SOLVE_RESULT_FILENAME,
     write_verified_model_dir,
 )
-from openconstraint_mcp.save_target import validate_save_target
 from openconstraint_mcp.schemas import CheckResult, SolveResult
+from openconstraint_mcp.shared.save_target import validate_save_target
 
 _MODEL = "var 1..5: x;\nconstraint x > 2;\nsolve satisfy;\n"
 

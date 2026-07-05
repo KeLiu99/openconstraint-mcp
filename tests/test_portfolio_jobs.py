@@ -15,10 +15,10 @@ from typing import Any
 
 import pytest
 
-from openconstraint_mcp.job_errors import JobRejectedError
 from openconstraint_mcp.jobs import JobRegistry
 from openconstraint_mcp.portfolio_jobs import PortfolioJobRegistry
 from openconstraint_mcp.schemas import PortfolioSolveControls, PortfolioSolveResult, SolveResult
+from openconstraint_mcp.shared.job_errors import JobRejectedError
 
 _TERMINAL = {"succeeded", "cancelled"}
 _SOLVE_TERMINAL = {"succeeded", "failed", "timeout", "cancelled"}

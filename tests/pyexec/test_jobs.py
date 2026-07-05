@@ -9,9 +9,9 @@ from typing import Any
 
 import pytest
 
-from openconstraint_mcp.job_errors import JobRejectedError
 from openconstraint_mcp.pyexec.jobs import CpsatJobRegistry
 from openconstraint_mcp.schemas import CpsatPythonResult, CpsatStatus
+from openconstraint_mcp.shared.job_errors import JobRejectedError
 
 
 def _cpsat_result(

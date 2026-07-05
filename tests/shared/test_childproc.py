@@ -6,8 +6,8 @@ import sys
 
 import pytest
 
-from openconstraint_mcp.childproc import ChildProcessTracker
-from openconstraint_mcp.proc import popen_process_group
+from openconstraint_mcp.shared.childproc import ChildProcessTracker
+from openconstraint_mcp.shared.proc import popen_process_group
 
 
 class _FakePopen:

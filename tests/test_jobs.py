@@ -6,7 +6,6 @@ from typing import Any
 
 import pytest
 
-from openconstraint_mcp.job_errors import JobRejectedError
 from openconstraint_mcp.jobs import JobRegistry, SolveRequest
 from openconstraint_mcp.schemas import (
     SolverCapabilities,
@@ -14,6 +13,7 @@ from openconstraint_mcp.schemas import (
     SolverInfo,
     SolverList,
 )
+from openconstraint_mcp.shared.job_errors import JobRejectedError
 
 
 def _request(model: str = "solve satisfy;", **overrides: Any) -> SolveRequest:
