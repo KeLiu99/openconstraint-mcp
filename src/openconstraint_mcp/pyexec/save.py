@@ -186,8 +186,8 @@ def _build_experiment_log(experiment_result: CpsatPythonExperimentResult) -> dic
     """Build the ``experiment-log.json`` content for a ``CpsatPythonExperimentResult``.
 
     A provenance SUMMARY, not an archive: every attempt row carries only hashes
-    and scalar outcomes — never a non-winning attempt's full ``config`` object.
-    The winning attempt's replay config is persisted separately as
+    and scalar outcomes — never a full ``config`` object for every attempt.
+    The saved attempt's own replay config is persisted separately as
     ``replay-config.json`` (see ``_write_staged_artifacts``).
     """
     return {
@@ -254,8 +254,8 @@ def _write_staged_artifacts(
             )
         )
     if config is not None:
-        # The winning attempt's replay config, persisted for auditability and
-        # best-effort replay — never a non-winning attempt's config (see
+        # The saved attempt's own replay config, persisted for auditability and
+        # best-effort replay — not every attempt's config (see
         # _build_experiment_log).
         texts.append(("replay_config", REPLAY_CONFIG_FILENAME, json.dumps(config, indent=2) + "\n"))
     if experiment_result is not None:

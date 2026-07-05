@@ -676,7 +676,7 @@ SAVE_VERIFIED_CPSAT_PYTHON_DESCRIPTION = (
     "decide everything. On a successful save its full attempt table is "
     "written as `experiment-log.json` — "
     "a provenance SUMMARY (hashes and scalar outcomes per attempt), never an "
-    "archive of every attempt's full `config`; only the winning attempt's config "
+    "archive of every attempt's full `config`; only the saved attempt's own config "
     "is persisted, via `replay-config.json`. Saved seed/config provenance improves "
     "replayability but does not guarantee bit-for-bit reproducibility — CP-SAT "
     "randomness, parallel search, and script-level nondeterminism can still differ; "
