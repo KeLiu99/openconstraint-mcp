@@ -1276,15 +1276,27 @@ def test_run_cpsat_python_experiment_warnings_populated_when_oversubscribed(
         max_parallel_attempts=2,
     )
 
-    assert len(result.warnings) == 1
+    assert len(result.warnings) == 2
     assert "num_workers=8" in result.warnings[0]
+    assert result.warnings[1] == experiment._REPRODUCIBILITY_WARNING
 
 
-def test_run_cpsat_python_experiment_warnings_empty_when_no_num_workers_set(
+def test_run_cpsat_python_experiment_warnings_only_reproducibility_when_no_num_workers_set(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     _patch_runner(monkeypatch, {"a": _result()})
 
     result = run_cpsat_python_experiment([_attempt("a")], objective_sense="minimize")
 
+    assert result.warnings == [experiment._REPRODUCIBILITY_WARNING]
+
+
+def test_run_cpsat_python_experiment_warnings_empty_when_no_winner(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _patch_runner(monkeypatch, {"a": _result_without_solution()})
+
+    result = run_cpsat_python_experiment([_attempt("a")], objective_sense="minimize")
+
+    assert result.status == "no_winner"
     assert result.warnings == []

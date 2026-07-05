@@ -1026,10 +1026,23 @@ server runs it in a **local child process**.
   `elapsed_ms`, `objective_sense` (or null for feasibility),
   `selection_policy`, `source_sha256` (index-aligned with `attempts`),
   `checker_sha256`, `problem_sha256`, `warnings` (non-blocking advisory
-  strings — currently only the `num_workers`-oversubscription check above;
-  empty when nothing is flagged). A `timeout` winner is **reportable, not
-  savable** — `save_verified_cpsat_python`'s reported gate still requires
+  strings: the `num_workers`-oversubscription check above when triggered,
+  plus — whenever there is a winner — an unconditional reproducibility
+  disclaimer; empty only when there is no winner and nothing else is
+  flagged). A `timeout` winner is **reportable, not savable** —
+  `save_verified_cpsat_python`'s reported gate still requires
   `optimal`/`feasible`.
+
+  **Reproducibility:** an experiment winner reflects **one observed run**,
+  not a guarantee. CP-SAT's randomized search, LNS, restarts, parallel
+  portfolio search (`num_workers > 1`), and short time limits can all
+  make a winner fail to reproduce its objective when
+  `save_verified_cpsat_python` re-runs it fresh — this is expected solver
+  behavior, not a bug, and is why the save path always re-verifies rather
+  than trusting the experiment result. For stronger reproducibility, set
+  explicit solver parameters such as `random_seed`, consider
+  `num_workers = 1`, and verify with the same timeout — exact
+  determinism is still not guaranteed.
 
   Pass `include_winner_stdout=False` to omit the winner's raw `stdout` from
   the returned result — `solution`/`objective` (the parsed, structured answer)

@@ -88,6 +88,23 @@ _WINNER_STDOUT_OMITTED_SENTINEL: str = "<omitted: include_winner_stdout=False>"
 # concurrent CP-SAT children (each of which may itself use multiple workers).
 _MAX_PARALLEL_ATTEMPTS_CAP_LIMIT: int = 4
 
+# Unconditional advisory attached to every winner: an experiment winner is one
+# observed run, not a reproducibility guarantee. This is deliberately NOT
+# gated on inspecting attempt.seed or config["num_workers"] — the server
+# cannot see how (or whether) a script's source actually applies those, so a
+# narrower "only warn when seed is unset" heuristic would be both brittle and
+# falsely reassuring when it stays silent.
+_REPRODUCIBILITY_WARNING: str = (
+    "This winner reflects one observed run, not a reproducibility guarantee. "
+    "CP-SAT's randomized search, LNS, restarts, parallel portfolio search "
+    "(num_workers > 1), and short time limits can all produce a "
+    "different objective on replay — save_verified_cpsat_python re-runs this "
+    "script fresh and may find a worse (or better) result. For stronger "
+    "reproducibility, set explicit solver parameters such as random_seed, "
+    "consider num_workers = 1, and verify with the same timeout — but "
+    "exact determinism is not guaranteed."
+)
+
 # Statuses an experiment treats as usable (base-eligible). "timeout" is a
 # recovered partial — reportable, not savable; the save path's stricter reported
 # gate ({optimal, feasible}) still rejects it.
@@ -565,7 +582,11 @@ def run_cpsat_python_experiment(
     ``CpsatPythonExperimentResult`` with ``status="winner"`` and the winning
     ``CpsatPythonResult``/index/name, or ``status="no_winner"`` when nothing was
     accepted. A ``timeout`` winner is a reportable best incumbent, not a savable
-    one (it fails the save reported gate).
+    one (it fails the save reported gate). Whenever there is a winner,
+    ``warnings`` always carries a reproducibility disclaimer — an experiment
+    result is one observed run, not a guarantee that
+    ``save_verified_cpsat_python`` will reproduce the same objective on
+    replay — alongside any ``num_workers``-oversubscription advisory.
 
     Raises ``ValueError`` for an invalid request — including a projected budget
     over ``MAX_CPSAT_EXPERIMENT_WALL_CLOCK_MS`` or a ``max_parallel_attempts``
@@ -633,6 +654,10 @@ def run_cpsat_python_experiment(
     if not include_winner_stdout and winner_result is not None:
         winner_result = winner_result.model_copy(update={"stdout": _WINNER_STDOUT_OMITTED_SENTINEL})
 
+    warnings = [oversubscription_warning] if oversubscription_warning else []
+    if winner is not None:
+        warnings.append(_REPRODUCIBILITY_WARNING)
+
     return CpsatPythonExperimentResult(
         status="winner" if winner is not None else "no_winner",
         winner_index=winner_index,
@@ -645,5 +670,5 @@ def run_cpsat_python_experiment(
         source_sha256=source_sha256,
         checker_sha256=checker_sha,
         problem_sha256=problem_sha,
-        warnings=[oversubscription_warning] if oversubscription_warning else [],
+        warnings=warnings,
     )

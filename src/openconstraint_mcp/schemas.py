@@ -913,8 +913,13 @@ class CpsatPythonExperimentResult(BaseModel):
     provenance, computed once for the request that produced this result — not a
     save-time trust decision (the save gate always re-runs the winner fresh).
 
-    ``warnings`` carries non-blocking advisory messages — currently only the
-    ``num_workers``-oversubscription check — and defaults to an empty list.
+    ``warnings`` carries non-blocking advisory messages and defaults to an
+    empty list. Two independent sources populate it: the
+    ``num_workers``-oversubscription check (only when triggered), and — added
+    unconditionally whenever ``status == "winner"`` — a reproducibility
+    disclaimer noting that an experiment winner is one observed run, not a
+    guarantee that ``save_verified_cpsat_python``'s fresh re-run will find the
+    same objective.
     """
 
     status: CpsatExperimentStatus
