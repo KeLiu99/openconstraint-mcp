@@ -1108,32 +1108,79 @@ For long-running CP-SAT solves (`timeout_ms` of minutes), the synchronous
 client per-call timeouts. Use the background-job surface instead — the
 CP-SAT analogue of the MiniZinc `submit_solve_job` / `get_solve_job` pair:
 
-- **`submit_cpsat_python_job(source: str, timeout_ms: int = 30000)`** — submit
-  inline OR-Tools CP-SAT Python source as a background job. Returns a
-  `CpsatPythonJobStatus` with an opaque `job_id` and an initial `state` of
-  `"queued"` or `"running"` (a very fast job may already be terminal). The same
-  output contract as `run_cpsat_python` applies.
-- **`submit_cpsat_python_file_job(script_path: str, timeout_ms: int = 30000)`**
-  — submit a local script file as a background job. The path is validated
-  before admission (missing / non-file / empty / non-UTF-8 → MCP error, no
-  job created). The script runs in its own directory so relative imports and
-  data-file opens resolve.
+- **`submit_cpsat_python_job(source: str, timeout_ms: int = 30000, problem:
+  str | None = None, checker: str | None = None, checker_timeout_ms: int |
+  None = None)`** — submit inline OR-Tools CP-SAT Python source as a
+  background job. Returns a `CpsatPythonJobStatus` with an opaque `job_id` and
+  an initial `state` of `"queued"` or `"running"` (a very fast job may already
+  be terminal). The same output contract as `run_cpsat_python` applies.
+  `problem` / `checker` / `checker_timeout_ms` attach the same optional
+  problem-specific checker as `save_verified_cpsat_python`'s checker gate —
+  see the checked-jobs note below.
+- **`submit_cpsat_python_file_job(script_path: str, timeout_ms: int = 30000,
+  problem: str | None = None, checker: str | None = None, checker_timeout_ms:
+  int | None = None)`** — submit a local script file as a background job. The
+  path is validated before admission (missing / non-file / empty / non-UTF-8 →
+  MCP error, no job created). The script runs in its own directory so relative
+  imports and data-file opens resolve. Takes the same optional checker inputs
+  as `submit_cpsat_python_job`.
 - **`get_cpsat_python_job(job_id: str)`** — poll a job by `job_id` (works
   for both inline and file submits). Returns a `CpsatPythonJobStatus`: `state`
   (`"queued"`, `"running"`, `"succeeded"`, `"failed"`, `"timeout"`,
   `"cancelled"`), timing fields, an optional `result` (the full
-  `CpsatPythonResult`), and an optional `message`. **State contract:** `result`
+  `CpsatPythonResult`), an optional `message`, and — for a checked job — the
+  checker outcome fields described below. **State contract:** `result`
   is present exactly when `state` is `"succeeded"` or `"timeout"`; absent for
   all other states. A script-level error (`status="error"`) is a `"succeeded"`
   job (the child ran and produced a result); `"failed"` means the job machinery
   raised before any result was produced. A `"timeout"` job carries its partial
   `CpsatPythonResult` (`timed_out=True`, best-so-far `solution`/`objective`).
-  Pace polling against `timeout_ms - elapsed_ms`.
+  Pace polling against `timeout_ms - elapsed_ms` (plus `checker_timeout_ms`
+  for a checked job).
 - **`cancel_cpsat_python_job(job_id: str)`** — terminate a running job's child
-  process tree. Best-effort and idempotent; the job reaches `"cancelled"` (with
-  `result is None`).
+  process tree (the solver child, or the checker child if the job is in its
+  checker phase). Best-effort and idempotent; the job reaches `"cancelled"`
+  (with `result is None` — cancelling during the checker phase discards the
+  already-completed solver result).
 - **`list_cpsat_python_jobs()`** — list the retained CP-SAT jobs, one
   `CpsatPythonJobStatus` each. Both inline-source and file-based jobs appear.
+
+#### Checked background jobs (diagnostic only)
+
+Submitting a job with `checker` (a Python checker script source string, same
+protocol as `save_verified_cpsat_python`'s checker gate) runs the checker as a
+second bounded child after the solver child finishes — but only when the
+result carries a usable incumbent (`status` of `optimal`, `feasible`, or
+`timeout` with a non-empty `solution`). While the checker runs, the job stays
+`"running"`: `timeout_ms` caps the solver child only, and the job status
+echoes the effective `checker_timeout_ms` (the supplied value, else
+`timeout_ms`) so a polling client can pace the checker phase too.
+
+```python
+# Submit returns immediately with a job_id; poll until a terminal state,
+# then read the diagnostic checker verdict off the job status.
+job = await mcp.call_tool("submit_cpsat_python_job", {
+    "source": open("examples/cpsat_python/graph_coloring.py").read(),
+    "checker": open("examples/cpsat_python/graph_coloring_checker.py").read(),
+})
+status = await mcp.call_tool("get_cpsat_python_job", {"job_id": job["job_id"]})
+# Poll get_cpsat_python_job until status["state"] is a terminal state, then:
+# status["checker"]["status"] == "accepted" iff the checker accepted the solution
+```
+
+On a result-bearing terminal state the job status carries at most one of:
+
+- `checker` — the `CpsatCheckerReport` (`accepted` / `rejected` / `error` /
+  `timeout`). A checker infrastructure fault becomes a `status="error"` report
+  on the completed job; it never discards the solver result or fails the job.
+- `checker_skipped_reason` — set when the supplied checker did not run (for
+  example `status='infeasible'` or an empty solution).
+
+The checker result is **diagnostic, not a save gate**: a checked `"timeout"`
+job stays `"timeout"` and its recovered incumbent stays unsavable, and saving
+always re-runs verification through `save_verified_cpsat_python`. Bad checker
+arguments (`checker_timeout_ms` without `checker`, a non-positive timeout, an
+empty checker) are rejected before a job is admitted.
 
 #### Configuring CP-SAT registry bounds
 

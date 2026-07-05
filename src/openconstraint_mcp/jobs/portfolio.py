@@ -3,7 +3,7 @@
 A portfolio expands a set of model formulations, solvers, and optional seeds into
 independent solve attempts, admits them atomically through the *existing* registry
 (no new pool, scheduler, or subprocess runner), and selects a winner from the
-attempts' statuses. The background portfolio path (``portfolio_jobs``) drives this:
+attempts' statuses. The background portfolio path (``portfolio_registry``) drives this:
 ``_admit_portfolio`` admits the plan synchronously (fail-fast on a bad plan or a
 full queue) and ``_select_portfolio_outcome`` runs one non-blocking selection pass
 per poll, returning the winning ``SolveResult`` plus metadata explaining what
@@ -15,8 +15,8 @@ resolved once for the whole plan through the runtime's own ``--solvers-json``, a
 nothing leaves the machine. This module orchestrates; it never spawns its own
 processes.
 
-Layering: a server-side module that imports ``jobs``, ``minizinc.core`` helpers,
-and ``schemas``; it never imports ``server``.
+Layering: a server-side module that imports ``jobs.registry``, ``minizinc.core``
+helpers, and ``schemas``; it never imports ``server``.
 """
 
 from __future__ import annotations
@@ -25,18 +25,12 @@ import time
 from collections.abc import Sequence
 from typing import NamedTuple
 
-# portfolio consumes the registry (provider) and reuses its terminal-state set
-# (one definition, two call sites) plus core's capability resolver/validator. These
-# package-internal helpers keep plan-time enforcement identical to the single solve.
 # noinspection PyProtectedMember
-from .jobs import _TERMINAL_STATES, JobRegistry, SolveRequest
-
-# noinspection PyProtectedMember
-from .minizinc.core import (
+from ..minizinc.core import (
     _resolve_capability_map,
     _validate_solver_capabilities,
 )
-from .schemas import (
+from ..schemas import (
     JobState,
     PortfolioAttempt,
     PortfolioAttemptState,
@@ -46,7 +40,13 @@ from .schemas import (
     SolveJobStatus,
     SolveResult,
 )
-from .shared.save_target import text_sha256
+from ..shared.save_target import text_sha256
+
+# portfolio consumes the registry (provider) and reuses its terminal-state set
+# (one definition, two call sites) plus core's capability resolver/validator. These
+# package-internal helpers keep plan-time enforcement identical to the single solve.
+# noinspection PyProtectedMember
+from .registry import _TERMINAL_STATES, JobRegistry, SolveRequest
 
 # The solve verdicts that end the race immediately (a proof or a satisfaction
 # solution). The first attempt to reach one of these wins; the rest are cancelled.

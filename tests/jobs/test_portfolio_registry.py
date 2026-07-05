@@ -15,8 +15,8 @@ from typing import Any
 
 import pytest
 
-from openconstraint_mcp.jobs import JobRegistry
-from openconstraint_mcp.portfolio_jobs import PortfolioJobRegistry
+from openconstraint_mcp.jobs.portfolio_registry import PortfolioJobRegistry
+from openconstraint_mcp.jobs.registry import JobRegistry
 from openconstraint_mcp.schemas import PortfolioSolveControls, PortfolioSolveResult, SolveResult
 from openconstraint_mcp.shared.job_errors import JobRejectedError
 
@@ -45,7 +45,7 @@ class _FakeProc:
 
 
 def _patch_solve(monkeypatch: pytest.MonkeyPatch, fake: Any) -> None:
-    monkeypatch.setattr("openconstraint_mcp.jobs.solve_model_cancellable", fake)
+    monkeypatch.setattr("openconstraint_mcp.jobs.registry.solve_model_cancellable", fake)
 
 
 def _poll(registry: PortfolioJobRegistry, job_id: str, timeout: float = 5.0) -> Any:
@@ -293,7 +293,7 @@ def test_cancel_running_portfolio_reaches_cancelled_and_stops_attempts(
         release.set()  # the "process" dying unblocks the worker
 
     _patch_solve(monkeypatch, _blocking_solve)
-    monkeypatch.setattr("openconstraint_mcp.jobs._terminate_process_tree", _fake_terminate)
+    monkeypatch.setattr("openconstraint_mcp.jobs.registry._terminate_process_tree", _fake_terminate)
 
     job_registry = JobRegistry(max_running_jobs=4)
     portfolios = PortfolioJobRegistry(job_registry)
@@ -325,7 +325,7 @@ def test_cancelled_portfolio_releases_child_pin_for_retention_eviction(
         release.set()
 
     _patch_solve(monkeypatch, _blocking_solve)
-    monkeypatch.setattr("openconstraint_mcp.jobs._terminate_process_tree", _fake_terminate)
+    monkeypatch.setattr("openconstraint_mcp.jobs.registry._terminate_process_tree", _fake_terminate)
 
     job_registry = JobRegistry(max_running_jobs=1, max_queued_jobs=4, max_retained_terminal=2)
     portfolios = PortfolioJobRegistry(job_registry)

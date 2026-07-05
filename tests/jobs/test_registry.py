@@ -6,7 +6,7 @@ from typing import Any
 
 import pytest
 
-from openconstraint_mcp.jobs import JobRegistry, SolveRequest
+from openconstraint_mcp.jobs.registry import JobRegistry, SolveRequest
 from openconstraint_mcp.schemas import (
     SolverCapabilities,
     SolveResult,
@@ -90,14 +90,14 @@ def _wait_until_terminal(registry: JobRegistry, job_id: str, timeout: float = 3.
 
 
 def _patch_solve(monkeypatch: pytest.MonkeyPatch, fake: Any) -> None:
-    monkeypatch.setattr("openconstraint_mcp.jobs.solve_model_cancellable", fake)
+    monkeypatch.setattr("openconstraint_mcp.jobs.registry.solve_model_cancellable", fake)
 
 
 def _patch_terminate(monkeypatch: pytest.MonkeyPatch, recorder: list[Any]) -> None:
     def _fake_terminate(proc: Any, **kwargs: Any) -> None:
         recorder.append(proc)
 
-    monkeypatch.setattr("openconstraint_mcp.jobs._terminate_process_tree", _fake_terminate)
+    monkeypatch.setattr("openconstraint_mcp.jobs.registry._terminate_process_tree", _fake_terminate)
 
 
 def test_submit_returns_job_id(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -211,7 +211,7 @@ def test_cancel_running_job_reaches_cancelled_and_terminates_handle(
         release.set()  # the "process" dying unblocks the solve
 
     _patch_solve(monkeypatch, _blocking_solve)
-    monkeypatch.setattr("openconstraint_mcp.jobs._terminate_process_tree", _fake_terminate)
+    monkeypatch.setattr("openconstraint_mcp.jobs.registry._terminate_process_tree", _fake_terminate)
 
     registry = JobRegistry()
     try:
@@ -474,7 +474,7 @@ def test_shutdown_terminates_a_running_child(monkeypatch: pytest.MonkeyPatch) ->
         release.set()  # let the blocked worker unwind so shutdown can join it
 
     _patch_solve(monkeypatch, _blocking_solve)
-    monkeypatch.setattr("openconstraint_mcp.jobs._terminate_process_tree", _fake_terminate)
+    monkeypatch.setattr("openconstraint_mcp.jobs.registry._terminate_process_tree", _fake_terminate)
 
     registry = JobRegistry()
     registry.submit(model="solve satisfy;")
@@ -500,7 +500,7 @@ def test_shutdown_finalizes_a_queued_job_as_cancelled(monkeypatch: pytest.Monkey
         release.set()  # unblock the running worker so shutdown can join the pool
 
     _patch_solve(monkeypatch, _blocking_solve)
-    monkeypatch.setattr("openconstraint_mcp.jobs._terminate_process_tree", _fake_terminate)
+    monkeypatch.setattr("openconstraint_mcp.jobs.registry._terminate_process_tree", _fake_terminate)
 
     registry = JobRegistry(max_running_jobs=1, max_queued_jobs=4)
     registry.submit(model="solve satisfy;")  # occupies the only worker
@@ -550,7 +550,7 @@ def test_shutdown_terminates_a_child_launched_after_its_handle_snapshot(
         terminated.append(proc)
 
     _patch_solve(monkeypatch, _racing_solve)
-    monkeypatch.setattr("openconstraint_mcp.jobs._terminate_process_tree", _fake_terminate)
+    monkeypatch.setattr("openconstraint_mcp.jobs.registry._terminate_process_tree", _fake_terminate)
 
     job_id = registry.submit(model="solve satisfy;")
     assert worker_running.wait(timeout=3)

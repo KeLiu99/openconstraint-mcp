@@ -21,7 +21,7 @@ no threads or processes (the attempts live in the ``JobRegistry``, torn down by 
 registry's shutdown), so it needs no shutdown of its own.
 
 Layering: a server-layer module that imports ``portfolio`` (admission + the
-selection pass), ``jobs`` (the attempt registry it drives), and ``schemas``; it
+selection pass), ``registry`` (the attempt registry it drives), and ``schemas``; it
 never imports ``server``.
 """
 
@@ -32,21 +32,21 @@ from collections.abc import Sequence
 from dataclasses import dataclass, field
 from uuid import uuid4
 
-from .jobs import JobRegistry
-from .minizinc.core import DEFAULT_SOLVE_TIMEOUT_MS
-
-# portfolio_jobs reuses portfolio's synchronous admission (_admit_portfolio) and its
-# non-blocking selection pass (_select_portfolio_outcome). These are package-internal
-# helpers, not a public API.
-# noinspection PyProtectedMember
-from .portfolio import _admit_portfolio, _select_portfolio_outcome
-from .schemas import (
+from ..minizinc.core import DEFAULT_SOLVE_TIMEOUT_MS
+from ..schemas import (
     PortfolioJobState,
     PortfolioJobStatus,
     PortfolioSolveControls,
     PortfolioSolveResult,
 )
-from .shared.job_errors import JobRejectedError, now_ms
+from ..shared.job_errors import JobRejectedError, now_ms
+
+# portfolio_registry reuses portfolio's synchronous admission (_admit_portfolio) and
+# its non-blocking selection pass (_select_portfolio_outcome). These are
+# package-internal helpers, not a public API.
+# noinspection PyProtectedMember
+from .portfolio import _admit_portfolio, _select_portfolio_outcome
+from .registry import JobRegistry
 
 
 @dataclass

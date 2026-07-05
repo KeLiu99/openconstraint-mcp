@@ -1004,6 +1004,86 @@ def test_cpsat_python_job_status_cancelled_has_no_result() -> None:
     assert status.message == "Cancelled by client"
 
 
+def _job_checker_report(status: str = "accepted") -> CpsatCheckerReport:
+    return CpsatCheckerReport(
+        status=status,  # type: ignore[arg-type]
+        errors=[],
+        stdout="",
+        stderr="",
+        duration_ms=5,
+        timed_out=False,
+        truncated=False,
+    )
+
+
+def test_cpsat_python_job_status_succeeded_carries_checker_report() -> None:
+    status = CpsatPythonJobStatus(
+        job_id="cj-ck",
+        state="succeeded",
+        timeout_ms=30000,
+        submitted_at_ms=1,
+        result=_cpsat_result("optimal"),
+        checker=_job_checker_report(),
+        checker_timeout_ms=30000,
+    )
+    assert status.checker is not None
+    assert status.checker.status == "accepted"
+
+
+def test_cpsat_python_job_status_rejects_checker_and_skipped_reason_together() -> None:
+    with pytest.raises(ValidationError, match="mutually"):
+        CpsatPythonJobStatus(
+            job_id="cj-ck-bad",
+            state="succeeded",
+            timeout_ms=30000,
+            submitted_at_ms=1,
+            result=_cpsat_result("optimal"),
+            checker=_job_checker_report(),
+            checker_skipped_reason="status='infeasible'",
+        )
+
+
+@pytest.mark.parametrize("state", ["queued", "running", "failed", "cancelled"])
+def test_cpsat_python_job_status_rejects_checker_on_non_result_bearing_state(
+    state: str,
+) -> None:
+    with pytest.raises(ValidationError, match="checker"):
+        CpsatPythonJobStatus(
+            job_id="cj-ck-bad2",
+            state=state,  # type: ignore[arg-type]
+            timeout_ms=30000,
+            submitted_at_ms=1,
+            checker=_job_checker_report(),
+        )
+
+
+@pytest.mark.parametrize("state", ["queued", "running", "failed", "cancelled"])
+def test_cpsat_python_job_status_rejects_skipped_reason_on_non_result_bearing_state(
+    state: str,
+) -> None:
+    with pytest.raises(ValidationError, match="checker"):
+        CpsatPythonJobStatus(
+            job_id="cj-ck-bad3",
+            state=state,  # type: ignore[arg-type]
+            timeout_ms=30000,
+            submitted_at_ms=1,
+            checker_skipped_reason="solution is missing or empty",
+        )
+
+
+def test_cpsat_python_job_status_checker_timeout_echo_allowed_while_running() -> None:
+    # checker_timeout_ms is a request echo like timeout_ms: constant across
+    # states, present even before any checker outcome exists.
+    status = CpsatPythonJobStatus(
+        job_id="cj-ck-run",
+        state="running",
+        timeout_ms=30000,
+        submitted_at_ms=1,
+        checker_timeout_ms=7000,
+    )
+    assert status.checker_timeout_ms == 7000
+
+
 # --- CpsatExpectation schemas -----------------------------------------------
 
 

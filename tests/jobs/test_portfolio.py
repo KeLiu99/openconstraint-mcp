@@ -17,18 +17,17 @@ from typing import Any
 
 import pytest
 
-from openconstraint_mcp.jobs import JobRegistry
-from openconstraint_mcp.minizinc.core import DEFAULT_SOLVE_TIMEOUT_MS
-
 # The portfolio engine retained for the background path; these are package-internal
 # helpers, not a public API.
 # noinspection PyProtectedMember
-from openconstraint_mcp.portfolio import (
+from openconstraint_mcp.jobs.portfolio import (
     _admit_portfolio,
     _first_decisive_index,
     _PortfolioAdmission,
     _select_portfolio_outcome,
 )
+from openconstraint_mcp.jobs.registry import JobRegistry
+from openconstraint_mcp.minizinc.core import DEFAULT_SOLVE_TIMEOUT_MS
 from openconstraint_mcp.schemas import (
     CheckerReport,
     PortfolioSolveControls,
@@ -69,7 +68,7 @@ class _FakeProc:
 
 
 def _patch_solve(monkeypatch: pytest.MonkeyPatch, fake: Any) -> None:
-    monkeypatch.setattr("openconstraint_mcp.jobs.solve_model_cancellable", fake)
+    monkeypatch.setattr("openconstraint_mcp.jobs.registry.solve_model_cancellable", fake)
 
 
 def _patch_capabilities(
@@ -147,7 +146,7 @@ def test_portfolio_returns_decisive_winner_and_cancels_loser(
         release.set()
 
     _patch_solve(monkeypatch, _fake_solve)
-    monkeypatch.setattr("openconstraint_mcp.jobs._terminate_process_tree", _fake_terminate)
+    monkeypatch.setattr("openconstraint_mcp.jobs.registry._terminate_process_tree", _fake_terminate)
 
     registry = JobRegistry(max_running_jobs=4)
     try:

@@ -25,7 +25,9 @@ from __future__ import annotations
 import json
 import sys
 import tempfile
+from collections.abc import Callable
 from pathlib import Path
+from subprocess import Popen
 from typing import TypedDict
 
 from ..schemas import CpsatCheckerReport, CpsatPythonResult
@@ -132,13 +134,16 @@ def run_checker(
     problem: str | None,
     timeout_ms: int,
     tracker: ChildProcessTracker | None,
+    on_start: Callable[[Popen[str]], None] | None = None,
 ) -> CpsatCheckerReport:
     """Execute a checker script against a CP-SAT solution.
 
     Writes the checker source and the payload JSON to temporary files, then
     invokes the checker through ``execute_child``. Parses the checker's stdout
     for the final JSON object and normalizes any malformed output to
-    ``status="error"``.
+    ``status="error"``. ``on_start`` is forwarded to ``execute_child`` so a
+    caller (the background-job registry) can capture the checker child's
+    ``Popen`` handle for targeted cancellation.
     """
     payload = {
         "problem": problem,
@@ -161,6 +166,7 @@ def run_checker(
             cwd=tmp,
             timeout_ms=timeout_ms,
             tracker=tracker,
+            on_start=on_start,
         )
 
     kw: _CheckerKw = {

@@ -68,6 +68,31 @@ def cpsat_job_state_for_result(result: CpsatPythonResult) -> CpsatJobState:
     return "succeeded"
 
 
+class CpsatCheckerReport(BaseModel):
+    """Result of running an optional checker script against the CP-SAT solution.
+
+    ``status`` is the normalized server verdict: ``accepted`` only when the
+    checker returned ``accepted`` with an empty ``errors`` list; ``rejected``
+    when the checker rejected; ``timeout`` on a wall-clock timeout;
+    ``error`` for malformed output, nonzero exit, truncation, or
+    ``accepted``+non-empty-errors (self-contradictory output).
+    ``stdout``, ``stderr``, and ``details`` are raw checker output and are
+    NOT persisted in the manifest (only the scalar summary is saved).
+
+    Defined before ``CpsatPythonJobStatus`` (which embeds it) so the job-status
+    model builds without a deferred forward reference.
+    """
+
+    status: Literal["accepted", "rejected", "error", "timeout"]
+    errors: list[str]
+    details: dict | None = None
+    stdout: str
+    stderr: str
+    duration_ms: int
+    timed_out: bool
+    truncated: bool
+
+
 class CpsatPythonJobStatus(BaseModel):
     """A background CP-SAT Python job's status snapshot.
 
@@ -75,9 +100,25 @@ class CpsatPythonJobStatus(BaseModel):
     result-bearing terminal state (``succeeded`` or ``timeout``), absent for
     ``queued``/``running`` and for ``failed``/``cancelled``. The invariant
     ``result present ⇔ state ∈ {succeeded, timeout}`` is enforced.
-    ``timeout_ms`` echoes the caller's cap so a polling client can pace itself
-    (``remaining ≈ timeout_ms - elapsed_ms``). ``message`` carries failure/cancel
-    detail; a ``failed`` job has no result so its diagnostic lives only in ``message``.
+    ``timeout_ms`` echoes the caller's SOLVER-child cap only, so a polling
+    client can pace the solve phase (``remaining ≈ timeout_ms - elapsed_ms``).
+    A checked job may remain ``running`` beyond ``timeout_ms`` for the checker
+    phase, up to the echoed ``checker_timeout_ms``. ``message`` carries
+    failure/cancel detail; a ``failed`` job has no result so its diagnostic
+    lives only in ``message``.
+
+    Checker fields (diagnostic only — never a save gate; saving still replays
+    through ``save_verified_cpsat_python``):
+    - ``checker`` is the checker's report on a result-bearing job whose
+      supplied checker ran; ``CpsatCheckerReport.status`` is the verdict (no
+      duplicate ``checker_status`` field exists).
+    - ``checker_skipped_reason`` is set only when a supplied checker did not
+      run (result not checker-eligible). Mutually exclusive with ``checker``,
+      and both are restricted to result-bearing states.
+    - ``checker_timeout_ms`` is a request echo like ``timeout_ms`` (constant
+      across states): the effective checker timeout when a checker was
+      supplied (the explicit value, else the ``timeout_ms`` default), ``None``
+      when no checker was supplied.
     """
 
     job_id: str
@@ -89,6 +130,9 @@ class CpsatPythonJobStatus(BaseModel):
     elapsed_ms: int | None = None
     result: CpsatPythonResult | None = None
     message: str | None = None
+    checker: CpsatCheckerReport | None = None
+    checker_skipped_reason: str | None = None
+    checker_timeout_ms: int | None = None
 
     @model_validator(mode="after")
     def _result_presence_matches_state(self) -> CpsatPythonJobStatus:
@@ -103,6 +147,19 @@ class CpsatPythonJobStatus(BaseModel):
             raise ValueError(
                 f"CpsatPythonJobStatus state={self.state!r} requires a result "
                 "(state 'succeeded'/'timeout' ⇔ result is present)"
+            )
+        if self.checker is not None and self.checker_skipped_reason is not None:
+            raise ValueError(
+                "CpsatPythonJobStatus checker and checker_skipped_reason are mutually "
+                "exclusive (a checker either ran or was skipped, never both)"
+            )
+        if (self.checker is not None or self.checker_skipped_reason is not None) and (
+            not expects_result
+        ):
+            raise ValueError(
+                f"CpsatPythonJobStatus state={self.state!r} must not carry checker or "
+                "checker_skipped_reason (checker outcomes appear only on state "
+                "'succeeded' or 'timeout')"
             )
         return self
 
@@ -744,28 +801,6 @@ class CpsatExpectation(BaseModel):
         if not math.isfinite(value):
             raise ValueError("objective_threshold must be a finite number (not NaN or ±inf)")
         return value
-
-
-class CpsatCheckerReport(BaseModel):
-    """Result of running an optional checker script against the CP-SAT solution.
-
-    ``status`` is the normalized server verdict: ``accepted`` only when the
-    checker returned ``accepted`` with an empty ``errors`` list; ``rejected``
-    when the checker rejected; ``timeout`` on a wall-clock timeout;
-    ``error`` for malformed output, nonzero exit, truncation, or
-    ``accepted``+non-empty-errors (self-contradictory output).
-    ``stdout``, ``stderr``, and ``details`` are raw checker output and are
-    NOT persisted in the manifest (only the scalar summary is saved).
-    """
-
-    status: Literal["accepted", "rejected", "error", "timeout"]
-    errors: list[str]
-    details: dict | None = None
-    stdout: str
-    stderr: str
-    duration_ms: int
-    timed_out: bool
-    truncated: bool
 
 
 class SaveVerifiedPythonResult(BaseModel):

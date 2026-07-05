@@ -14,9 +14,9 @@ import time
 
 import pytest
 
-from openconstraint_mcp.jobs import JobRegistry
+from openconstraint_mcp.jobs.portfolio_registry import PortfolioJobRegistry
+from openconstraint_mcp.jobs.registry import JobRegistry
 from openconstraint_mcp.minizinc.core import list_solvers
-from openconstraint_mcp.portfolio_jobs import PortfolioJobRegistry
 
 pytestmark = pytest.mark.integration
 

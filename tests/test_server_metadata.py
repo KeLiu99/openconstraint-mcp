@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pytest
 
-from openconstraint_mcp.jobs import JobRegistry
+from openconstraint_mcp.jobs.registry import JobRegistry
 from openconstraint_mcp.pyexec.jobs import CpsatJobRegistry
 from openconstraint_mcp.server import (
     _homepage_url,
@@ -172,7 +172,7 @@ async def test_lifespan_teardown_shuts_down_the_server_registry(
     # proves create_mcp_server() bound the teardown to its registry.
     calls: list[bool] = []
     monkeypatch.setattr(
-        "openconstraint_mcp.jobs.JobRegistry.shutdown",
+        "openconstraint_mcp.jobs.registry.JobRegistry.shutdown",
         lambda self: calls.append(True),
     )
     server = create_mcp_server()

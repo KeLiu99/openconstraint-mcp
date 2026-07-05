@@ -25,8 +25,8 @@ worst-case wall-clock estimate is checked before any child runs (see
 would exceed the budget.
 
 Imports only the dependency-light leaves (``childproc``, ``proc``,
-``save_target``, ``schemas``) and the pyexec siblings ``core``/``checker``;
-never ``minizinc`` or ``runtime``.
+``save_target``, ``schemas``, ``eligibility``) and the pyexec siblings
+``core``/``checker``; never ``minizinc`` or ``runtime``.
 """
 
 from __future__ import annotations
@@ -63,6 +63,7 @@ from .core import (
     validate_cpsat_random_seed,
     write_config_file,
 )
+from .eligibility import diagnostic_incumbent_eligibility
 
 # The synchronous experiment's pre-flight wall-clock budget, matching the
 # removed seed sweep's MAX_SWEEP_WALL_CLOCK_MS: comfortably under a typical
@@ -105,11 +106,6 @@ _REPRODUCIBILITY_WARNING: str = (
     "exact determinism is not guaranteed."
 )
 
-# Statuses an experiment treats as usable (base-eligible). "timeout" is a
-# recovered partial — reportable, not savable; the save path's stricter reported
-# gate ({optimal, feasible}) still rejects it.
-_BASE_ACCEPT_STATUSES: frozenset[str] = frozenset({"optimal", "feasible", "timeout"})
-
 # Stronger status wins ties; lower rank is better.
 _STATUS_RANK: dict[str, int] = {"optimal": 0, "feasible": 1, "timeout": 2}
 
@@ -130,13 +126,13 @@ def _attempt_eligibility(
 ) -> tuple[bool, str | None]:
     """Return ``(eligible, reject_reason)``; ``reject_reason`` is set iff not eligible.
 
-    Single source of truth for base acceptance, so the accept/reject verdict and
-    the displayed rejection reason can never disagree about which condition failed.
+    The status/solution gate is the shared ``eligibility`` leaf (also used by
+    background jobs); the optimization-mode objective check layered on top is
+    experiment-specific, so it stays here.
     """
-    if result.status not in _BASE_ACCEPT_STATUSES:
-        return False, f"status={result.status!r}"
-    if not result.solution:
-        return False, "solution is missing or empty"
+    eligible, reject_reason = diagnostic_incumbent_eligibility(result)
+    if not eligible:
+        return False, reject_reason
     if objective_sense is None:
         return True, None
     objective = result.objective
