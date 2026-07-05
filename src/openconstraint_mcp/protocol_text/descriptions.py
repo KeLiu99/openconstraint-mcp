@@ -422,9 +422,7 @@ GET_SOLVE_JOB_DESCRIPTION = (
     + _job_result_contract("a SOLVER-level `error` verdict")
     + "A `timeout` job still carries its partial SolveResult. While "
     "`running`, only `state` + `elapsed_ms` advance; live mid-solve statistics "
-    "are not provided. "
-    + _PACE_POLLING_NOTE
-    + " On a `succeeded` or `timeout` "
+    "are not provided. " + _PACE_POLLING_NOTE + " On a `succeeded` or `timeout` "
     "job, present `result` as the synchronous solve tools require: lead with the "
     "plain-language status and the solution in the user's terms, and include the "
     "COMPLETE model-visible `Statistics:` section whenever `result.statistics` "
@@ -698,7 +696,8 @@ SAVE_VERIFIED_CPSAT_PYTHON_DESCRIPTION = (
     "Re-run a CP-SAT Python script and persist it to a LOCAL directory when it "
     "passes the configured save gate(s). The server trusts no prior claim of "
     "success: it runs `source` again and saves only when all supplied gates pass. "
-    + _SAVE_TARGET_DIR_RULE + " "
+    + _SAVE_TARGET_DIR_RULE
+    + " "
     "Gate order (reported → expectation → checker): "
     "(1) Reported gate — always applied: `status` must be `optimal`/`feasible` "
     "AND `solution` must be non-empty. "
@@ -749,7 +748,8 @@ SAVE_VERIFIED_CPSAT_PYTHON_DESCRIPTION = (
     "recording tool version, timestamp, verification level, expectation settings, "
     "checker summary (status/error_count/duration/timed_out/truncated only — no "
     "free text), a compact experiment-log summary, and per-file sha256 hashes. "
-    + _MARKER_GATED_OVERWRITE + " "
+    + _MARKER_GATED_OVERWRITE
+    + " "
     "Returns a SaveVerifiedPythonResult with: `saved` (bool), "
     "`verification_level` ('none'|'reported'|'expectation'|'checked' — the "
     "highest gate that passed; combine with `saved` to distinguish a saved result "
@@ -778,8 +778,7 @@ SOLVE_CPSAT_PYTHON_PROMPT_DESCRIPTION = (
 SUBMIT_CPSAT_PYTHON_JOB_DESCRIPTION = (
     "Submit an OR-Tools CP-SAT Python INLINE SOURCE as a BACKGROUND JOB and return "
     "immediately, so a long solve cannot hit a synchronous MCP client timeout. "
-    "Takes the same `source` and `timeout_ms` as `run_cpsat_python`. "
-    + _CPSAT_JSON_CONTRACT + " "
+    "Takes the same `source` and `timeout_ms` as `run_cpsat_python`. " + _CPSAT_JSON_CONTRACT + " "
     "Returns a CpsatPythonJobStatus with a server-generated opaque `job_id` and "
     "an initial `state` of `queued` or `running` (a very fast job may already be "
     "terminal); poll with `get_cpsat_python_job(job_id)` and "

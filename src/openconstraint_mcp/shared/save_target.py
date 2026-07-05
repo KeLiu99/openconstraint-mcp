@@ -13,7 +13,6 @@ import uuid
 from collections.abc import Callable
 from importlib import metadata
 from pathlib import Path
-from typing import cast
 
 from ..schemas import SavedModelArtifact
 
@@ -76,13 +75,15 @@ def _prior_manifest_filenames(target: Path) -> list[str] | None:
     artifacts = payload.get("artifacts")
     if not isinstance(artifacts, list):
         return None
-    path: object = None
-    filenames = [
-        cast(str, path)
-        for entry in artifacts
-        if isinstance(entry, dict) and isinstance(path := entry.get("path"), str)
-    ]
-    return filenames if len(filenames) == len(artifacts) else None
+    filenames: list[str] = []
+    for entry in artifacts:
+        if not isinstance(entry, dict):
+            return None
+        path = entry.get("path")
+        if not isinstance(path, str):
+            return None
+        filenames.append(path)
+    return filenames
 
 
 def validate_save_target(target_dir: Path, *, overwrite: bool) -> Path:
