@@ -6,6 +6,8 @@ from openconstraint_mcp.protocol_text.descriptions import (
     LIST_AVAILABLE_SOLVERS_DESCRIPTION,
     MCP_SERVER_INSTRUCTIONS,
     RUN_CPSAT_PYTHON_DESCRIPTION,
+    SOLVE_CONSTRAINT_PROBLEM_PROMPT_DESCRIPTION,
+    SOLVE_CPSAT_PYTHON_PROMPT_DESCRIPTION,
     SOLVE_MINIZINC_FILES_DESCRIPTION,
     SOLVE_MINIZINC_MODEL_DESCRIPTION,
 )
@@ -184,6 +186,33 @@ async def test_solve_constraint_problem_prompt_guides_multiple_optimal_solutions
     assert "proven optimum" in normalized
     assert "solve satisfy" in normalized
     assert "num_solutions" in normalized
+
+
+def test_backend_routing_presents_minizinc_and_cpsat_as_peers() -> None:
+    # The two backends are peers with a when-to-use heuristic; no routing text
+    # may reinstate a blanket "prefer X" default for natural-language problems.
+    combined = (
+        MCP_SERVER_INSTRUCTIONS
+        + SOLVE_CONSTRAINT_PROBLEM_PROMPT_DESCRIPTION
+        + SOLVE_CPSAT_PYTHON_PROMPT_DESCRIPTION
+    )
+    assert "prefer" not in combined.lower()
+
+    # The server instructions route both backend prompts and both run paths.
+    assert "solve_constraint_problem" in MCP_SERVER_INSTRUCTIONS
+    assert "solve_cpsat_python" in MCP_SERVER_INSTRUCTIONS
+    assert "run_cpsat_python" in MCP_SERVER_INSTRUCTIONS
+
+    # Selection heuristic markers: CP-SAT Python (zero-install) vs MiniZinc
+    # (rich globals, .dzn data, checker verification, portfolio racing).
+    lower = MCP_SERVER_INSTRUCTIONS.lower()
+    assert "zero-install" in lower
+    assert "portfolio" in lower
+    assert ".dzn" in MCP_SERVER_INSTRUCTIONS
+
+    # Each prompt description names the other backend's prompt as its peer.
+    assert "solve_cpsat_python" in SOLVE_CONSTRAINT_PROBLEM_PROMPT_DESCRIPTION
+    assert "solve_constraint_problem" in SOLVE_CPSAT_PYTHON_PROMPT_DESCRIPTION
 
 
 def test_mcp_server_instructions_route_num_solutions_and_multiple_optima() -> None:

@@ -60,7 +60,6 @@ Canonical emit snippet (inlined in scripts, never imported from here):
 
 from __future__ import annotations
 
-import hashlib
 import json
 import math
 import tempfile
@@ -69,8 +68,9 @@ from pathlib import Path
 from subprocess import Popen
 from typing import Any
 
-from ..childproc import ChildProcessTracker
 from ..schemas import CpsatPythonResult, CpsatStatus
+from ..shared.childproc import ChildProcessTracker
+from ..shared.save_target import text_sha256
 from .runner import ChildExecutionResult, execute_child
 from .runner import python_script_argv as _python_script_argv
 
@@ -151,7 +151,7 @@ def canonical_json_sha256(value: dict[str, Any]) -> str:
     drift apart — see ``config_sha256`` for the "no config" normalization atop
     this.
     """
-    return hashlib.sha256(_canonical_json_dumps(value).encode("utf-8")).hexdigest()
+    return text_sha256(_canonical_json_dumps(value))
 
 
 def canonical_json_byte_length(value: dict[str, Any]) -> int:

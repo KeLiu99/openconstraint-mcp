@@ -6,11 +6,7 @@ from pathlib import Path
 
 import pytest
 
-# Tests deliberately white-box server internals, which are private by design.
-# noinspection PyProtectedMember
-from openconstraint_mcp.childproc import ChildProcessTracker
 from openconstraint_mcp.jobs import JobRegistry
-from openconstraint_mcp.proc import popen_process_group
 from openconstraint_mcp.pyexec.jobs import CpsatJobRegistry
 from openconstraint_mcp.server import (
     _homepage_url,
@@ -18,6 +14,11 @@ from openconstraint_mcp.server import (
     _server_version,
     create_mcp_server,
 )
+
+# Tests deliberately white-box server internals, which are private by design.
+# noinspection PyProtectedMember
+from openconstraint_mcp.shared.childproc import ChildProcessTracker
+from openconstraint_mcp.shared.proc import popen_process_group
 
 
 def _boot_lifespan() -> object:

@@ -11,7 +11,6 @@ from typing import Any
 import pytest
 from mcp.types import CallToolResult
 
-from openconstraint_mcp.job_errors import JobRejectedError
 from openconstraint_mcp.jobs import JobRegistry
 from openconstraint_mcp.schemas import (
     SolverCapabilities,
@@ -28,6 +27,7 @@ from openconstraint_mcp.server import (
     _run_blocking,
     create_mcp_server,
 )
+from openconstraint_mcp.shared.job_errors import JobRejectedError
 from tests.minizinc.helpers import (
     UNSAT_CORE_MODEL,
     UNSAT_CORE_STDOUT,
@@ -2030,12 +2030,12 @@ async def test_save_verified_minizinc_model_with_portfolio_result_writes_experim
     tmp_path: Path,
 ) -> None:
     """A self-consistent `portfolio_result` reaches the core save and is persisted."""
-    from openconstraint_mcp.save_target import text_sha256
     from openconstraint_mcp.schemas import (
         PortfolioAttempt,
         PortfolioSolveControls,
         PortfolioSolveResult,
     )
+    from openconstraint_mcp.shared.save_target import text_sha256
 
     _fake_save_subprocess(
         monkeypatch,
@@ -2479,7 +2479,7 @@ async def test_background_portfolio_provenance_threads_to_save(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    from openconstraint_mcp.save_target import EXPERIMENT_LOG_FILENAME, text_sha256
+    from openconstraint_mcp.shared.save_target import EXPERIMENT_LOG_FILENAME, text_sha256
 
     model = _SAVE_TOOL_MODEL
     data = "n = 3;\n"

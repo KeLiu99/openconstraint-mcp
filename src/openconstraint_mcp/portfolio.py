@@ -36,7 +36,6 @@ from .minizinc.core import (
     _resolve_capability_map,
     _validate_solver_capabilities,
 )
-from .save_target import text_sha256
 from .schemas import (
     JobState,
     PortfolioAttempt,
@@ -47,6 +46,7 @@ from .schemas import (
     SolveJobStatus,
     SolveResult,
 )
+from .shared.save_target import text_sha256
 
 # The solve verdicts that end the race immediately (a proof or a satisfaction
 # solution). The first attempt to reach one of these wins; the rest are cancelled.

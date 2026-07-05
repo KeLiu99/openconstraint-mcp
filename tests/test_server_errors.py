@@ -6,7 +6,6 @@ from typing import Any
 
 import pytest
 
-from openconstraint_mcp.job_errors import JobRejectedError
 from openconstraint_mcp.minizinc.core import MiniZincExecutionError
 from openconstraint_mcp.runtime import RuntimeMissingError
 
@@ -16,6 +15,7 @@ from openconstraint_mcp.server import (
     _as_mcp_error,
     create_mcp_server,
 )
+from openconstraint_mcp.shared.job_errors import JobRejectedError
 
 # --- _as_mcp_error: the single (domain exc -> RuntimeError) translation home ---
 #

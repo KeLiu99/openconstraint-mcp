@@ -8,13 +8,17 @@ from pathlib import Path
 import pytest
 
 from openconstraint_mcp.pyexec.core import VERIFIED_STATUSES, config_sha256
-from openconstraint_mcp.save_target import EXPERIMENT_LOG_FILENAME, MANIFEST_FILENAME, text_sha256
 from openconstraint_mcp.schemas import (
     CpsatCheckerReport,
     CpsatExpectation,
     CpsatPythonExperimentAttemptResult,
     CpsatPythonExperimentResult,
     CpsatPythonResult,
+)
+from openconstraint_mcp.shared.save_target import (
+    EXPERIMENT_LOG_FILENAME,
+    MANIFEST_FILENAME,
+    text_sha256,
 )
 
 _SCRIPT = "print('hi')"
@@ -596,7 +600,7 @@ def test_save_accepted_checker_saves_with_checked_level(
         SOLUTION_FILENAME,
         save_verified_cpsat_python,
     )
-    from openconstraint_mcp.save_target import MANIFEST_FILENAME
+    from openconstraint_mcp.shared.save_target import MANIFEST_FILENAME
 
     _patch_executor(monkeypatch, _OPTIMAL_RESULT)
     _patch_checker(monkeypatch, _accepted_report())
@@ -637,7 +641,7 @@ def test_save_accepted_checker_manifest_has_scalar_summary_only(
     target = tmp_path / "s"
 
     from openconstraint_mcp.pyexec.save import save_verified_cpsat_python
-    from openconstraint_mcp.save_target import MANIFEST_FILENAME
+    from openconstraint_mcp.shared.save_target import MANIFEST_FILENAME
 
     save_verified_cpsat_python(_SCRIPT, target_dir=target, checker=_CHECKER_SOURCE)
 

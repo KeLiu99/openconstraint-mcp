@@ -10,7 +10,7 @@ from typing import Any
 
 import pytest
 
-from openconstraint_mcp.proc import (
+from openconstraint_mcp.shared.proc import (
     PROCESS_TREE_TERMINATE_GRACE_MS,
     popen_process_group,
     process_tree_terminate_worst_case_ms,
@@ -92,9 +92,9 @@ def test_terminate_process_tree_signals_group_when_running(
 ) -> None:
     fake = _FakePopen(returncode=0)  # poll() is None until wait/kill — a live handle
     killed: list[tuple[int, int]] = []
-    monkeypatch.setattr("openconstraint_mcp.proc.os.getpgid", lambda _pid: 5555)
+    monkeypatch.setattr("openconstraint_mcp.shared.proc.os.getpgid", lambda _pid: 5555)
     monkeypatch.setattr(
-        "openconstraint_mcp.proc.os.killpg",
+        "openconstraint_mcp.shared.proc.os.killpg",
         lambda pgid, sig: killed.append((pgid, sig)),
     )
 
@@ -113,7 +113,7 @@ def test_terminate_process_tree_is_noop_after_terminal(
     fake.returncode = 0  # already terminal
     killed: list[tuple[int, int]] = []
     monkeypatch.setattr(
-        "openconstraint_mcp.proc.os.killpg",
+        "openconstraint_mcp.shared.proc.os.killpg",
         lambda pgid, sig: killed.append((pgid, sig)),
     )
 
@@ -134,9 +134,9 @@ def test_terminate_process_tree_is_noop_when_group_already_gone(
     def _gone(_pid: int) -> int:
         raise ProcessLookupError
 
-    monkeypatch.setattr("openconstraint_mcp.proc.os.getpgid", _gone)
+    monkeypatch.setattr("openconstraint_mcp.shared.proc.os.getpgid", _gone)
     monkeypatch.setattr(
-        "openconstraint_mcp.proc.os.killpg",
+        "openconstraint_mcp.shared.proc.os.killpg",
         lambda pgid, sig: killed.append((pgid, sig)),
     )
 
@@ -162,7 +162,7 @@ def test_terminate_process_tree_windows_kills_tree_via_taskkill_when_parent_exit
         run_calls.append(list(cmd))
         return subprocess.CompletedProcess(cmd, 0)
 
-    monkeypatch.setattr("openconstraint_mcp.proc.subprocess.run", _fake_run)
+    monkeypatch.setattr("openconstraint_mcp.shared.proc.subprocess.run", _fake_run)
 
     terminate_process_tree_windows(fake, grace_seconds=0.01)  # type: ignore[arg-type]
 
@@ -182,7 +182,7 @@ def test_terminate_process_tree_windows_falls_back_to_terminate_when_taskkill_un
         attempted.append("run")
         raise FileNotFoundError("taskkill not found")
 
-    monkeypatch.setattr("openconstraint_mcp.proc.subprocess.run", _no_taskkill)
+    monkeypatch.setattr("openconstraint_mcp.shared.proc.subprocess.run", _no_taskkill)
 
     terminate_process_tree_windows(fake, grace_seconds=0.01)  # type: ignore[arg-type]
 

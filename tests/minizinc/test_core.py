@@ -37,7 +37,6 @@ from openconstraint_mcp.minizinc.core import (
     solver_supports_num_solutions,
 )
 from openconstraint_mcp.runtime import RuntimeMissingError
-from openconstraint_mcp.save_target import EXPERIMENT_LOG_FILENAME, text_sha256
 from openconstraint_mcp.schemas import (
     CheckResult,
     ModelInspectionResult,
@@ -49,6 +48,7 @@ from openconstraint_mcp.schemas import (
     SolverInfo,
     SolverList,
 )
+from openconstraint_mcp.shared.save_target import EXPERIMENT_LOG_FILENAME, text_sha256
 from tests.minizinc.helpers import (
     STREAM_ERROR,
     STREAM_OPTIMAL,
@@ -2885,9 +2885,9 @@ def test_cancellable_runner_timeout_terminates_tree_and_flags_timed_out(
     fake = _FakePopen(stdout="partial\n", stderr="", timeout_first_communicate=True)
     _patch_popen(monkeypatch, fake)
     killed: list[tuple[int, int]] = []
-    monkeypatch.setattr("openconstraint_mcp.proc.os.getpgid", lambda _pid: 9999)
+    monkeypatch.setattr("openconstraint_mcp.shared.proc.os.getpgid", lambda _pid: 9999)
     monkeypatch.setattr(
-        "openconstraint_mcp.proc.os.killpg",
+        "openconstraint_mcp.shared.proc.os.killpg",
         lambda pgid, sig: killed.append((pgid, sig)),
     )
 

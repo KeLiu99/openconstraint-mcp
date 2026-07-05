@@ -10,20 +10,11 @@ wrapper.
 
 from __future__ import annotations
 
-import hashlib
 import json
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-from ..save_target import (
-    EXPERIMENT_LOG_FILENAME,
-    MANIFEST_FILENAME,
-    commit_staged_dir,
-)
-from ..save_target import (
-    tool_version as _tool_version,
-)
 from ..schemas import (
     PORTFOLIO_ATTEMPT_TERMINAL_STATES,
     CheckResult,
@@ -33,11 +24,15 @@ from ..schemas import (
     SavedModelArtifact,
     SolveResult,
 )
-
-
-def _sha256_of(path: Path) -> str:
-    return hashlib.sha256(path.read_bytes()).hexdigest()
-
+from ..shared.save_target import (
+    EXPERIMENT_LOG_FILENAME,
+    MANIFEST_FILENAME,
+    commit_staged_dir,
+    path_sha256,
+)
+from ..shared.save_target import (
+    tool_version as _tool_version,
+)
 
 # The fixed artifact layout of a saved verified-model directory. Filenames are
 # part of the user-facing contract (stable, never LLM-controlled).
@@ -163,7 +158,9 @@ def _write_staged_artifacts(
     for role, filename, text in texts:
         file_path = staging / filename
         file_path.write_text(text, encoding="utf-8")
-        artifacts.append(SavedModelArtifact(role=role, path=filename, sha256=_sha256_of(file_path)))
+        artifacts.append(
+            SavedModelArtifact(role=role, path=filename, sha256=path_sha256(file_path))
+        )
 
     verification: dict[str, Any] = {
         "check_status": check.status,
@@ -214,7 +211,7 @@ def _write_staged_artifacts(
     manifest_path.write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
     artifacts.append(
         SavedModelArtifact(
-            role="manifest", path=MANIFEST_FILENAME, sha256=_sha256_of(manifest_path)
+            role="manifest", path=MANIFEST_FILENAME, sha256=path_sha256(manifest_path)
         )
     )
     return artifacts

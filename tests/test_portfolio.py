@@ -17,7 +17,6 @@ from typing import Any
 
 import pytest
 
-from openconstraint_mcp.job_errors import JobRejectedError
 from openconstraint_mcp.jobs import JobRegistry
 from openconstraint_mcp.minizinc.core import DEFAULT_SOLVE_TIMEOUT_MS
 
@@ -30,7 +29,6 @@ from openconstraint_mcp.portfolio import (
     _PortfolioAdmission,
     _select_portfolio_outcome,
 )
-from openconstraint_mcp.save_target import text_sha256
 from openconstraint_mcp.schemas import (
     CheckerReport,
     PortfolioSolveControls,
@@ -41,6 +39,8 @@ from openconstraint_mcp.schemas import (
     SolverInfo,
     SolverList,
 )
+from openconstraint_mcp.shared.job_errors import JobRejectedError
+from openconstraint_mcp.shared.save_target import text_sha256
 
 
 def _solve_result(

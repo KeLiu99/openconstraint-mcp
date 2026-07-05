@@ -14,7 +14,7 @@ from collections.abc import Callable
 from importlib import metadata
 from pathlib import Path
 
-from .schemas import SavedModelArtifact
+from ..schemas import SavedModelArtifact
 
 # The manifest doubles as the managed-directory marker: only a directory whose
 # marker parses (see _prior_manifest_filenames) may ever be overwritten.
@@ -39,14 +39,19 @@ def text_sha256(text: str) -> str:
     """Return the sha256 hex digest of ``text``, encoded as UTF-8.
 
     Deliberately no newline normalization and no trimming — ``text`` is hashed
-    exactly as given. This is distinct from the ``_sha256_of(path)`` helpers in
-    ``pyexec/save.py``/``minizinc/artifacts.py``, which hash file bytes read back
-    from disk; this helper hashes an in-memory string directly, so a caller that
-    hashes a request's ``source``/``checker``/``problem`` text and a later save-path
-    consistency check that hashes the same string are guaranteed to agree — a file
-    write can alter line endings per platform, but this helper never touches a file.
+    exactly as given. This is distinct from ``path_sha256``, which hashes file
+    bytes read back from disk; this helper hashes an in-memory string directly,
+    so a caller that hashes a request's ``source``/``checker``/``problem`` text
+    and a later save-path consistency check that hashes the same string are
+    guaranteed to agree — a file write can alter line endings per platform, but
+    this helper never touches a file.
     """
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
+def path_sha256(path: Path) -> str:
+    """Return the sha256 hex digest of the file at ``path``, read as bytes."""
+    return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
 def _prior_manifest_filenames(target: Path) -> list[str] | None:
@@ -72,9 +77,12 @@ def _prior_manifest_filenames(target: Path) -> list[str] | None:
         return None
     filenames: list[str] = []
     for entry in artifacts:
-        if not isinstance(entry, dict) or not isinstance(entry.get("path"), str):
+        if not isinstance(entry, dict):
             return None
-        filenames.append(entry["path"])
+        path = entry.get("path")
+        if not isinstance(path, str):
+            return None
+        filenames.append(path)
     return filenames
 
 

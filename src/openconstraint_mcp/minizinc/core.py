@@ -9,18 +9,7 @@ from contextlib import AbstractContextManager, contextmanager
 from pathlib import Path
 from typing import Any, NamedTuple
 
-from ..childproc import ChildProcessTracker
-from ..proc import (
-    CREATION_FLAGS as _CREATION_FLAGS,
-)
-from ..proc import (
-    START_NEW_SESSION as _START_NEW_SESSION,
-)
-from ..proc import (
-    terminate_process_tree as _terminate_process_tree,
-)
 from ..runtime import RuntimeMissingError, get_minizinc_binary, is_runtime_installed
-from ..save_target import text_sha256, validate_save_target
 from ..schemas import (
     CheckerReport,
     CheckerStatus,
@@ -38,6 +27,17 @@ from ..schemas import (
     UnsatCoreConstraint,
     UnsatCoreResult,
 )
+from ..shared.childproc import ChildProcessTracker
+from ..shared.proc import (
+    CREATION_FLAGS as _CREATION_FLAGS,
+)
+from ..shared.proc import (
+    START_NEW_SESSION as _START_NEW_SESSION,
+)
+from ..shared.proc import (
+    terminate_process_tree as _terminate_process_tree,
+)
+from ..shared.save_target import text_sha256, validate_save_target
 from .artifacts import write_verified_model_dir
 from .checker import _parse_checker_stream
 from .interface import parse_model_interface

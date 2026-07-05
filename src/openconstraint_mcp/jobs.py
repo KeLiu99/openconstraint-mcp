@@ -21,15 +21,12 @@ machinery and ``schemas``; it never imports ``server``.
 from __future__ import annotations
 
 import threading
-import time
 from collections.abc import Sequence
 from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass
 from subprocess import Popen
 from typing import cast
 from uuid import uuid4
-
-from .job_errors import JobRejectedError
 
 # jobs reuses core's internal solve helpers (validation, arg-building, process
 # teardown) rather than re-implementing them; they're package-internal, not a public API.
@@ -42,7 +39,6 @@ from .minizinc.core import (
     _validate_model_and_timeout,
     solve_model_cancellable,
 )
-from .proc import terminate_process_tree as _terminate_process_tree
 
 # _RESULT_BEARING_STATES is imported, not re-declared: it is the load-bearing
 # D1.9 invariant ("result present iff state in this set") and schemas owns it, so
@@ -55,16 +51,14 @@ from .schemas import (
     SolveResult,
     job_state_for_result,
 )
+from .shared.job_errors import JobRejectedError, exception_summary, now_ms
+from .shared.proc import terminate_process_tree as _terminate_process_tree
 
 # States with no further transitions (jobs-only; the result-bearing subset of
 # these is _RESULT_BEARING_STATES, imported from schemas).
 _TERMINAL_STATES: frozenset[JobState] = cast(
     "frozenset[JobState]", frozenset({"succeeded", "failed", "timeout", "cancelled"})
 )
-
-
-def _now_ms() -> int:
-    return int(time.time() * 1000)
 
 
 @dataclass(frozen=True)
@@ -339,7 +333,7 @@ class JobRegistry:
         # bumps in_flight, and launches the worker future — the single admission
         # primitive shared by submit (one) and submit_many (a batch under one lock).
         job_id = uuid4().hex
-        now = _now_ms()
+        now = now_ms()
         runs_now = self._in_flight < self._max_running
         record = _JobRecord(
             job_id=job_id,
@@ -369,7 +363,7 @@ class JobRegistry:
         if record.state in _TERMINAL_STATES:
             elapsed_ms = record.elapsed_ms
         elif record.started_at_ms is not None:
-            elapsed_ms = max(_now_ms() - record.started_at_ms, 0)
+            elapsed_ms = max(now_ms() - record.started_at_ms, 0)
         else:
             elapsed_ms = None
         return SolveJobStatus(
@@ -396,7 +390,7 @@ class JobRegistry:
         # terminal is left untouched.
         if record.state in _TERMINAL_STATES:
             return
-        now = _now_ms()
+        now = now_ms()
         record.state = state
         record.finished_at_ms = now
         if record.started_at_ms is not None:
@@ -451,7 +445,7 @@ class JobRegistry:
             request = record.request
             record.state = "running"
             if record.started_at_ms is None:
-                record.started_at_ms = _now_ms()
+                record.started_at_ms = now_ms()
         try:
             result = solve_model_cancellable(
                 request.model,
@@ -468,14 +462,10 @@ class JobRegistry:
             )
         except Exception as exc:  # noqa: BLE001 - worker boundary: never leak; record as failed
             with self._lock:
-                self._finalize(record, "failed", None, _exception_summary(exc))
+                self._finalize(record, "failed", None, exception_summary(exc))
             return
         with self._lock:
             if record.cancel_requested:
                 self._finalize(record, "cancelled", None, "Cancelled by client")
             else:
                 self._finalize(record, job_state_for_result(result), result, None)
-
-
-def _exception_summary(exc: Exception) -> str:
-    return f"{type(exc).__name__}: {exc}"

@@ -38,6 +38,34 @@ _SOLVE_CONTROLS_LIST = (
     "solver-gated, satisfaction-only `num_solutions`"
 )
 
+_CPSAT_JSON_CONTRACT = (
+    "The script MUST emit a single JSON object to stdout as its last line "
+    "with `status` (str), `objective` (float|null), and `solution` (dict), "
+    "and MAY include an optional `best_objective_bound` (float|null) for "
+    'diagnostics, e.g. `{"status": "<status>", "objective": <float|null>, '
+    '"solution": {<str: val>}, "best_objective_bound": <float|null>}`.'
+)
+
+_SAVE_TARGET_DIR_RULE = (
+    "`target_dir` must be an EXPLICIT ABSOLUTE local directory whose parent "
+    "exists; the server never opens a file dialog — the client supplies the "
+    "path."
+)
+
+_MARKER_GATED_OVERWRITE = (
+    "Overwrite is MARKER-GATED: a new or empty path is written directly; a "
+    "non-empty directory is replaced wholesale (staged sibling + atomic swap) "
+    "only when it holds a prior save's manifest marker, `overwrite=true` is "
+    "passed, and it contains no files the prior save did not write; anything "
+    "else is refused with an actionable error and nothing is touched."
+)
+
+_PACE_POLLING_NOTE = (
+    "PACE polling against the job's budget: a `running` job has roughly "
+    "`timeout_ms - elapsed_ms` left; wait a fraction of the remaining budget "
+    "between polls rather than looping tightly."
+)
+
 
 def _returns_immediately_note(get_tool: str) -> str:
     """Background-submit tail: returns at once, watch `state` via `get_tool`."""
@@ -56,50 +84,60 @@ def _cancellation_idempotent_note(terminal_states: str) -> str:
     )
 
 
+def _job_result_contract(error_verdict: str) -> str:
+    """Shared getter contract: when `result` exists and what `failed` means."""
+    return (
+        "CONTRACT: `result` is present exactly when `state` is `succeeded` or "
+        "`timeout`, absent for `queued`/`running`/`failed`/`cancelled` — so "
+        "branch on `state`, not on `result`. `failed` means the job machinery "
+        f"itself raised (no result, see `message`); {error_verdict} is a "
+        '`succeeded` job whose `result.status == "error"`, NOT `failed`. '
+    )
+
+
 MCP_SERVER_INSTRUCTIONS = (
     "Use this MCP server for local constraint programming and optimization: "
-    "MiniZinc and CP-SAT models for scheduling, rostering, knapsack, "
-    "allocation, assignment, routing, bin-packing, SAT/UNSAT analysis, model "
-    "validation, and solver statistics. For natural-language problems, prefer "
-    "the solve_constraint_problem prompt when the client supports MCP prompts; "
-    "otherwise draft MiniZinc in the client LLM, check it with "
-    "check_minizinc_model, then solve with solve_minizinc_model. To learn which "
-    "parameters a model needs as data (plus its output variables and solve "
-    "method) before building a `.dzn`, use inspect_minizinc_model. When the "
-    "model and data already exist as local files, pass their paths to "
-    "check_minizinc_files / solve_minizinc_files instead of pasting contents — "
-    "the path-based tools run from the model's directory, so a relative "
-    "`include` resolves. Validate solutions by passing a checker to the solve "
-    "tools (`checker` inline, `checker_path` for file solves). When the user "
-    "asks to save a successful checked/solved inline model, the client can "
-    "persist it with save_verified_minizinc_model and an absolute `target_dir`; "
-    "the server re-verifies before writing and "
-    "never opens a file dialog. Either way, lead with the result: a "
-    "plain-language status, the stdout solution stated in the terms of the "
-    "user's problem (not the raw JSON SolveResult), a compact item table when "
-    "the problem supplies item-like data, and the complete model-visible "
-    "`Statistics:` section when present — do not condense it to selected fields. "
-    "Use `num_solutions` only with `org.gecode.gecode` or `org.chuffed.chuffed`, "
-    "not the default `cp-sat`; for multiple optimal solutions, solve the "
-    "optimization first, then re-solve as satisfaction with the objective fixed "
-    "to the proven optimum. The check/inspect/solve/unsat-core tools emit status "
-    "feedback while MiniZinc runs: MCP progress notifications when the request "
-    "carries `_meta.progressToken`, plus info-level log notifications — stage "
+    "scheduling, rostering, knapsack, allocation, assignment, routing, "
+    "bin-packing, SAT/UNSAT analysis, model validation, and solver statistics. "
+    "It offers two equal backends; pick by problem shape. OR-Tools CP-SAT "
+    "Python: zero-install (no managed runtime needed), LLM-fluent, suits pure "
+    "integer/scheduling problems, imperative preprocessing, and custom data "
+    "structures. MiniZinc: expressive global constraints, `.dzn` data files, "
+    "checker verification, portfolio racing, and `num_solutions` enumeration. "
+    "For a natural-language problem, use the matching prompt when the client "
+    "supports MCP prompts: solve_constraint_problem (MiniZinc) or "
+    "solve_cpsat_python (CP-SAT Python). Without prompts: for MiniZinc, draft "
+    "the model in the client LLM, check it with check_minizinc_model, then "
+    "solve with solve_minizinc_model; for CP-SAT, write a conforming script "
+    "and run it with run_cpsat_python (bounded child process: timeout, 1 MB "
+    "output cap, tree-kill). MiniZinc workflow: to learn which parameters a "
+    "model needs as data (plus its output variables and solve method) before "
+    "building a `.dzn`, use inspect_minizinc_model. When the model and data "
+    "already exist as local files, pass their paths to check_minizinc_files / "
+    "solve_minizinc_files instead of pasting contents — the path-based tools "
+    "run from the model's directory, so a relative `include` resolves. "
+    "Validate solutions by passing a checker to the solve tools (`checker` "
+    "inline, `checker_path` for file solves). Use `num_solutions` only with "
+    "`org.gecode.gecode` or `org.chuffed.chuffed`, not the default `cp-sat`; "
+    "for multiple optimal solutions, solve the optimization first, then "
+    "re-solve as satisfaction with the objective fixed to the proven optimum. "
+    "When the user asks to save a verified result, persist it with "
+    "save_verified_minizinc_model or save_verified_cpsat_python and an "
+    "absolute `target_dir`; the server re-verifies before writing and never "
+    "opens a file dialog. Either way, lead with the result: a plain-language "
+    "status, the solution stated in the terms of the user's problem (not the "
+    "raw JSON result), a compact item table when the problem supplies "
+    "item-like data, and the complete model-visible `Statistics:` section "
+    "when present — do not condense it to selected fields. The MiniZinc "
+    "check/inspect/solve/unsat-core tools emit status feedback while running: "
+    "MCP progress notifications when the request carries "
+    "`_meta.progressToken`, plus info-level log notifications — stage "
     "markers, not a completion percentage, so never render a percent bar. "
     "MiniZinc tools use the managed local MiniZinc runtime; never a remote "
-    "solver or a bare PATH minizinc. "
-    "For richer expressiveness or an independent verification pass, use MiniZinc. "
-    "A second, parallel path executes OR-Tools CP-SAT Python locally: use the "
-    "`solve_cpsat_python` prompt to guide the client LLM to write a conforming "
-    "script, then run it with `run_cpsat_python` (bounded child process, timeout "
-    "+ 1 MB output cap + tree-kill, returns `CpsatPythonResult`), and persist "
-    "the solution with `save_verified_cpsat_python` (save gate: reported "
-    "status + optional expectation threshold and/or checker script). The server executes "
-    "user-provided Python locally — it is NOT sandboxed; this is a local-only "
-    "tool. The server wrapper makes no network calls, but the executed child is "
-    "arbitrary code. Use MiniZinc for declarative/verifiable models; use the "
-    "CP-SAT Python path for imperative logic, custom data structures, or when "
-    "the managed MiniZinc runtime is not installed."
+    "solver or a bare PATH minizinc. The CP-SAT Python tools execute "
+    "user-provided Python locally in an UNSANDBOXED child process — the "
+    "server wrapper makes no network calls, but the executed child is "
+    "arbitrary code."
 )
 
 CHECK_RUNTIME_DESCRIPTION = "Report whether the managed MiniZinc runtime is installed."
@@ -171,7 +209,8 @@ SOLVE_MINIZINC_MODEL_DESCRIPTION = (
     "checker source written beside the model and passed via `--solution-checker`; "
     "it may include the co-located `model.mzn` but cannot resolve arbitrary "
     "project-relative includes — use `solve_minizinc_files` with `checker_path` "
-    "for multi-file checkers. When supplied, `checker` is a nested CheckerReport "
+    "for multi-file checkers. When supplied, the result's `checker` field is a "
+    "nested CheckerReport "
     "with `status` (`completed`, `violation`, `no_solution`, `error`, "
     "`timeout`), `checks` (one verdict per solution, index-aligned with "
     "`solutions`), and `transcript` (the AUTHORITATIVE raw `--json-stream` "
@@ -242,17 +281,17 @@ SAVE_VERIFIED_MINIZINC_MODEL_DESCRIPTION = (
     "the check is `ok` and the solve is `satisfied`/`optimal` with a clean exit "
     "and no timeout — and, if a checker is supplied, its nested report is "
     "`completed` (ran without machine-readable violation; NOT a proof of "
-    "optimality). `target_dir` must be an EXPLICIT ABSOLUTE local directory "
-    "whose parent exists; the server never opens an OS file dialog — the client "
-    "supplies the path. Optional `portfolio_result` (a PortfolioSolveResult from "
+    "optimality). "
+    + _SAVE_TARGET_DIR_RULE
+    + " Optional `portfolio_result` (a PortfolioSolveResult from "
     "a MiniZinc solver-portfolio race) attaches that race's attempt table as "
     "PROVENANCE ONLY — never verification evidence; the save still re-runs "
     "check/solve/checker on `model`/`data`/`solver`/`random_seed` fresh and "
     "gates on that alone. Eagerly rejected (MCP error, before any check/solve) "
     "when: `portfolio_result.status != 'winner'`; the winning attempt's "
     "`solver` or `seed` does not match this save's `solver`/`random_seed` (an "
-    "unseeded winner matches an unseeded save); the winning formulation's/"
-    "data's hash does not match `model`/`data`; or the race's shared "
+    "unseeded winner matches an unseeded save); the winning attempt's model or "
+    "data hash does not match `model`/`data`; or the race's shared "
     "`solve_controls` (`free_search`/`parallel`/`all_solutions`/"
     "`num_solutions`) do not match this save's — the save must replay the "
     "winning attempt's search configuration (`timeout_ms`, a budget, is not "
@@ -270,13 +309,9 @@ SAVE_VERIFIED_MINIZINC_MODEL_DESCRIPTION = (
     "`experiment-log.json` only when `portfolio_result` is supplied and the "
     "save succeeds; and a `.openconstraint-model.json` manifest recording tool "
     "version, timestamp, solver, the solve controls used, a verification "
-    "summary, and per-file sha256 hashes. Overwrite is MARKER-GATED: a new or "
-    "empty path is written "
-    "directly; a non-empty directory is replaced wholesale (staged sibling + "
-    "atomic swap) only when it holds a prior save's manifest marker, "
-    "`overwrite=true` is passed, and it contains no files the prior save did not "
-    "write; anything else is refused with an actionable error and nothing is "
-    "touched. Accepts the same `solver`, `timeout_ms`, and solver/search "
+    "summary, and per-file sha256 hashes. "
+    + _MARKER_GATED_OVERWRITE
+    + " Accepts the same `solver`, `timeout_ms`, and solver/search "
     "controls as `solve_minizinc_model` (`free_search`, `parallel`, "
     "`random_seed`, `all_solutions`, and the solver-gated `num_solutions`); an "
     "`-a/-f/-p/-r` control the selected solver does not declare is rejected "
@@ -324,7 +359,8 @@ SOLVE_MINIZINC_FILES_DESCRIPTION = (
     "the selected solver does not declare. Optional `checker_path` points to a "
     "`.mzc`/`.mzc.mzn` checker file, resolved to absolute and validated before "
     "any run; it adds `--solution-checker <path>` to the same invocation, so "
-    "search controls compose with checking. When supplied, `checker` is the same "
+    "search controls compose with checking. When supplied, the result's "
+    "`checker` field is the same "
     "nested CheckerReport as `solve_minizinc_model` — `status`, index-aligned "
     "`checks`, and authoritative raw `transcript`."
 )
@@ -382,17 +418,11 @@ GET_SOLVE_JOB_DESCRIPTION = (
     "`submitted_at_ms`, `started_at_ms`, `finished_at_ms`, `elapsed_ms`, an "
     "optional `result` (the full SolveResult), and an optional `message`. "
     "`state` is one of `queued`, `running`, `succeeded`, `failed`, `timeout`, "
-    "`cancelled`. CONTRACT: `result` is present exactly when `state` is "
-    "`succeeded` or `timeout`, absent for `queued`/`running`/`failed`/"
-    "`cancelled` — so branch on `state`, not on `result`. `failed` means the job "
-    "machinery itself raised (no SolveResult, see `message`); a SOLVER-level "
-    '`error` verdict is a `succeeded` job whose `result.status == "error"`, NOT '
-    "`failed`. A `timeout` job still carries its partial SolveResult. While "
+    "`cancelled`. "
+    + _job_result_contract("a SOLVER-level `error` verdict")
+    + "A `timeout` job still carries its partial SolveResult. While "
     "`running`, only `state` + `elapsed_ms` advance; live mid-solve statistics "
-    "are not provided. PACE polling against the job's own budget, not a fixed "
-    "`sleep`: a `running` job has roughly `timeout_ms - elapsed_ms` left and is "
-    "usually terminal shortly after, so wait a fraction of the remaining budget "
-    "between polls rather than looping tightly. On a `succeeded` or `timeout` "
+    "are not provided. " + _PACE_POLLING_NOTE + " On a `succeeded` or `timeout` "
     "job, present `result` as the synchronous solve tools require: lead with the "
     "plain-language status and the solution in the user's terms, and include the "
     "COMPLETE model-visible `Statistics:` section whenever `result.statistics` "
@@ -518,18 +548,14 @@ RUN_CPSAT_PYTHON_DESCRIPTION = (
     "Execute LLM-generated OR-Tools CP-SAT Python source in a bounded child "
     "process and return a structured CpsatPythonResult. The script runs under "
     "the same Python interpreter as the server, with `ortools` and the stdlib "
-    "available. It MUST emit a single JSON object to stdout as its last line with "
-    "`status` (str), `objective` (float|null), and `solution` (dict); it MAY also "
-    "include an optional `best_objective_bound` (float|null) for diagnostics, e.g. "
-    '`{"status": "<status>", "objective": <float|null>, "solution": {<str: val>}, '
-    '"best_objective_bound": <float|null>}`. '
+    "available. " + _CPSAT_JSON_CONTRACT + " "
     "Valid `status` values: `optimal`, `feasible`, `infeasible`, `unknown`, `error`. "
     "Use the `solve_cpsat_python` prompt to generate conforming scripts. "
     "Returns a CpsatPythonResult: `status` (one of the above, or `timeout` if the "
     "process exceeded `timeout_ms`), `solution` (the parsed dict or null), "
     "`objective` (parsed float/int or null), `best_objective_bound` (parsed "
     "float/int or null; OR-Tools' `solver.best_objective_bound` — diagnostic "
-    "only, not a proven objective, and useful even on `status=\"unknown\"` when "
+    'only, not a proven objective, and useful even on `status="unknown"` when '
     "no incumbent was found), `stdout`, `stderr`, `return_code` "
     "(null on timeout), `timed_out`, `truncated` (output exceeded 1 MB cap), "
     "`duration_ms`. A non-zero exit code, missing/unparseable JSON, or an "
@@ -554,13 +580,9 @@ RUN_CPSAT_PYTHON_FILE_DESCRIPTION = (
     "`script_path` is resolved to absolute and validated before any run: a "
     "missing path, a non-file, an empty/whitespace-only script, or non-UTF-8 "
     "content is rejected with an actionable MCP error and nothing runs. Same "
-    "execution contract, output cap, timeout, and tree-kill as `run_cpsat_python`: "
-    "the script MUST emit a single JSON object to stdout as its last line with "
-    "`status`, `objective`, and `solution`, and MAY also include an optional "
-    '`best_objective_bound` for diagnostics, e.g. (`{"status": "<status>", '
-    '"objective": <float|null>, "solution": {<str: val>}, '
-    '"best_objective_bound": <float|null>}`), '
-    "and the returned CpsatPythonResult has the identical shape (`status`, "
+    "execution contract, output cap, timeout, and tree-kill as "
+    "`run_cpsat_python`: " + _CPSAT_JSON_CONTRACT + " "
+    "The returned CpsatPythonResult has the identical shape (`status`, "
     "`solution`, `objective`, `best_objective_bound`, `stdout`, `stderr`, "
     "`return_code`, `timed_out`, "
     "`truncated`, `duration_ms`), including `timeout` partial recovery. " + _CPSAT_CHILD_POSTURE
@@ -572,7 +594,10 @@ SOLVE_CONSTRAINT_PROBLEM_PROMPT_DESCRIPTION = (
     "through the local managed runtime (via solve_minizinc_model when "
     "available, otherwise by walking the user through the "
     "openconstraint-mcp CLI to set up and invoke the managed runtime "
-    "manually — never via a bare PATH-based minizinc)."
+    "manually — never via a bare PATH-based minizinc). The MiniZinc peer "
+    "of the solve_cpsat_python prompt: pick it for expressive global "
+    "constraints, `.dzn` data files, checker verification, portfolio "
+    "racing, or `num_solutions` enumeration."
 )
 
 RUN_CPSAT_PYTHON_EXPERIMENT_DESCRIPTION = (
@@ -671,8 +696,8 @@ SAVE_VERIFIED_CPSAT_PYTHON_DESCRIPTION = (
     "Re-run a CP-SAT Python script and persist it to a LOCAL directory when it "
     "passes the configured save gate(s). The server trusts no prior claim of "
     "success: it runs `source` again and saves only when all supplied gates pass. "
-    "`target_dir` must be an EXPLICIT ABSOLUTE local directory whose parent "
-    "exists; the server never opens a file dialog. "
+    + _SAVE_TARGET_DIR_RULE
+    + " "
     "Gate order (reported → expectation → checker): "
     "(1) Reported gate — always applied: `status` must be `optimal`/`feasible` "
     "AND `solution` must be non-empty. "
@@ -723,11 +748,8 @@ SAVE_VERIFIED_CPSAT_PYTHON_DESCRIPTION = (
     "recording tool version, timestamp, verification level, expectation settings, "
     "checker summary (status/error_count/duration/timed_out/truncated only — no "
     "free text), a compact experiment-log summary, and per-file sha256 hashes. "
-    "Overwrite is MARKER-GATED: a new or empty path is written directly; a "
-    "non-empty directory is replaced wholesale (staged sibling + atomic swap) "
-    "only when it holds a prior save's manifest marker, `overwrite=true` is "
-    "passed, and it contains no files the prior save did not write; anything "
-    "else is refused with an actionable error and nothing is touched. "
+    + _MARKER_GATED_OVERWRITE
+    + " "
     "Returns a SaveVerifiedPythonResult with: `saved` (bool), "
     "`verification_level` ('none'|'reported'|'expectation'|'checked' — the "
     "highest gate that passed; combine with `saved` to distinguish a saved result "
@@ -743,11 +765,12 @@ SAVE_VERIFIED_CPSAT_PYTHON_DESCRIPTION = (
 )
 
 SOLVE_CPSAT_PYTHON_PROMPT_DESCRIPTION = (
-    "Guide the MCP client's LLM through writing a CP-SAT Python script "
-    "that conforms to the run_cpsat_python output contract and running it "
-    "via run_cpsat_python. Use when the user's problem is better expressed "
-    "in Python than in MiniZinc (custom data structures, imperative "
-    "pre-processing, NumPy-style indexing)."
+    "Guide the MCP client's LLM through writing an OR-Tools CP-SAT Python "
+    "script that conforms to the run_cpsat_python output contract and "
+    "running it via run_cpsat_python. The CP-SAT peer of the "
+    "solve_constraint_problem prompt: pick it for zero-install solving (no "
+    "managed runtime needed), pure integer/scheduling problems, imperative "
+    "pre-processing, or custom data structures."
 )
 
 # --- CP-SAT background job descriptions -------------------------------------
@@ -755,12 +778,7 @@ SOLVE_CPSAT_PYTHON_PROMPT_DESCRIPTION = (
 SUBMIT_CPSAT_PYTHON_JOB_DESCRIPTION = (
     "Submit an OR-Tools CP-SAT Python INLINE SOURCE as a BACKGROUND JOB and return "
     "immediately, so a long solve cannot hit a synchronous MCP client timeout. "
-    "Takes the same `source` and `timeout_ms` as `run_cpsat_python`. "
-    "The script must conform to the run_cpsat_python output contract: emit a single "
-    "JSON object to stdout as its last line with required `status`, `objective`, "
-    "`solution`, plus an optional `best_objective_bound` for diagnostics, e.g. "
-    '(`{"status": "<status>", "objective": <float|null>, "solution": {<str: val>}, '
-    '"best_objective_bound": <float|null>}`). '
+    "Takes the same `source` and `timeout_ms` as `run_cpsat_python`. " + _CPSAT_JSON_CONTRACT + " "
     "Returns a CpsatPythonJobStatus with a server-generated opaque `job_id` and "
     "an initial `state` of `queued` or `running` (a very fast job may already be "
     "terminal); poll with `get_cpsat_python_job(job_id)` and "
@@ -799,18 +817,14 @@ GET_CPSAT_PYTHON_JOB_DESCRIPTION = (
     "`submitted_at_ms`, `started_at_ms`, `finished_at_ms`, `elapsed_ms`, an "
     "optional `result` (the full CpsatPythonResult), and an optional `message`. "
     "`state` is one of `queued`, `running`, `succeeded`, `failed`, `timeout`, "
-    "`cancelled`. CONTRACT: `result` is present exactly when `state` is "
-    "`succeeded` or `timeout`, absent for `queued`/`running`/`failed`/`cancelled` "
-    "— so branch on `state`, not on `result`. `failed` means the job machinery "
-    "itself raised (no result, see `message`); a script-level `error` verdict "
-    '(e.g. a crash or bad JSON) is a `succeeded` job whose `result.status == "error"`, '
-    "NOT `failed`. A `timeout` job carries its partial CpsatPythonResult "
+    "`cancelled`. "
+    + _job_result_contract("a script-level `error` verdict (a crash or bad JSON)")
+    + "A `timeout` job carries its partial CpsatPythonResult "
     "(`result.timed_out == True`, best-so-far `solution`/`objective`/"
     "`best_objective_bound`). While "
-    "`running`, only `state` + `elapsed_ms` advance. PACE polling against the "
-    "job's budget: a `running` job has roughly `timeout_ms - elapsed_ms` left; "
-    "wait a fraction of the remaining budget between polls rather than looping "
-    "tightly. On `succeeded` or `timeout`, present the result as "
+    "`running`, only `state` + `elapsed_ms` advance. "
+    + _PACE_POLLING_NOTE
+    + " On `succeeded` or `timeout`, present the result as "
     "`run_cpsat_python` requires: lead with the plain-language status and the "
     "solution in the user's terms. " + _UNKNOWN_JOB_ID_ERROR
 )

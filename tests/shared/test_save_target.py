@@ -9,24 +9,21 @@ from pathlib import Path
 
 import pytest
 
-from openconstraint_mcp.save_target import (
+from openconstraint_mcp.schemas import SavedModelArtifact
+from openconstraint_mcp.shared.save_target import (
     MANIFEST_FILENAME,
     commit_staged_dir,
+    path_sha256,
     text_sha256,
     validate_save_target,
 )
-from openconstraint_mcp.schemas import SavedModelArtifact
-
-
-def _sha256_of(path: Path) -> str:
-    return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
 def _minimal_writer(staging: Path) -> list[SavedModelArtifact]:
     """Write a minimal valid artifact set into staging; returns artifacts list."""
     content_path = staging / "result.txt"
     content_path.write_text("hello", encoding="utf-8")
-    artifact = SavedModelArtifact(role="data", path="result.txt", sha256=_sha256_of(content_path))
+    artifact = SavedModelArtifact(role="data", path="result.txt", sha256=path_sha256(content_path))
     manifest = {
         "managed_by": "openconstraint-mcp",
         "artifacts": [artifact.model_dump(mode="json")],
@@ -34,7 +31,7 @@ def _minimal_writer(staging: Path) -> list[SavedModelArtifact]:
     manifest_path = staging / MANIFEST_FILENAME
     manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
     manifest_artifact = SavedModelArtifact(
-        role="manifest", path=MANIFEST_FILENAME, sha256=_sha256_of(manifest_path)
+        role="manifest", path=MANIFEST_FILENAME, sha256=path_sha256(manifest_path)
     )
     return [artifact, manifest_artifact]
 
@@ -46,7 +43,7 @@ def _writer_with_content(content: str) -> Callable[[Path], list[SavedModelArtifa
         content_path = staging / "result.txt"
         content_path.write_text(content, encoding="utf-8")
         artifact = SavedModelArtifact(
-            role="data", path="result.txt", sha256=_sha256_of(content_path)
+            role="data", path="result.txt", sha256=path_sha256(content_path)
         )
         manifest = {
             "managed_by": "openconstraint-mcp",
@@ -55,7 +52,7 @@ def _writer_with_content(content: str) -> Callable[[Path], list[SavedModelArtifa
         manifest_path = staging / MANIFEST_FILENAME
         manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
         manifest_artifact = SavedModelArtifact(
-            role="manifest", path=MANIFEST_FILENAME, sha256=_sha256_of(manifest_path)
+            role="manifest", path=MANIFEST_FILENAME, sha256=path_sha256(manifest_path)
         )
         return [artifact, manifest_artifact]
 
@@ -175,7 +172,7 @@ def test_commit_staged_dir_overwrite_replaces_wholesale(tmp_path: Path) -> None:
         manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
         artifact.append(
             SavedModelArtifact(
-                role="manifest", path=MANIFEST_FILENAME, sha256=_sha256_of(manifest_path)
+                role="manifest", path=MANIFEST_FILENAME, sha256=path_sha256(manifest_path)
             )
         )
         return artifact

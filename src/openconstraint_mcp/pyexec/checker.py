@@ -28,8 +28,8 @@ import tempfile
 from pathlib import Path
 from typing import TypedDict
 
-from ..childproc import ChildProcessTracker
 from ..schemas import CpsatCheckerReport, CpsatPythonResult
+from ..shared.childproc import ChildProcessTracker
 from .runner import execute_child
 
 _ACCEPTED_STATUS = "accepted"

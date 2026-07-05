@@ -54,9 +54,7 @@ for line_index, line in enumerate(FANO_LINES):
     for left, right in itertools.combinations(line, 2):
         edge_line[(left, right)] = line_index
 slot = {
-    (point, line): incident[point].index(line)
-    for point in range(7)
-    for line in incident[point]
+    (point, line): incident[point].index(line) for point in range(7) for line in incident[point]
 }
 perms = list(itertools.permutations(range(3)))
 model = cp_model.CpModel()
@@ -88,9 +86,7 @@ for point in range(7):
 week_codes = []
 for week in range(9):
     code = model.new_int_var(0, len(perms) ** 7 - 1, f"week_code_{week}")
-    model.add(
-        code == sum((len(perms) ** point) * choices[week][point] for point in range(7))
-    )
+    model.add(code == sum((len(perms) ** point) * choices[week][point] for point in range(7)))
     week_codes.append(code)
 for left, right in zip(week_codes, week_codes[1:], strict=False):
     model.add(left < right)
@@ -122,8 +118,7 @@ for week in range(9):
     for line_index, line in enumerate(FANO_LINES):
         groups.append(
             sorted(
-                3 * point + solver.value(values[(week, point, line_index)]) + 1
-                for point in line
+                3 * point + solver.value(values[(week, point, line_index)]) + 1 for point in line
             )
         )
     schedule.append(groups)
