@@ -73,15 +73,15 @@ def test_run_cpsat_python_file_resolves_relative_sibling_file(tmp_path: Path) ->
         "from ortools.sat.python import cp_model\n"
         "bound = int(Path('bound.txt').read_text())\n"
         "model = cp_model.CpModel()\n"
-        "x = model.NewIntVar(0, bound, 'x')\n"
-        "model.Maximize(x)\n"
+        "x = model.new_int_var(0, bound, 'x')\n"
+        "model.maximize(x)\n"
         "solver = cp_model.CpSolver()\n"
-        "status = solver.Solve(model)\n"
+        "status = solver.solve(model)\n"
         "status_map = {0: 'unknown', 1: 'error', 2: 'infeasible', 3: 'feasible', 4: 'optimal'}\n"
         "print(json.dumps({\n"
         "    'status': status_map.get(status, 'error'),\n"
-        "    'objective': solver.ObjectiveValue(),\n"
-        "    'solution': {'x': solver.Value(x)},\n"
+        "    'objective': solver.objective_value,\n"
+        "    'solution': {'x': solver.value(x)},\n"
         "}))\n",
         encoding="utf-8",
     )

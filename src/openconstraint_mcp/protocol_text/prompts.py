@@ -211,7 +211,7 @@ User problem:
      environment variable for the replay re-run; a script that hardcodes the
      seed instead of reading this env var silently ignores the replay. The
      server cannot force a seed into arbitrary Python.
-   - Solve: `status_code = solver.Solve(model)`.
+   - Solve: `status_code = solver.solve(model)`.
    - Emit exactly ONE JSON object as the LAST line of stdout:
      ```
      status_map = {{
@@ -222,10 +222,10 @@ User problem:
      }}
      solution = {{}}
      if status_code in (cp_model.OPTIMAL, cp_model.FEASIBLE):
-         solution = {{"var1": solver.Value(var1), ...}}
+         solution = {{"var1": solver.value(var1), ...}}
      print(json.dumps({{
          "status": status_map.get(status_code, "error"),
-         "objective": float(solver.ObjectiveValue()) if model.HasObjective() else None,
+         "objective": float(solver.objective_value) if model.has_objective() else None,
          "solution": solution,
      }}))
      ```
@@ -240,10 +240,10 @@ User problem:
          def on_solution_callback(self):
              print(json.dumps({{
                  "status": "feasible",
-                 "objective": self.ObjectiveValue(),
-                 "solution": {{name: self.Value(v) for name, v in self._variables.items()}},
+                 "objective": self.objective_value,
+                 "solution": {{name: self.value(v) for name, v in self._variables.items()}},
              }}))
-     solver.Solve(model, _Best({{"var1": var1, ...}}))
+     solver.solve(model, _Best({{"var1": var1, ...}}))
      ```
      The child runs unbuffered, so on a timeout the server recovers the last
      such block as the best-so-far. The final block (printed after `Solve`

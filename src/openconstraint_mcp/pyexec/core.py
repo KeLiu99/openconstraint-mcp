@@ -32,9 +32,9 @@ Canonical emit snippet (inlined in scripts, never imported from here):
         "MODEL_INVALID": "error",
     }
     print(json.dumps({
-        "status": status_map.get(solver.StatusName(status), "error"),
-        "objective": solver.ObjectiveValue() if model.HasObjective() else None,
-        "solution": {v.Name(): solver.Value(v) for v in variables},
+        "status": status_map.get(solver.status_name(status), "error"),
+        "objective": solver.objective_value if model.has_objective() else None,
+        "solution": {v.name: solver.value(v) for v in variables},
     }))
 """
 
