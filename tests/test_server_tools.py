@@ -2969,6 +2969,67 @@ async def test_run_cpsat_python_experiment_prints_warnings_section(
     assert warning in text
 
 
+@pytest.mark.asyncio
+async def test_run_cpsat_python_experiment_attempt_line_shows_best_objective_bound(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An unknown/rejected attempt's best_objective_bound must be visible in the
+    plain-text attempt table too, not just structuredContent — otherwise a
+    text-only client loses the diagnostic this field exists for."""
+    from openconstraint_mcp.schemas import (
+        CpsatPythonExperimentAttempt,
+        CpsatPythonExperimentAttemptResult,
+        CpsatPythonExperimentResult,
+    )
+
+    fake_result = CpsatPythonExperimentResult(
+        status="no_winner",
+        attempts=[
+            CpsatPythonExperimentAttemptResult(
+                index=0,
+                name="baseline",
+                seed=None,
+                config_sha256=None,
+                source_sha256="abc123",
+                timeout_ms=1000,
+                status="unknown",
+                objective=None,
+                best_objective_bound=7,
+                accepted=False,
+                message="status='unknown'",
+                timed_out=False,
+                truncated=False,
+                duration_ms=42,
+            )
+        ],
+        elapsed_ms=42,
+        objective_sense="maximize",
+        selection_policy="best_accepted_incumbent_objective_then_status_then_duration_then_attempt_order",
+        source_sha256=["abc123"],
+    )
+
+    def _fake(
+        attempts: list[CpsatPythonExperimentAttempt],
+        **kw: object,
+    ) -> CpsatPythonExperimentResult:
+        return fake_result
+
+    monkeypatch.setattr("openconstraint_mcp.server.run_cpsat_python_experiment", _fake)
+
+    mcp = create_mcp_server()
+    text = _content_text(
+        await mcp.call_tool(
+            "run_cpsat_python_experiment",
+            {
+                "attempts": [{"name": "baseline", "source": "print('hi')"}],
+                "objective_sense": "maximize",
+            },
+        )
+    )
+
+    assert "best_bound=7" in text
+
+
 # --- run_cpsat_python_file ----------------------------------------------------
 
 

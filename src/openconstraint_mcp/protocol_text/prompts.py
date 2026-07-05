@@ -227,24 +227,49 @@ User problem:
          "status": status_map.get(status_code, "error"),
          "objective": float(solver.objective_value) if model.has_objective() else None,
          "solution": solution,
+         "best_objective_bound": (
+             float(solver.best_objective_bound) if model.has_objective() else None
+         ),
      }}))
      ```
+     `best_objective_bound` (OR-Tools' `solver.best_objective_bound` — a
+     PROPERTY, not a method) is a diagnostic bound, not a proven objective.
+     Include it for every optimization model so a `status="unknown"` result
+     still carries search-progress information even with no incumbent.
+     CRITICAL for a PURE FEASIBILITY problem (no `model.minimize`/`maximize`
+     call — a satisfaction-only CSP, e.g. a scheduling or CSP-only model with
+     no cost to optimize): `model.has_objective()` is `False`, and BOTH
+     `solver.objective_value` AND `solver.best_objective_bound` then return
+     `0.0` WITHOUT raising — never omit the `if model.has_objective() else
+     None` guard, or a feasibility problem's `unknown`/`error` result would
+     misleadingly report a "bound" of `0.0` instead of `null`. There is no
+     meaningful bound for a satisfaction-only problem; `null` is the correct
+     value, not `0.0`.
    - For a long or optimization run that may hit `timeout_ms`, ALSO emit an
      intermediate JSON object of the SAME shape on each improved solution,
      from a `cp_model.CpSolverSolutionCallback`, e.g.:
      ```
      class _Best(cp_model.CpSolverSolutionCallback):
-         def __init__(self, variables):
+         def __init__(self, variables, has_objective):
              super().__init__()
              self._variables = variables
+             self._has_objective = has_objective
          def on_solution_callback(self):
              print(json.dumps({{
                  "status": "feasible",
-                 "objective": self.objective_value,
+                 "objective": self.objective_value if self._has_objective else None,
                  "solution": {{name: self.value(v) for name, v in self._variables.items()}},
+                 "best_objective_bound": (
+                     self.best_objective_bound if self._has_objective else None
+                 ),
              }}))
-     solver.solve(model, _Best({{"var1": var1, ...}}))
+     solver.solve(model, _Best({{"var1": var1, ...}}, model.has_objective()))
      ```
+     Pass `model.has_objective()` into the callback (not just `model`/`solver`
+     module-level) so the SAME `0.0`-vs-`null` guard from the final block
+     above applies here too — a feasibility problem's callback fires on every
+     found solution during a long satisfaction search, not just optimization
+     runs, so it needs the identical guard.
      The child runs unbuffered, so on a timeout the server recovers the last
      such block as the best-so-far. The final block (printed after `Solve`
      returns) remains the authoritative result on a clean run.
@@ -255,7 +280,8 @@ User problem:
 
 4. Call `run_cpsat_python` with the script as `source`. The server runs it
    locally in a child process (not remote, not sandboxed) and returns a
-   `CpsatPythonResult` with `status`, `solution`, `objective`, `stdout`,
+   `CpsatPythonResult` with `status`, `solution`, `objective`,
+   `best_objective_bound` (diagnostic only — see step 3), `stdout`,
    `stderr`, `timed_out`, `truncated`, and `duration_ms`.
 
 5. Present the result clearly:
@@ -265,6 +291,9 @@ User problem:
      `error`. For `timeout`, the child process exceeded `timeout_ms`; if
      `solution` is populated it is the best found so far (unproven, treat as
      feasible-not-optimal), otherwise none was reached in time.
+   - For `unknown` (no incumbent found), mention `best_objective_bound` when
+     present — it shows the solver made bound progress even though no
+     feasible solution was found; it is a diagnostic hint, not a solution.
    - Describe the solution in the user's own terms (task names, variable
      semantics), not as a raw JSON dump.
    - For a HARD instance where CP-SAT's own result quality is unclear, also

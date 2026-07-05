@@ -293,9 +293,14 @@ def _format_cpsat_experiment_content(result: CpsatPythonExperimentResult) -> str
         verdict = "accepted" if attempt.accepted else "rejected"
         checker = f", checker={attempt.checker_status}" if attempt.checker_status else ""
         reason = f" — {attempt.message}" if attempt.message and not attempt.accepted else ""
+        bound = (
+            f", best_bound={attempt.best_objective_bound}"
+            if attempt.best_objective_bound is not None
+            else ""
+        )
         lines.append(
             f"- {attempt.name!r} (seed {attempt.seed}): status={attempt.status}, "
-            f"objective={attempt.objective}, {verdict}{checker}{reason}"
+            f"objective={attempt.objective}{bound}, {verdict}{checker}{reason}"
         )
     if result.warnings:
         lines.append("")

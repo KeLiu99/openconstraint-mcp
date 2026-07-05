@@ -27,6 +27,14 @@ class CpsatPythonResult(BaseModel):
     status: CpsatStatus
     solution: dict | None
     objective: float | int | None
+    # OR-Tools' solver.best_objective_bound — a diagnostic bound, not a proven
+    # objective. Useful even when status="unknown" and no incumbent was found,
+    # since a script may still emit it. None for a script that never reports it
+    # (backward compatible with scripts predating this field), reports a
+    # non-finite/non-numeric value (normalized like `objective`), or is a pure
+    # feasibility problem (no objective — OR-Tools returns a meaningless 0.0
+    # rather than raising, so a conforming script reports None instead).
+    best_objective_bound: float | int | None = None
     stdout: str
     stderr: str
     return_code: int | None
@@ -866,6 +874,9 @@ class CpsatPythonExperimentAttemptResult(BaseModel):
     from ``message``'s short single-line snippet: ``message`` stays concise
     for the printed attempt table, ``stderr_tail`` is a larger bounded tail
     for debugging, carried only in ``structuredContent``.
+    ``best_objective_bound`` is diagnostic only — it is never consulted for
+    ``accepted``/winner selection, so an ``unknown`` attempt with no
+    incumbent can still surface search progress via this field.
     """
 
     index: int
@@ -876,6 +887,7 @@ class CpsatPythonExperimentAttemptResult(BaseModel):
     timeout_ms: int
     status: CpsatStatus
     objective: float | int | None
+    best_objective_bound: float | int | None = None
     accepted: bool
     checker_status: CpsatExperimentCheckerStatus | None = None
     message: str | None = None

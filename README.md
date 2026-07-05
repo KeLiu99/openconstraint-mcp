@@ -879,10 +879,11 @@ server runs it in a **local child process**.
 - **`run_cpsat_python(source: str, timeout_ms: int = 30000)`** — execute
   LLM-generated OR-Tools CP-SAT Python source in a bounded child process and
   return a `CpsatPythonResult`. The script must emit a single JSON object as
-  its last stdout line:
+  its last stdout line with `status`, `objective`, and `solution`; it may also
+  include an optional `best_objective_bound` for diagnostics:
 
   ```json
-  {"status": "optimal", "objective": 42.0, "solution": {"x": 3, "y": 7}}
+  {"status": "optimal", "objective": 42.0, "solution": {"x": 3, "y": 7}, "best_objective_bound": 42.0}
   ```
 
   Valid `status` values: `optimal`, `feasible`, `infeasible`, `unknown`,
@@ -891,17 +892,25 @@ server runs it in a **local child process**.
   The child process runs under the server's own Python interpreter (the
   project venv, which already ships `ortools`), launched unbuffered (`-u`).
   Output beyond 1 MB is truncated and the child killed. Returns
-  `CpsatPythonResult`: `status`, `solution`, `objective`, `stdout`, `stderr`,
-  `return_code` (null on timeout), `timed_out`, `truncated`, `duration_ms`.
+  `CpsatPythonResult`: `status`, `solution`, `objective`, `best_objective_bound`,
+  `stdout`, `stderr`, `return_code` (null on timeout), `timed_out`, `truncated`,
+  `duration_ms`.
+
+  `best_objective_bound` (OR-Tools' `solver.best_objective_bound` property) is
+  optional and diagnostic only — never used for acceptance, winner selection,
+  or save verification. It is `null` for a script that doesn't emit it
+  (backward compatible) or reports a non-finite/non-numeric value, and it is
+  most useful on `status="unknown"`, where `objective` is `null` but the
+  solver may still have made bound progress.
 
   **Partial result on timeout.** A long or optimization run can also print an
   intermediate JSON object of the same shape on each improved solution (from a
   `cp_model.CpSolverSolutionCallback`). Because the child is unbuffered, the
   last such block survives the timeout kill: on `status="timeout"` the
-  server recovers it into `solution`/`objective` as the best-so-far (unproven —
-  treat as feasible, not optimal), or leaves them null if none was printed in
-  time. On a clean run the final block (printed after `Solve` returns) is the
-  authoritative result.
+  server recovers it into `solution`/`objective`/`best_objective_bound` as the
+  best-so-far (unproven — treat as feasible, not optimal), or leaves them null
+  if none was printed in time. On a clean run the final block (printed after
+  `Solve` returns) is the authoritative result.
 
 - **`run_cpsat_python_file(script_path: str, timeout_ms: int = 30000)`** —
   path-based sibling of `run_cpsat_python`. Pass a local `.py` path instead of
@@ -1021,7 +1030,9 @@ server runs it in a **local child process**.
   `"no_winner"`), `winner_index`/`winner_name`/`winner` (a full
   `CpsatPythonResult`, all present iff `"winner"`), `attempts` (every attempt,
   accepted or not, each with its resolved `name`, `source_sha256`,
-  `config_sha256`, and — for a `status="error"` attempt — a bounded
+  `config_sha256`, a diagnostic `best_objective_bound` (useful even for a
+  rejected `"unknown"` attempt with no incumbent; never used for acceptance or
+  winner selection), and — for a `status="error"` attempt — a bounded
   `stderr_tail` for debugging, in addition to the concise one-line `message`),
   `elapsed_ms`, `objective_sense` (or null for feasibility),
   `selection_policy`, `source_sha256` (index-aligned with `attempts`),
@@ -1079,8 +1090,8 @@ experiment provenance:
   the full attempt table is written as `experiment-log.json` — a
   **provenance summary**, not an archive: every attempt row carries only
   hashes and scalar outcomes (`index`, `name`, `seed`, `source_sha256`,
-  `config_sha256`, `timeout_ms`, `status`, `objective`, `accepted`,
-  `checker_status`, `message`, `timed_out`, `truncated`, `duration_ms`).
+  `config_sha256`, `timeout_ms`, `status`, `objective`, `best_objective_bound`,
+  `accepted`, `checker_status`, `message`, `timed_out`, `truncated`, `duration_ms`).
   **Non-saved attempts' full `config` objects are never persisted** — only
   the saved attempt's own config is, via `replay-config.json`.
 
@@ -1309,18 +1320,19 @@ The stdio server exposes two MCP prompts for client-side LLMs:
   1. Identify decision variables, domains, constraints, and the objective.
   2. Ask concise clarifying questions if the problem is underspecified.
   3. Write a complete, runnable OR-Tools CP-SAT Python script that emits
-     the required JSON object (`{"status", "objective", "solution"}`) as its
-     last stdout line, using `status_map` to translate `cp_model.OPTIMAL`
-     etc. to vocabulary strings. For reproducible saved artifacts, set a
-     fixed `solver.parameters.random_seed` and prefer a single search
-     worker. **Safety instruction:** generate only CP-SAT modeling code —
-     no network access, no file writes or deletes, no subprocess spawning —
-     unless the user explicitly asked. The server executes this code locally
-     and does not sandbox it.
+     the required JSON object (`{"status", "objective", "solution",
+     "best_objective_bound"}`) as its last stdout line, using `status_map` to
+     translate `cp_model.OPTIMAL` etc. to vocabulary strings. For
+     reproducible saved artifacts, set a fixed `solver.parameters.random_seed`
+     and prefer a single search worker. **Safety instruction:** generate only
+     CP-SAT modeling code — no network access, no file writes or deletes, no
+     subprocess spawning — unless the user explicitly asked. The server
+     executes this code locally and does not sandbox it.
   4. Call `run_cpsat_python` with the script as `source`.
   5. Present the `CpsatPythonResult`: distinguish `optimal` (proven best)
      from `feasible` (valid but not proven optimal); point at `stderr` on
-     `error`; explain `timeout` clearly.
+     `error`; explain `timeout` clearly; for `unknown`, mention
+     `best_objective_bound` when present as a diagnostic hint (not a solution).
   6. For MULTIPLE explicit attempts (comparing source variants, or the same
      source under different cooperative configs), call
      `run_cpsat_python_experiment` instead of calling `run_cpsat_python`

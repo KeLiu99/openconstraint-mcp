@@ -518,20 +518,27 @@ RUN_CPSAT_PYTHON_DESCRIPTION = (
     "Execute LLM-generated OR-Tools CP-SAT Python source in a bounded child "
     "process and return a structured CpsatPythonResult. The script runs under "
     "the same Python interpreter as the server, with `ortools` and the stdlib "
-    "available. It MUST emit a single JSON object to stdout as its last line: "
-    '`{"status": "<status>", "objective": <float|null>, "solution": {<str: val>}}`. '
+    "available. It MUST emit a single JSON object to stdout as its last line with "
+    "`status` (str), `objective` (float|null), and `solution` (dict); it MAY also "
+    "include an optional `best_objective_bound` (float|null) for diagnostics, e.g. "
+    '`{"status": "<status>", "objective": <float|null>, "solution": {<str: val>}, '
+    '"best_objective_bound": <float|null>}`. '
     "Valid `status` values: `optimal`, `feasible`, `infeasible`, `unknown`, `error`. "
     "Use the `solve_cpsat_python` prompt to generate conforming scripts. "
     "Returns a CpsatPythonResult: `status` (one of the above, or `timeout` if the "
     "process exceeded `timeout_ms`), `solution` (the parsed dict or null), "
-    "`objective` (parsed float/int or null), `stdout`, `stderr`, `return_code` "
+    "`objective` (parsed float/int or null), `best_objective_bound` (parsed "
+    "float/int or null; OR-Tools' `solver.best_objective_bound` — diagnostic "
+    "only, not a proven objective, and useful even on `status=\"unknown\"` when "
+    "no incumbent was found), `stdout`, `stderr`, `return_code` "
     "(null on timeout), `timed_out`, `truncated` (output exceeded 1 MB cap), "
     "`duration_ms`. A non-zero exit code, missing/unparseable JSON, or an "
     'off-vocabulary status string all yield `status="error"` with details in '
     "`stderr`/`stdout`. Output beyond 1 MB is truncated and the child killed. "
-    "On `timeout`, `solution`/`objective` carry the last intermediate result "
-    "block the script printed (the child runs unbuffered, so a best-so-far "
-    "emitted from a CpSolverSolutionCallback survives), else null. For a HARD "
+    "On `timeout`, `solution`/`objective`/`best_objective_bound` carry the last "
+    "intermediate result block the script printed (the child runs unbuffered, "
+    "so a best-so-far emitted from a CpSolverSolutionCallback survives), else "
+    "null. For a HARD "
     "instance — status is unknown/timeout, or incumbent quality is unclear — "
     "consider the MiniZinc portfolio path (`submit_portfolio_job`) to race "
     "multiple formulations, solvers, and seeds for the same problem. " + _CPSAT_CHILD_POSTURE
@@ -548,10 +555,14 @@ RUN_CPSAT_PYTHON_FILE_DESCRIPTION = (
     "missing path, a non-file, an empty/whitespace-only script, or non-UTF-8 "
     "content is rejected with an actionable MCP error and nothing runs. Same "
     "execution contract, output cap, timeout, and tree-kill as `run_cpsat_python`: "
-    "the script MUST emit a single JSON object to stdout as its last line "
-    '(`{"status": "<status>", "objective": <float|null>, "solution": {<str: val>}}`), '
+    "the script MUST emit a single JSON object to stdout as its last line with "
+    "`status`, `objective`, and `solution`, and MAY also include an optional "
+    '`best_objective_bound` for diagnostics, e.g. (`{"status": "<status>", '
+    '"objective": <float|null>, "solution": {<str: val>}, '
+    '"best_objective_bound": <float|null>}`), '
     "and the returned CpsatPythonResult has the identical shape (`status`, "
-    "`solution`, `objective`, `stdout`, `stderr`, `return_code`, `timed_out`, "
+    "`solution`, `objective`, `best_objective_bound`, `stdout`, `stderr`, "
+    "`return_code`, `timed_out`, "
     "`truncated`, `duration_ms`), including `timeout` partial recovery. " + _CPSAT_CHILD_POSTURE
 )
 
@@ -631,7 +642,10 @@ RUN_CPSAT_PYTHON_EXPERIMENT_DESCRIPTION = (
     "Returns a CpsatPythonExperimentResult: `status` ('winner'|'no_winner'), "
     "`winner_index`/`winner_name`/`winner` (a full CpsatPythonResult, all "
     "present iff 'winner'), `attempts` (every attempt, accepted or not, with "
-    "its resolved `name`, `source_sha256`, `config_sha256`), `elapsed_ms`, "
+    "its resolved `name`, `source_sha256`, `config_sha256`, and a diagnostic "
+    "`best_objective_bound` — useful even on an `unknown`/rejected attempt "
+    "with no incumbent, and never used for acceptance or winner selection), "
+    "`elapsed_ms`, "
     "`objective_sense` (or null for feasibility), `selection_policy`, "
     "`source_sha256` (index-aligned with `attempts`), `checker_sha256`, "
     "`problem_sha256`, `warnings` (advisory strings: the num_workers-"
@@ -743,8 +757,10 @@ SUBMIT_CPSAT_PYTHON_JOB_DESCRIPTION = (
     "immediately, so a long solve cannot hit a synchronous MCP client timeout. "
     "Takes the same `source` and `timeout_ms` as `run_cpsat_python`. "
     "The script must conform to the run_cpsat_python output contract: emit a single "
-    'JSON object to stdout as its last line (`{"status": "<status>", "objective": '
-    '<float|null>, "solution": {<str: val>}}`). '
+    "JSON object to stdout as its last line with required `status`, `objective`, "
+    "`solution`, plus an optional `best_objective_bound` for diagnostics, e.g. "
+    '(`{"status": "<status>", "objective": <float|null>, "solution": {<str: val>}, '
+    '"best_objective_bound": <float|null>}`). '
     "Returns a CpsatPythonJobStatus with a server-generated opaque `job_id` and "
     "an initial `state` of `queued` or `running` (a very fast job may already be "
     "terminal); poll with `get_cpsat_python_job(job_id)` and "
@@ -789,7 +805,8 @@ GET_CPSAT_PYTHON_JOB_DESCRIPTION = (
     "itself raised (no result, see `message`); a script-level `error` verdict "
     '(e.g. a crash or bad JSON) is a `succeeded` job whose `result.status == "error"`, '
     "NOT `failed`. A `timeout` job carries its partial CpsatPythonResult "
-    "(`result.timed_out == True`, best-so-far `solution`/`objective`). While "
+    "(`result.timed_out == True`, best-so-far `solution`/`objective`/"
+    "`best_objective_bound`). While "
     "`running`, only `state` + `elapsed_ms` advance. PACE polling against the "
     "job's budget: a `running` job has roughly `timeout_ms - elapsed_ms` left; "
     "wait a fraction of the remaining budget between polls rather than looping "

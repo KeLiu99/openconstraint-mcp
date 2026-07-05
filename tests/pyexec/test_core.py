@@ -427,6 +427,51 @@ def test_run_cpsat_python_non_numeric_objective_becomes_none() -> None:
     assert result.solution == {"x": 1}
 
 
+# (h3) best_objective_bound is parsed even for status="unknown", where no
+# incumbent/objective was found — this is the diagnostic signal the field exists for.
+def test_run_cpsat_python_parses_best_objective_bound_for_unknown_status() -> None:
+    payload = json.dumps(
+        {"status": "unknown", "objective": None, "solution": {}, "best_objective_bound": 5}
+    )
+    result = _run_with_mocked_proc(stdout_content=payload)
+
+    assert result.status == "unknown"
+    assert result.objective is None
+    assert result.best_objective_bound == 5
+
+
+# (h4) an old script that never emits best_objective_bound must still parse cleanly.
+def test_run_cpsat_python_missing_best_objective_bound_is_none() -> None:
+    result = _run_with_mocked_proc(stdout_content=_VALID_STDOUT)
+
+    assert result.status == "optimal"
+    assert result.best_objective_bound is None
+
+
+# (h5) invalid best_objective_bound values (bool, non-numeric) are normalized to None,
+# matching normalize_objective's rules exactly.
+@pytest.mark.parametrize("raw", [True, "lots"])
+def test_run_cpsat_python_invalid_best_objective_bound_becomes_none(raw: object) -> None:
+    payload = json.dumps(
+        {"status": "unknown", "objective": None, "solution": {}, "best_objective_bound": raw}
+    )
+    result = _run_with_mocked_proc(stdout_content=payload)
+
+    assert result.best_objective_bound is None
+
+
+# (h6) on timeout, a recovered intermediate JSON block's best_objective_bound is
+# carried through exactly like solution/objective.
+def test_run_cpsat_python_timeout_recovers_partial_best_objective_bound() -> None:
+    partial = json.dumps(
+        {"status": "feasible", "objective": 3, "solution": {"x": 1}, "best_objective_bound": 1}
+    )
+    result = _run_with_mocked_proc(timeout=True, stdout_content=partial, timeout_ms=50)
+
+    assert result.status == "timeout"
+    assert result.best_objective_bound == 1
+
+
 # (h2) trailing output after the JSON block must not defeat parsing, and a nested
 # object inside the payload must not be mistaken for the result.
 def test_run_cpsat_python_parses_json_with_trailing_output() -> None:

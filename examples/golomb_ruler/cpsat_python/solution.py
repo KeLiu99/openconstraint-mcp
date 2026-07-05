@@ -43,4 +43,15 @@ else:
     solution = {}
     objective = None
 
-print(json.dumps({"status": result_status, "objective": objective, "solution": solution}))
+best_objective_bound = solver.best_objective_bound
+
+print(
+    json.dumps(
+        {
+            "status": result_status,
+            "objective": objective,
+            "solution": solution,
+            "best_objective_bound": best_objective_bound,
+        }
+    )
+)

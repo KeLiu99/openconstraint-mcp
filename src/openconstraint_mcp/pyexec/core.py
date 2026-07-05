@@ -10,7 +10,25 @@ would require a real sandbox.
 
 Output contract (executor ↔ script): the script must print, as its **last**
 stdout block, one JSON object:
-    {"status": "<CpsatStatus value>", "objective": <number|null>, "solution": {...}}
+    {"status": "<CpsatStatus value>", "objective": <number|null>, "solution": {...},
+     "best_objective_bound": <number|null>}
+
+``best_objective_bound`` is optional (a script predating it is parsed as
+``None``) and diagnostic only — it is OR-Tools' ``solver.best_objective_bound``,
+not a proven objective, and is never consulted for acceptance or winner
+selection. It is most useful on ``status="unknown"``, where ``objective`` is
+``None`` but the solver may still have made bound progress.
+
+FEASIBILITY-PROBLEM PITFALL: for a pure satisfaction model with no
+``model.minimize``/``maximize`` call, ``model.has_objective()`` is ``False``,
+and OR-Tools does NOT raise for that case — both ``solver.objective_value``
+and ``solver.best_objective_bound`` silently return ``0.0``. A script that
+omits the ``if model.has_objective() else None`` guard would report a
+meaningless ``best_objective_bound: 0.0`` instead of ``null`` for a
+feasibility problem. The executor cannot detect or correct this server-side
+(it only parses whatever number the script prints) — the guard must live in
+the script itself, which is why the canonical snippet and the
+``solve_cpsat_python`` prompt both apply it.
 
 The executor parses the last JSON object it finds in stdout and maps the
 ``status`` field to ``CpsatStatus``; any unrecognized value becomes ``"error"``.
@@ -19,7 +37,8 @@ The child runs unbuffered (``python -u``), so a script MAY print intermediate
 result blocks of the same shape during search (e.g. one per improved solution
 from a ``CpSolverSolutionCallback``). On a clean exit the final block wins as
 usual; on a timeout the executor recovers the last intermediate block's
-``solution``/``objective`` (status stays ``"timeout"`` — a partial is unproven).
+``solution``/``objective``/``best_objective_bound`` (status stays ``"timeout"``
+— a partial is unproven).
 
 Canonical emit snippet (inlined in scripts, never imported from here):
 
@@ -35,6 +54,7 @@ Canonical emit snippet (inlined in scripts, never imported from here):
         "status": status_map.get(solver.status_name(status), "error"),
         "objective": solver.objective_value if model.has_objective() else None,
         "solution": {v.name: solver.value(v) for v in variables},
+        "best_objective_bound": solver.best_objective_bound if model.has_objective() else None,
     }))
 """
 
@@ -223,15 +243,20 @@ def parse_last_json(text: str) -> dict | None:
     return found
 
 
-def _extract_solution_objective(parsed: dict) -> tuple[dict | None, float | int | None]:
-    """Pull the solution dict and numeric objective out of a parsed result block.
+def _extract_solution_objective(
+    parsed: dict,
+) -> tuple[dict | None, float | int | None, float | int | None]:
+    """Pull the solution dict, objective, and best_objective_bound out of a result block.
 
     One site for the shape rules so the clean-exit and timeout (partial-recovery)
-    paths can never drift: ``solution`` must be a dict, ``objective`` a real number.
+    paths can never drift: ``solution`` must be a dict, ``objective`` and
+    ``best_objective_bound`` each a real number (same normalization rule for both —
+    a diagnostic bound is just as invalid as a bad objective if it isn't finite/numeric).
     """
     solution = parsed.get("solution") if isinstance(parsed.get("solution"), dict) else None
     objective = normalize_objective(parsed.get("objective"))
-    return solution, objective
+    best_objective_bound = normalize_objective(parsed.get("best_objective_bound"))
+    return solution, objective, best_objective_bound
 
 
 def _result_from_child(child: ChildExecutionResult) -> CpsatPythonResult:
@@ -248,13 +273,14 @@ def _result_from_child(child: ChildExecutionResult) -> CpsatPythonResult:
         # kill. Status stays the executor-owned "timeout" — a partial is unproven,
         # never "optimal".
         partial = parse_last_json(child.stdout)
-        solution, objective = (
-            _extract_solution_objective(partial) if partial is not None else (None, None)
+        solution, objective, best_objective_bound = (
+            _extract_solution_objective(partial) if partial is not None else (None, None, None)
         )
         return CpsatPythonResult(
             status="timeout",
             solution=solution,
             objective=objective,
+            best_objective_bound=best_objective_bound,
             stdout=child.stdout,
             stderr=child.stderr,
             # The child was killed; its exit code (SIGTERM -> -15 on POSIX) is not a
@@ -294,11 +320,12 @@ def _result_from_child(child: ChildExecutionResult) -> CpsatPythonResult:
         )
 
     status = normalize_status(parsed.get("status"))
-    solution, objective = _extract_solution_objective(parsed)
+    solution, objective, best_objective_bound = _extract_solution_objective(parsed)
     return CpsatPythonResult(
         status=status,
         solution=solution,
         objective=objective,
+        best_objective_bound=best_objective_bound,
         stdout=child.stdout,
         stderr=child.stderr,
         return_code=child.return_code,

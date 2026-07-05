@@ -26,6 +26,7 @@ def _result(
     status: str = "optimal",
     solution: dict | None = None,
     objective: float | int | None = 1.0,
+    best_objective_bound: float | int | None = None,
     timed_out: bool = False,
     truncated: bool = False,
     stderr: str = "",
@@ -36,6 +37,7 @@ def _result(
         status=status,  # type: ignore[arg-type]
         solution=solution if solution is not None else {"x": 1},
         objective=objective,
+        best_objective_bound=best_objective_bound,
         stdout=stdout,
         stderr=stderr,
         return_code=None if timed_out else 0,
@@ -504,6 +506,22 @@ def test_all_rejected_yields_no_winner(monkeypatch: pytest.MonkeyPatch) -> None:
     assert result.winner_index is None
     assert result.winner_name is None
     assert result.winner is None
+
+
+# An "unknown" attempt carries no objective/solution, but best_objective_bound is
+# still diagnostically useful — the whole point of the field — and must survive
+# onto the attempt row even though the attempt is rejected (not accepted).
+def test_unknown_attempt_row_carries_best_objective_bound(monkeypatch: pytest.MonkeyPatch) -> None:
+    _patch_runner(
+        monkeypatch,
+        {"a": _result(status="unknown", solution=None, objective=None, best_objective_bound=7)},
+    )
+
+    result = run_cpsat_python_experiment([_attempt("a")], objective_sense="minimize")
+
+    assert result.status == "no_winner"
+    assert result.attempts[0].accepted is False
+    assert result.attempts[0].best_objective_bound == 7
 
 
 # --- seed env propagation ------------------------------------------------------

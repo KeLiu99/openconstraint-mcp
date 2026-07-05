@@ -515,6 +515,7 @@ def _run_attempt(
         timeout_ms=timeout_ms,
         status=result.status,
         objective=result.objective,
+        best_objective_bound=result.best_objective_bound,
         accepted=accepted,
         checker_status=checker_status,
         message=message,
