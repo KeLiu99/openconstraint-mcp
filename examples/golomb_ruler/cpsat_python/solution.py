@@ -23,7 +23,7 @@ model.add(marks[1] - marks[0] < marks[ORDER - 1] - marks[ORDER - 2])
 model.minimize(marks[-1])
 
 solver = cp_model.CpSolver()
-solver.parameters.num_workers = 6
+solver.parameters.num_workers = 8
 solver.parameters.max_time_in_seconds = TIME_LIMIT_S
 
 status = solver.solve(model)
