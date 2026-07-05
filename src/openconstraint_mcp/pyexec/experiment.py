@@ -312,6 +312,39 @@ def _check_wall_clock_budget(
     )
 
 
+def _oversubscription_warning(
+    attempts: Sequence[CpsatPythonExperimentAttempt],
+    names: Sequence[str],
+    max_parallel_attempts: int,
+) -> str | None:
+    """Advisory-only: flag attempts whose config['num_workers'] combined with
+    max_parallel_attempts may oversubscribe this machine's CPUs.
+
+    This only observes the cooperative config["num_workers"] convention (see
+    prompts.py's step 6 guidance) — a script that sets
+    solver.parameters.num_workers any other way is invisible here. Never
+    blocks the experiment; this is advisory, not a budget gate.
+    """
+    cpu_count = os.cpu_count() or 1
+    offenders: list[tuple[str, int]] = []
+    for name, attempt in zip(names, attempts, strict=True):
+        num_workers = attempt.config.get("num_workers")
+        if not isinstance(num_workers, int) or isinstance(num_workers, bool):
+            continue
+        if max_parallel_attempts * num_workers > cpu_count:
+            offenders.append((name, num_workers))
+    if not offenders:
+        return None
+    offenders_text = ", ".join(f"{name!r} (num_workers={n})" for name, n in offenders)
+    max_workers = max(n for _, n in offenders)
+    return (
+        f"max_parallel_attempts={max_parallel_attempts} combined with attempt(s) "
+        f"{offenders_text} may request up to {max_parallel_attempts * max_workers} "
+        f"CP-SAT workers, exceeding this machine's cpu_count={cpu_count}; consider "
+        "lowering num_workers or max_parallel_attempts."
+    )
+
+
 # Bounds the stderr tail folded into an errored attempt's ``message``, so a
 # runaway traceback (or a script that dumps megabytes to stderr) can't blow up
 # the attempt table.
@@ -492,6 +525,7 @@ def run_cpsat_python_experiment(
         raise ValueError("default_timeout_ms must be positive")
     validated_max_parallel = _validate_max_parallel_attempts(max_parallel_attempts)
     names = _validate_attempts(attempts)
+    oversubscription_warning = _oversubscription_warning(attempts, names, validated_max_parallel)
 
     _check_wall_clock_budget(
         attempts,
@@ -556,4 +590,5 @@ def run_cpsat_python_experiment(
         source_sha256=source_sha256,
         checker_sha256=checker_sha,
         problem_sha256=problem_sha,
+        warnings=[oversubscription_warning] if oversubscription_warning else [],
     )

@@ -297,6 +297,10 @@ def _format_cpsat_experiment_content(result: CpsatPythonExperimentResult) -> str
             f"- {attempt.name!r} (seed {attempt.seed}): status={attempt.status}, "
             f"objective={attempt.objective}, {verdict}{checker}{reason}"
         )
+    if result.warnings:
+        lines.append("")
+        lines.append("Warnings:")
+        lines.extend(f"- {w}" for w in result.warnings)
     return "\n".join(lines)
 
 

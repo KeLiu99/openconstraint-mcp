@@ -1040,3 +1040,106 @@ def test_tracker_forwarded_to_runner_and_checker(monkeypatch: pytest.MonkeyPatch
 
     assert all(c["tracker"] is sentinel for c in run_calls)
     assert all(c["tracker"] is sentinel for c in checker_calls)
+
+
+# --- oversubscription warning -----------------------------------------------------
+
+
+def test_oversubscription_warning_none_when_no_attempt_sets_num_workers() -> None:
+    attempts = [_attempt("a"), _attempt("b", config={"other": 1})]
+    names = ["a", "b"]
+
+    assert experiment._oversubscription_warning(attempts, names, 4) is None
+
+
+def test_oversubscription_warning_none_at_or_below_cpu_count(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(experiment.os, "cpu_count", lambda: 4)
+    attempts = [_attempt("a", config={"num_workers": 2})]
+    names = ["a"]
+
+    assert experiment._oversubscription_warning(attempts, names, 2) is None
+
+
+def test_oversubscription_warning_flags_offending_attempt(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(experiment.os, "cpu_count", lambda: 4)
+    attempts = [_attempt("a", config={"num_workers": 8})]
+    names = ["a"]
+
+    warning = experiment._oversubscription_warning(attempts, names, 2)
+
+    assert warning is not None
+    assert "'a'" in warning
+    assert "num_workers=8" in warning
+
+
+def test_oversubscription_warning_ignores_bool_num_workers(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(experiment.os, "cpu_count", lambda: 1)
+    attempts = [_attempt("a", config={"num_workers": True})]
+    names = ["a"]
+
+    # Would otherwise trip (max_parallel_attempts=4 * num_workers=1 > cpu_count=1)
+    # if the bool were mistakenly treated as an int.
+    assert experiment._oversubscription_warning(attempts, names, 4) is None
+
+
+def test_oversubscription_warning_ignores_non_int_num_workers(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(experiment.os, "cpu_count", lambda: 1)
+    attempts = [_attempt("a", config={"num_workers": "eight"})]
+    names = ["a"]
+
+    assert experiment._oversubscription_warning(attempts, names, 4) is None
+
+
+def test_oversubscription_warning_names_all_offenders(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(experiment.os, "cpu_count", lambda: 4)
+    attempts = [
+        _attempt("a", config={"num_workers": 8}),
+        _attempt("b", config={"num_workers": 6}),
+        _attempt("c", config={"num_workers": 1}),
+    ]
+    names = ["a", "b", "c"]
+
+    warning = experiment._oversubscription_warning(attempts, names, 2)
+
+    assert warning is not None
+    assert "'a'" in warning
+    assert "num_workers=8" in warning
+    assert "'b'" in warning
+    assert "num_workers=6" in warning
+    assert "'c'" not in warning
+
+
+def test_run_cpsat_python_experiment_warnings_populated_when_oversubscribed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(experiment.os, "cpu_count", lambda: 4)
+    _patch_runner(monkeypatch, {"a": _result()})
+
+    result = run_cpsat_python_experiment(
+        [_attempt("a", config={"num_workers": 8})],
+        objective_sense="minimize",
+        max_parallel_attempts=2,
+    )
+
+    assert len(result.warnings) == 1
+    assert "num_workers=8" in result.warnings[0]
+
+
+def test_run_cpsat_python_experiment_warnings_empty_when_no_num_workers_set(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _patch_runner(monkeypatch, {"a": _result()})
+
+    result = run_cpsat_python_experiment([_attempt("a")], objective_sense="minimize")
+
+    assert result.warnings == []

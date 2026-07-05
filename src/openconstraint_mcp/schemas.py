@@ -904,6 +904,9 @@ class CpsatPythonExperimentResult(BaseModel):
     shared ``checker``/``problem`` text, or ``None`` when omitted. All three are
     provenance, computed once for the request that produced this result — not a
     save-time trust decision (the save gate always re-runs the winner fresh).
+
+    ``warnings`` carries non-blocking advisory messages — currently only the
+    ``num_workers``-oversubscription check — and defaults to an empty list.
     """
 
     status: CpsatExperimentStatus
@@ -917,6 +920,7 @@ class CpsatPythonExperimentResult(BaseModel):
     source_sha256: list[str] = Field(default_factory=list)
     checker_sha256: str | None = None
     problem_sha256: str | None = None
+    warnings: list[str] = Field(default_factory=list)
 
     @model_validator(mode="after")
     def _winner_presence_matches_status(self) -> CpsatPythonExperimentResult:

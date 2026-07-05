@@ -1252,6 +1252,42 @@ def test_cpsat_python_experiment_result_winner_round_trips() -> None:
     assert dumped["winner_index"] == 0
 
 
+def test_cpsat_python_experiment_result_warnings_defaults_to_empty_list() -> None:
+    result = CpsatPythonExperimentResult(
+        status="winner",
+        winner_index=0,
+        winner_name="attempt-0",
+        winner=_experiment_winner_result(),
+        attempts=[_experiment_attempt_row()],
+        elapsed_ms=42,
+        objective_sense="maximize",
+        selection_policy="best_accepted_incumbent_objective_then_status_then_duration_then_attempt_order",
+        source_sha256=["hash0"],
+        checker_sha256=None,
+        problem_sha256=None,
+    )
+    assert result.warnings == []
+
+
+def test_cpsat_python_experiment_result_warnings_round_trips() -> None:
+    result = CpsatPythonExperimentResult(
+        status="winner",
+        winner_index=0,
+        winner_name="attempt-0",
+        winner=_experiment_winner_result(),
+        attempts=[_experiment_attempt_row()],
+        elapsed_ms=42,
+        objective_sense="maximize",
+        selection_policy="best_accepted_incumbent_objective_then_status_then_duration_then_attempt_order",
+        source_sha256=["hash0"],
+        checker_sha256=None,
+        problem_sha256=None,
+        warnings=["some warning"],
+    )
+    dumped = result.model_dump(mode="json")
+    assert dumped["warnings"] == ["some warning"]
+
+
 def test_cpsat_python_experiment_result_no_winner_round_trips() -> None:
     result = CpsatPythonExperimentResult(
         status="no_winner",

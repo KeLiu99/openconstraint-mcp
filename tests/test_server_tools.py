@@ -2807,6 +2807,93 @@ async def test_run_cpsat_python_experiment_routes_to_experiment_result(
     assert seen["attempts"] == [
         CpsatPythonExperimentAttempt(name="baseline", source="print('hi')", seed=7)
     ]
+    assert "Warnings:" not in _content_text(
+        await mcp.call_tool(
+            "run_cpsat_python_experiment",
+            {
+                "attempts": [{"name": "baseline", "source": "print('hi')", "seed": 7}],
+                "objective_sense": "maximize",
+            },
+        )
+    )
+
+
+@pytest.mark.asyncio
+async def test_run_cpsat_python_experiment_prints_warnings_section(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from openconstraint_mcp.schemas import (
+        CpsatPythonExperimentAttempt,
+        CpsatPythonExperimentAttemptResult,
+        CpsatPythonExperimentResult,
+        CpsatPythonResult,
+    )
+
+    winner = CpsatPythonResult(
+        status="optimal",
+        solution={"x": 4},
+        objective=4,
+        stdout='{"status":"optimal","objective":4,"solution":{"x":4}}',
+        stderr="",
+        return_code=0,
+        timed_out=False,
+        truncated=False,
+        duration_ms=42,
+    )
+    warning = (
+        "max_parallel_attempts=2 combined with attempt(s) 'a' (num_workers=8) may "
+        "request up to 16 CP-SAT workers, exceeding this machine's cpu_count=4; "
+        "consider lowering num_workers or max_parallel_attempts."
+    )
+    fake_result = CpsatPythonExperimentResult(
+        status="winner",
+        winner_index=0,
+        winner_name="baseline",
+        winner=winner,
+        attempts=[
+            CpsatPythonExperimentAttemptResult(
+                index=0,
+                name="baseline",
+                seed=7,
+                config_sha256=None,
+                source_sha256="abc123",
+                timeout_ms=1000,
+                status="optimal",
+                objective=4,
+                accepted=True,
+                timed_out=False,
+                truncated=False,
+                duration_ms=42,
+            )
+        ],
+        elapsed_ms=42,
+        objective_sense="maximize",
+        selection_policy="best_accepted_incumbent_objective_then_status_then_duration_then_attempt_order",
+        source_sha256=["abc123"],
+        warnings=[warning],
+    )
+
+    def _fake(
+        attempts: list[CpsatPythonExperimentAttempt],
+        **kw: object,
+    ) -> CpsatPythonExperimentResult:
+        return fake_result
+
+    monkeypatch.setattr("openconstraint_mcp.server.run_cpsat_python_experiment", _fake)
+
+    mcp = create_mcp_server()
+    text = _content_text(
+        await mcp.call_tool(
+            "run_cpsat_python_experiment",
+            {
+                "attempts": [{"name": "baseline", "source": "print('hi')", "seed": 7}],
+                "objective_sense": "maximize",
+            },
+        )
+    )
+
+    assert "Warnings:" in text
+    assert warning in text
 
 
 # --- run_cpsat_python_file ----------------------------------------------------
