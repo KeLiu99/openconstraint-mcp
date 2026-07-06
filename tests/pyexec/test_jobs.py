@@ -10,7 +10,7 @@ from typing import Any
 import pytest
 
 from openconstraint_mcp.pyexec.jobs import CpsatJobRegistry
-from openconstraint_mcp.schemas import CpsatPythonResult, CpsatStatus
+from openconstraint_mcp.schemas import CpsatCheckerReport, CpsatPythonResult, CpsatStatus
 from openconstraint_mcp.shared.job_errors import JobRejectedError
 
 
@@ -359,4 +359,301 @@ def test_timeout_result_yields_timeout_job_state(monkeypatch: pytest.MonkeyPatch
         assert status.result is not None
         assert status.result.timed_out is True
     finally:
+        registry.shutdown()
+
+
+# --- optional diagnostic checker ---------------------------------------------
+
+_CHECKER = "import sys, json; print(json.dumps({'status':'accepted','errors':[]}))"
+
+
+def _checker_report(
+    status: str = "accepted", errors: list[str] | None = None
+) -> CpsatCheckerReport:
+    return CpsatCheckerReport(
+        status=status,  # type: ignore[arg-type]
+        errors=errors or [],
+        stdout="",
+        stderr="",
+        duration_ms=5,
+        timed_out=status == "timeout",
+        truncated=False,
+    )
+
+
+def _patch_run_checker(monkeypatch: pytest.MonkeyPatch, fake: Any) -> None:
+    monkeypatch.setattr("openconstraint_mcp.pyexec.jobs.run_checker", fake)
+
+
+def _run_checked_job(
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    solver_result: CpsatPythonResult,
+    checker_behavior: Any,
+    **submit_kwargs: Any,
+) -> Any:
+    """Submit one checked inline job, wait for terminal, return its status."""
+    _patch_run_source(monkeypatch, lambda source, *, on_start, **kw: solver_result)
+    _patch_run_checker(monkeypatch, checker_behavior)
+    registry = CpsatJobRegistry()
+    try:
+        job_id = registry.submit_source("x=1", checker=_CHECKER, **submit_kwargs)
+        _wait_until_terminal(registry, job_id)
+        return registry.get(job_id)
+    finally:
+        registry.shutdown()
+
+
+@pytest.mark.parametrize("checker_status", ["accepted", "rejected", "error", "timeout"])
+def test_checked_job_attaches_checker_report(
+    monkeypatch: pytest.MonkeyPatch, checker_status: str
+) -> None:
+    status = _run_checked_job(
+        monkeypatch,
+        solver_result=_cpsat_result("optimal"),
+        checker_behavior=lambda *a, **kw: _checker_report(checker_status),
+    )
+    assert status.state == "succeeded"
+    assert status.result is not None
+    assert status.checker is not None
+    assert status.checker.status == checker_status
+    assert status.checker_skipped_reason is None
+
+
+def test_unchecked_job_has_no_checker_fields(monkeypatch: pytest.MonkeyPatch) -> None:
+    _patch_run_source(monkeypatch, lambda source, *, on_start, **kw: _cpsat_result())
+    registry = CpsatJobRegistry()
+    try:
+        job_id = registry.submit_source("x=1")
+        _wait_until_terminal(registry, job_id)
+        status = registry.get(job_id)
+        assert status.checker is None
+        assert status.checker_skipped_reason is None
+        assert status.checker_timeout_ms is None
+    finally:
+        registry.shutdown()
+
+
+def test_checker_skipped_for_ineligible_result_sets_reason(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[None] = []
+
+    def _never(*a: Any, **kw: Any) -> CpsatCheckerReport:
+        calls.append(None)
+        return _checker_report()
+
+    status = _run_checked_job(
+        monkeypatch,
+        solver_result=_cpsat_result("infeasible", solution=None),
+        checker_behavior=_never,
+    )
+    assert status.state == "succeeded"
+    assert status.checker is None
+    assert status.checker_skipped_reason == "status='infeasible'"
+    assert calls == []
+
+
+def test_checker_skipped_for_empty_solution_sets_reason(monkeypatch: pytest.MonkeyPatch) -> None:
+    empty = CpsatPythonResult(
+        status="feasible",
+        solution={},
+        objective=None,
+        stdout="",
+        stderr="",
+        return_code=0,
+        timed_out=False,
+        truncated=False,
+        duration_ms=10,
+    )
+    status = _run_checked_job(
+        monkeypatch,
+        solver_result=empty,
+        checker_behavior=lambda *a, **kw: _checker_report(),
+    )
+    assert status.checker is None
+    assert status.checker_skipped_reason == "solution is missing or empty"
+
+
+def test_timeout_incumbent_is_checked_and_job_stays_timeout(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    status = _run_checked_job(
+        monkeypatch,
+        solver_result=_cpsat_result("timeout", timed_out=True, solution={"x": 2}),
+        checker_behavior=lambda *a, **kw: _checker_report("accepted"),
+    )
+    assert status.state == "timeout"
+    assert status.result is not None
+    assert status.checker is not None
+    assert status.checker.status == "accepted"
+
+
+def test_checker_infrastructure_exception_preserves_solver_result(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def _boom(*a: Any, **kw: Any) -> CpsatCheckerReport:
+        raise OSError("tempdir vanished")
+
+    status = _run_checked_job(
+        monkeypatch,
+        solver_result=_cpsat_result("optimal"),
+        checker_behavior=_boom,
+    )
+    assert status.state == "succeeded"
+    assert status.result is not None
+    assert status.result.status == "optimal"
+    assert status.checker is not None
+    assert status.checker.status == "error"
+    assert any("tempdir vanished" in e for e in status.checker.errors)
+
+
+def test_checker_receives_problem_and_effective_timeout(monkeypatch: pytest.MonkeyPatch) -> None:
+    seen: dict[str, Any] = {}
+
+    def _spy(checker: str, result: CpsatPythonResult, **kw: Any) -> CpsatCheckerReport:
+        seen.update(kw, checker=checker)
+        return _checker_report()
+
+    _run_checked_job(
+        monkeypatch,
+        solver_result=_cpsat_result("optimal"),
+        checker_behavior=_spy,
+        problem="pack the boxes",
+        checker_timeout_ms=7000,
+        timeout_ms=45000,
+    )
+    assert seen["checker"] == _CHECKER
+    assert seen["problem"] == "pack the boxes"
+    assert seen["timeout_ms"] == 7000
+
+
+def test_checker_timeout_ms_echo_explicit_value(monkeypatch: pytest.MonkeyPatch) -> None:
+    status = _run_checked_job(
+        monkeypatch,
+        solver_result=_cpsat_result("optimal"),
+        checker_behavior=lambda *a, **kw: _checker_report(),
+        checker_timeout_ms=7000,
+        timeout_ms=45000,
+    )
+    assert status.checker_timeout_ms == 7000
+
+
+def test_checker_timeout_ms_echo_defaults_to_timeout_ms(monkeypatch: pytest.MonkeyPatch) -> None:
+    status = _run_checked_job(
+        monkeypatch,
+        solver_result=_cpsat_result("optimal"),
+        checker_behavior=lambda *a, **kw: _checker_report(),
+        timeout_ms=45000,
+    )
+    assert status.checker_timeout_ms == 45000
+
+
+def test_submit_source_rejects_checker_timeout_without_checker() -> None:
+    registry = CpsatJobRegistry()
+    try:
+        with pytest.raises(ValueError, match="without checker"):
+            registry.submit_source("x=1", checker_timeout_ms=5000)
+        assert registry.list() == []
+    finally:
+        registry.shutdown()
+
+
+def test_submit_source_rejects_empty_checker() -> None:
+    registry = CpsatJobRegistry()
+    try:
+        with pytest.raises(ValueError, match="non-empty"):
+            registry.submit_source("x=1", checker="   ")
+        assert registry.list() == []
+    finally:
+        registry.shutdown()
+
+
+def test_submit_file_rejects_non_positive_checker_timeout(tmp_path: Path) -> None:
+    script = tmp_path / "sol.py"
+    script.write_text("print('x')", encoding="utf-8")
+    registry = CpsatJobRegistry()
+    try:
+        with pytest.raises(ValueError, match="positive"):
+            registry.submit_file(script, checker=_CHECKER, checker_timeout_ms=0)
+        assert registry.list() == []
+    finally:
+        registry.shutdown()
+
+
+def test_cancel_during_checker_finalizes_cancelled_and_discards_result(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A cancel landing in the checker phase wins over the checker report AND
+    discards the already-completed solver result (the registry's cancelled
+    invariant: cancelled never carries a result)."""
+    checker_running = threading.Event()
+    cancel_done = threading.Event()
+
+    _patch_run_source(monkeypatch, lambda source, *, on_start, **kw: _cpsat_result("optimal"))
+
+    def _blocking_checker(*a: Any, **kw: Any) -> CpsatCheckerReport:
+        on_start = kw.get("on_start")
+        if on_start is not None:
+            on_start(_FakeProc())
+        checker_running.set()
+        cancel_done.wait(timeout=3.0)
+        return _checker_report("error")  # simulates kill mid-check
+
+    _patch_run_checker(monkeypatch, _blocking_checker)
+    killed: list[Any] = []
+    _patch_terminate(monkeypatch, killed)
+
+    registry = CpsatJobRegistry()
+    try:
+        job_id = registry.submit_source("x=1", checker=_CHECKER)
+        assert checker_running.wait(timeout=3.0)
+        registry.cancel(job_id)
+        cancel_done.set()
+        state = _wait_until_terminal(registry, job_id)
+        assert state == "cancelled"
+        status = registry.get(job_id)
+        assert status.result is None
+        assert status.checker is None
+        assert status.checker_skipped_reason is None
+    finally:
+        cancel_done.set()
+        registry.shutdown()
+
+
+def test_cancel_requested_before_checker_skips_checker_entirely(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A cancel observed after the solver but before the checker starts must
+    finalize as cancelled without ever spawning the checker child."""
+    solver_running = threading.Event()
+    cancel_done = threading.Event()
+    checker_calls: list[None] = []
+
+    def _slow_solver(source: str, *, on_start: Any, **kw: Any) -> CpsatPythonResult:
+        on_start(_FakeProc())
+        solver_running.set()
+        cancel_done.wait(timeout=3.0)
+        return _cpsat_result("optimal")
+
+    def _never_checker(*a: Any, **kw: Any) -> CpsatCheckerReport:
+        checker_calls.append(None)
+        return _checker_report()
+
+    _patch_run_source(monkeypatch, _slow_solver)
+    _patch_run_checker(monkeypatch, _never_checker)
+    killed: list[Any] = []
+    _patch_terminate(monkeypatch, killed)
+
+    registry = CpsatJobRegistry()
+    try:
+        job_id = registry.submit_source("x=1", checker=_CHECKER)
+        assert solver_running.wait(timeout=3.0)
+        registry.cancel(job_id)
+        cancel_done.set()
+        state = _wait_until_terminal(registry, job_id)
+        assert state == "cancelled"
+        assert checker_calls == []
+    finally:
+        cancel_done.set()
         registry.shutdown()

@@ -4,9 +4,11 @@ Parallel to ``jobs.py`` (MiniZinc job registry) but for the CP-SAT Python
 execution path. One ``CpsatJobRegistry`` instance is created per server and
 captured by the tool closures; it is never a module-level singleton.
 
-Layering: imports ``pyexec.core`` (executor), ``schemas`` (output models),
-``proc`` (tree-kill), ``job_errors`` (shared rejection error + job-registry
-primitives). Never imports ``minizinc``, ``runtime``, ``server``, or ``jobs``.
+Layering: imports ``pyexec.core`` (executor), ``pyexec.checker`` (optional
+checker adapter), ``pyexec.eligibility`` (shared diagnostic-incumbent gate),
+``schemas`` (output models), ``proc`` (tree-kill), ``job_errors`` (shared
+rejection error + job-registry primitives). Never imports ``minizinc``,
+``runtime``, ``server``, or ``jobs``.
 """
 
 from __future__ import annotations
@@ -21,6 +23,7 @@ from uuid import uuid4
 
 from ..schemas import (
     _CPSAT_RESULT_BEARING_STATES,
+    CpsatCheckerReport,
     CpsatJobState,
     CpsatPythonJobStatus,
     CpsatPythonResult,
@@ -28,15 +31,19 @@ from ..schemas import (
 )
 from ..shared.job_errors import JobRejectedError, exception_summary, now_ms
 from ..shared.proc import terminate_process_tree as _terminate_process_tree
+from .checker import run_checker
 
 # These are package-internal helpers not promoted to the public API.
 # noinspection PyProtectedMember
 from .core import (
     DEFAULT_PYEXEC_TIMEOUT_MS,
     _validate_script_path,
+    effective_checker_timeout_ms,
     run_cpsat_python,
     run_cpsat_python_file,
+    validate_checker_args,
 )
+from .eligibility import diagnostic_incumbent_eligibility
 
 _TERMINAL_STATES: frozenset[CpsatJobState] = cast(
     "frozenset[CpsatJobState]",
@@ -46,15 +53,32 @@ _TERMINAL_STATES: frozenset[CpsatJobState] = cast(
 
 @dataclass(frozen=True)
 class _CpsatJobRequest:
-    """Immutable per-job parameters; kind discriminates source vs. file path."""
+    """Immutable per-job parameters; kind discriminates source vs. file path.
+
+    ``problem``/``checker``/``checker_timeout_ms`` are the optional diagnostic
+    checker inputs (same contract as the save/experiment tools); all three are
+    ``None`` for an unchecked job.
+    """
 
     source: str | None
     script_path: Path | None
     timeout_ms: int
+    problem: str | None = None
+    checker: str | None = None
+    checker_timeout_ms: int | None = None
 
     @property
     def is_file(self) -> bool:
         return self.script_path is not None
+
+    @property
+    def effective_checker_timeout_ms(self) -> int | None:
+        """The checker child's timeout: explicit value, else the solver's; ``None`` unchecked."""
+        if self.checker is None:
+            return None
+        return effective_checker_timeout_ms(
+            checker_timeout_ms=self.checker_timeout_ms, default_timeout_ms=self.timeout_ms
+        )
 
 
 @dataclass
@@ -70,6 +94,8 @@ class _CpsatJobRecord:
     elapsed_ms: int | None = None
     result: CpsatPythonResult | None = None
     message: str | None = None
+    checker_report: CpsatCheckerReport | None = None
+    checker_skipped_reason: str | None = None
     handle: Popen[str] | None = None
     future: Future[None] | None = None
     cancel_requested: bool = False
@@ -119,16 +145,28 @@ class CpsatJobRegistry:
         source: str,
         *,
         timeout_ms: int = DEFAULT_PYEXEC_TIMEOUT_MS,
+        problem: str | None = None,
+        checker: str | None = None,
+        checker_timeout_ms: int | None = None,
     ) -> str:
         """Admit an inline CP-SAT source as a background job; return ``job_id``.
 
-        Validates ``timeout_ms`` up front (positive gate), then admits under the
-        lock. Returns immediately; raises ``ValueError`` on bad args or
-        ``JobRejectedError`` when the bounded queue is full.
+        Validates ``timeout_ms`` (positive gate) and the optional checker args
+        up front, then admits under the lock. Returns immediately; raises
+        ``ValueError`` on bad args or ``JobRejectedError`` when the bounded
+        queue is full.
         """
         if timeout_ms <= 0:
             raise ValueError("timeout_ms must be positive")
-        request = _CpsatJobRequest(source=source, script_path=None, timeout_ms=timeout_ms)
+        validate_checker_args(checker=checker, checker_timeout_ms=checker_timeout_ms)
+        request = _CpsatJobRequest(
+            source=source,
+            script_path=None,
+            timeout_ms=timeout_ms,
+            problem=problem,
+            checker=checker,
+            checker_timeout_ms=checker_timeout_ms,
+        )
         with self._lock:
             if self._in_flight >= self._max_running + self._max_queued:
                 raise JobRejectedError(self._queue_full_message())
@@ -139,18 +177,29 @@ class CpsatJobRegistry:
         script_path: Path,
         *,
         timeout_ms: int = DEFAULT_PYEXEC_TIMEOUT_MS,
+        problem: str | None = None,
+        checker: str | None = None,
+        checker_timeout_ms: int | None = None,
     ) -> str:
         """Admit a CP-SAT script file as a background job; return ``job_id``.
 
-        Validates ``timeout_ms`` AND the path (exists / regular file / non-empty /
-        UTF-8) before admission so a bad path raises ``ValueError`` synchronously
-        and no job record is created. Raises ``JobRejectedError`` when the queue is
-        full.
+        Validates ``timeout_ms``, the optional checker args, AND the path
+        (exists / regular file / non-empty / UTF-8) before admission so a bad
+        argument raises ``ValueError`` synchronously and no job record is
+        created. Raises ``JobRejectedError`` when the queue is full.
         """
         if timeout_ms <= 0:
             raise ValueError("timeout_ms must be positive")
+        validate_checker_args(checker=checker, checker_timeout_ms=checker_timeout_ms)
         resolved = _validate_script_path(script_path)
-        request = _CpsatJobRequest(source=None, script_path=resolved, timeout_ms=timeout_ms)
+        request = _CpsatJobRequest(
+            source=None,
+            script_path=resolved,
+            timeout_ms=timeout_ms,
+            problem=problem,
+            checker=checker,
+            checker_timeout_ms=checker_timeout_ms,
+        )
         with self._lock:
             if self._in_flight >= self._max_running + self._max_queued:
                 raise JobRejectedError(self._queue_full_message())
@@ -256,6 +305,9 @@ class CpsatJobRegistry:
             elapsed_ms=elapsed_ms,
             result=record.result,
             message=record.message,
+            checker=record.checker_report,
+            checker_skipped_reason=record.checker_skipped_reason,
+            checker_timeout_ms=record.request.effective_checker_timeout_ms,
         )
 
     def _finalize(
@@ -264,6 +316,9 @@ class CpsatJobRegistry:
         state: CpsatJobState,
         result: CpsatPythonResult | None,
         message: str | None,
+        *,
+        checker_report: CpsatCheckerReport | None = None,
+        checker_skipped_reason: str | None = None,
     ) -> None:
         if record.state in _TERMINAL_STATES:
             return
@@ -272,7 +327,12 @@ class CpsatJobRegistry:
         record.finished_at_ms = now
         if record.started_at_ms is not None:
             record.elapsed_ms = max(now - record.started_at_ms, 0)
-        record.result = result if state in _CPSAT_RESULT_BEARING_STATES else None
+        result_bearing = state in _CPSAT_RESULT_BEARING_STATES
+        record.result = result if result_bearing else None
+        # Checker outcomes ride only on result-bearing states — a cancelled or
+        # failed job discards them, matching the status model's invariant.
+        record.checker_report = checker_report if result_bearing else None
+        record.checker_skipped_reason = checker_skipped_reason if result_bearing else None
         record.message = message
         self._in_flight -= 1
         self._terminal_order.append(record.job_id)
@@ -322,8 +382,63 @@ class CpsatJobRegistry:
             with self._lock:
                 self._finalize(record, "failed", None, exception_summary(exc))
             return
+        checker_report, checker_skipped_reason = self._run_checker_phase(job_id, record, result)
         with self._lock:
             if record.cancel_requested:
+                # A cancel observed during (or after) the checker phase wins over
+                # any checker report AND discards the completed solver result —
+                # cancelled never carries a result (deliberately asymmetric with
+                # the checker-fault rule, which preserves the solver result).
                 self._finalize(record, "cancelled", None, "Cancelled by client")
             else:
-                self._finalize(record, cpsat_job_state_for_result(result), result, None)
+                self._finalize(
+                    record,
+                    cpsat_job_state_for_result(result),
+                    result,
+                    None,
+                    checker_report=checker_report,
+                    checker_skipped_reason=checker_skipped_reason,
+                )
+
+    def _run_checker_phase(
+        self, job_id: str, record: _CpsatJobRecord, result: CpsatPythonResult
+    ) -> tuple[CpsatCheckerReport | None, str | None]:
+        """Run the optional diagnostic checker against a completed solver result.
+
+        Returns ``(checker_report, checker_skipped_reason)`` — at most one is
+        set. Both are ``None`` when no checker was supplied or a cancel was
+        already requested (the caller's final cancel check finalizes it). A
+        checker infrastructure exception becomes a ``status="error"`` report:
+        it must never discard the completed solver result by failing the job.
+        """
+        checker = record.request.checker
+        if checker is None:
+            return None, None
+        with self._lock:
+            if record.cancel_requested:
+                return None, None
+        eligible, reject_reason = diagnostic_incumbent_eligibility(result)
+        if not eligible:
+            return None, reject_reason
+        timeout = record.request.effective_checker_timeout_ms
+        assert timeout is not None  # checker is not None ⇒ effective timeout is set
+        try:
+            report = run_checker(
+                checker,
+                result,
+                problem=record.request.problem,
+                timeout_ms=timeout,
+                tracker=None,
+                on_start=lambda proc: self._on_start(job_id, proc),
+            )
+        except Exception as exc:  # noqa: BLE001 - checker fault must not void the solver result
+            report = CpsatCheckerReport(
+                status="error",
+                errors=[f"checker infrastructure error: {exception_summary(exc)}"],
+                stdout="",
+                stderr="",
+                duration_ms=0,
+                timed_out=False,
+                truncated=False,
+            )
+        return report, None

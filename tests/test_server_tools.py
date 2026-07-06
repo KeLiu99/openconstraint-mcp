@@ -11,7 +11,7 @@ from typing import Any
 import pytest
 from mcp.types import CallToolResult
 
-from openconstraint_mcp.jobs import JobRegistry
+from openconstraint_mcp.jobs.registry import JobRegistry
 from openconstraint_mcp.schemas import (
     SolverCapabilities,
     SolveResult,
@@ -2130,7 +2130,7 @@ class _JobFakeProc:
 
 
 def _patch_job_solve(monkeypatch: pytest.MonkeyPatch, fake: Any) -> None:
-    monkeypatch.setattr("openconstraint_mcp.jobs.solve_model_cancellable", fake)
+    monkeypatch.setattr("openconstraint_mcp.jobs.registry.solve_model_cancellable", fake)
 
 
 async def _poll_job_status(mcp: Any, job_id: str, timeout: float = 3.0) -> dict[str, Any]:
@@ -2234,7 +2234,7 @@ async def test_cancel_solve_job_terminates_running_job(monkeypatch: pytest.Monke
         release.set()  # the "process" dying unblocks the worker
 
     _patch_job_solve(monkeypatch, _blocking_solve)
-    monkeypatch.setattr("openconstraint_mcp.jobs._terminate_process_tree", _fake_terminate)
+    monkeypatch.setattr("openconstraint_mcp.jobs.registry._terminate_process_tree", _fake_terminate)
 
     mcp = create_mcp_server()
     try:
@@ -2267,7 +2267,7 @@ async def test_submit_solve_job_queue_full_surfaces_actionable_error(
     def _raise(self: Any, **kwargs: Any) -> str:
         raise JobRejectedError("Job queue is full (4 running + 16 queued).")
 
-    monkeypatch.setattr("openconstraint_mcp.jobs.JobRegistry.submit", _raise)
+    monkeypatch.setattr("openconstraint_mcp.jobs.registry.JobRegistry.submit", _raise)
 
     mcp = create_mcp_server()
     with pytest.raises(Exception) as exc_info:
@@ -2454,7 +2454,7 @@ async def test_submit_portfolio_job_returns_running_then_get_reaches_succeeded(
         on_start(_PortfolioFakeProc())
         return _portfolio_solve_result("optimal", solver)
 
-    monkeypatch.setattr("openconstraint_mcp.jobs.solve_model_cancellable", _fake_solve)
+    monkeypatch.setattr("openconstraint_mcp.jobs.registry.solve_model_cancellable", _fake_solve)
 
     mcp = create_mcp_server()
     submitted = _structured(
@@ -2490,7 +2490,7 @@ async def test_background_portfolio_provenance_threads_to_save(
         on_start(_PortfolioFakeProc())
         return _portfolio_solve_result("satisfied", solver)
 
-    monkeypatch.setattr("openconstraint_mcp.jobs.solve_model_cancellable", _fake_solve)
+    monkeypatch.setattr("openconstraint_mcp.jobs.registry.solve_model_cancellable", _fake_solve)
 
     mcp = create_mcp_server()
     submitted = _structured(
@@ -2571,7 +2571,7 @@ async def test_submit_portfolio_job_unsupported_control_surfaces_mcp_error(
     def _fail(model: str, *, on_start: Any, **kw: Any) -> SolveResult:
         raise AssertionError("no solve should run for an unsupported control")
 
-    monkeypatch.setattr("openconstraint_mcp.jobs.solve_model_cancellable", _fail)
+    monkeypatch.setattr("openconstraint_mcp.jobs.registry.solve_model_cancellable", _fail)
 
     mcp = create_mcp_server()
     with pytest.raises(Exception) as exc_info:
@@ -2595,7 +2595,7 @@ async def test_submit_portfolio_job_rejects_plan_exceeding_capacity(
     def _fail(model: str, *, on_start: Any, **kw: Any) -> SolveResult:
         raise AssertionError("no solve should run when the batch exceeds capacity")
 
-    monkeypatch.setattr("openconstraint_mcp.jobs.solve_model_cancellable", _fail)
+    monkeypatch.setattr("openconstraint_mcp.jobs.registry.solve_model_cancellable", _fail)
 
     mcp = create_mcp_server()
     with pytest.raises(Exception) as exc_info:
@@ -2623,8 +2623,8 @@ async def test_cancel_portfolio_job_stops_running_race(monkeypatch: pytest.Monke
         terminated.append(proc)
         release.set()
 
-    monkeypatch.setattr("openconstraint_mcp.jobs.solve_model_cancellable", _blocking_solve)
-    monkeypatch.setattr("openconstraint_mcp.jobs._terminate_process_tree", _fake_terminate)
+    monkeypatch.setattr("openconstraint_mcp.jobs.registry.solve_model_cancellable", _blocking_solve)
+    monkeypatch.setattr("openconstraint_mcp.jobs.registry._terminate_process_tree", _fake_terminate)
 
     mcp = create_mcp_server()
     try:
@@ -2653,7 +2653,7 @@ async def test_list_portfolio_jobs_returns_one_entry_per_submitted_job(
         on_start(_PortfolioFakeProc())
         return _portfolio_solve_result("optimal", solver)
 
-    monkeypatch.setattr("openconstraint_mcp.jobs.solve_model_cancellable", _fake_solve)
+    monkeypatch.setattr("openconstraint_mcp.jobs.registry.solve_model_cancellable", _fake_solve)
 
     mcp = create_mcp_server()
     ids: set[str] = set()
@@ -3097,6 +3097,20 @@ def _fake_cpsat_result(status: str = "optimal") -> Any:
     )
 
 
+def _fake_checker_report() -> Any:
+    from openconstraint_mcp.schemas import CpsatCheckerReport
+
+    return CpsatCheckerReport(
+        status="accepted",
+        errors=[],
+        stdout="",
+        stderr="",
+        duration_ms=5,
+        timed_out=False,
+        truncated=False,
+    )
+
+
 @pytest.mark.asyncio
 async def test_submit_cpsat_python_job_returns_job_id_and_queued_or_running(
     monkeypatch: pytest.MonkeyPatch,
@@ -3173,6 +3187,77 @@ async def test_get_cpsat_python_job_unknown_id_surfaces_error(
     mcp = create_mcp_server()
     with pytest.raises(Exception, match="unknown job_id"):
         await mcp.call_tool("get_cpsat_python_job", {"job_id": "no-such-id"})
+
+
+@pytest.mark.asyncio
+async def test_submit_cpsat_python_job_accepts_checker_inputs_and_echoes_timeout(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        "openconstraint_mcp.pyexec.jobs.run_cpsat_python",
+        lambda source, *, on_start, **kw: _fake_cpsat_result(),
+    )
+    monkeypatch.setattr(
+        "openconstraint_mcp.pyexec.jobs.run_checker",
+        lambda checker, result, **kw: _fake_checker_report(),
+    )
+    mcp = create_mcp_server()
+    result = _structured(
+        await mcp.call_tool(
+            "submit_cpsat_python_job",
+            {
+                "source": "x=1",
+                "problem": "toy",
+                "checker": 'print(\'{"status":"accepted","errors":[]}\')',
+                "checker_timeout_ms": 7000,
+            },
+        )
+    )
+    assert "job_id" in result
+    assert result["checker_timeout_ms"] == 7000
+
+
+@pytest.mark.asyncio
+async def test_submit_cpsat_python_job_rejects_bad_checker_args_before_admission(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    mcp = create_mcp_server()
+    with pytest.raises(Exception, match="without checker"):
+        await mcp.call_tool(
+            "submit_cpsat_python_job",
+            {"source": "x=1", "checker_timeout_ms": 5000},
+        )
+    list_data = _structured(await mcp.call_tool("list_cpsat_python_jobs", {}))["result"]
+    assert list_data == []
+
+
+@pytest.mark.asyncio
+async def test_submit_cpsat_python_file_job_accepts_checker_inputs(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    script = tmp_path / "sol.py"
+    script.write_text("print('x')", encoding="utf-8")
+    monkeypatch.setattr(
+        "openconstraint_mcp.pyexec.jobs.run_cpsat_python_file",
+        lambda path, *, on_start, **kw: _fake_cpsat_result(),
+    )
+    monkeypatch.setattr(
+        "openconstraint_mcp.pyexec.jobs.run_checker",
+        lambda checker, result, **kw: _fake_checker_report(),
+    )
+    mcp = create_mcp_server()
+    result = _structured(
+        await mcp.call_tool(
+            "submit_cpsat_python_file_job",
+            {
+                "script_path": str(script),
+                "checker": 'print(\'{"status":"accepted","errors":[]}\')',
+            },
+        )
+    )
+    assert "job_id" in result
+    # Default fallback: a checker without checker_timeout_ms echoes timeout_ms.
+    assert result["checker_timeout_ms"] == result["timeout_ms"]
 
 
 # --- save_verified_cpsat_python tool -----------------------------------------

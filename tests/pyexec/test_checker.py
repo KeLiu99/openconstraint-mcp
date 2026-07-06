@@ -256,6 +256,43 @@ def test_checker_registers_then_unregisters_subprocess() -> None:
     assert tracker.events[0][1] is tracker.events[1][1]  # same proc handle both times
 
 
+# --- on_start passthrough -----------------------------------------------------
+
+
+def test_checker_on_start_receives_checker_child_popen(monkeypatch: pytest.MonkeyPatch) -> None:
+    """run_checker forwards on_start to execute_child, which calls it with the
+    checker child's Popen handle (here simulated by the fake runner)."""
+    from openconstraint_mcp.pyexec.checker import run_checker
+
+    fake_proc = object()
+    received: list[Any] = []
+
+    def _fake_execute_child(
+        argv: list[str],
+        cwd: Path,
+        *,
+        timeout_ms: int,
+        tracker: Any,
+        on_start: Any = None,
+        **kw: Any,
+    ) -> ChildExecutionResult:
+        if on_start is not None:
+            on_start(fake_proc)
+        return _make_child_result()
+
+    monkeypatch.setattr("openconstraint_mcp.pyexec.checker.execute_child", _fake_execute_child)
+    report = run_checker(
+        _CHECKER_SOURCE,
+        _OPTIMAL_RESULT,
+        problem=None,
+        timeout_ms=5000,
+        tracker=None,
+        on_start=received.append,
+    )
+    assert report.status == "accepted"
+    assert received == [fake_proc]
+
+
 # --- checker.py is dependency-light: no minizinc/runtime imports -------------
 
 

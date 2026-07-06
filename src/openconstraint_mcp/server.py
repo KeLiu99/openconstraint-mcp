@@ -15,7 +15,8 @@ from mcp.server.fastmcp import Context, FastMCP
 from mcp.types import CallToolResult, TextContent
 from pydantic import JsonValue, StrictInt
 
-from .jobs import JobRegistry
+from .jobs.portfolio_registry import PortfolioJobRegistry
+from .jobs.registry import JobRegistry
 from .minizinc.core import (
     DEFAULT_CHECK_TIMEOUT_MS,
     DEFAULT_INSPECT_TIMEOUT_MS,
@@ -34,7 +35,6 @@ from .minizinc.core import (
     solve_model_path,
 )
 from .minizinc.core import find_unsat_core as _find_unsat_core
-from .portfolio_jobs import PortfolioJobRegistry
 from .protocol_text import status
 from .protocol_text.descriptions import (
     CANCEL_CPSAT_PYTHON_JOB_DESCRIPTION,
@@ -789,8 +789,17 @@ def create_mcp_server() -> FastMCP:
     def submit_cpsat_python_job(
         source: str,
         timeout_ms: int = DEFAULT_PYEXEC_TIMEOUT_MS,
+        problem: str | None = None,
+        checker: str | None = None,
+        checker_timeout_ms: int | None = None,
     ) -> CpsatPythonJobStatus:
-        job_id = cpsat_registry.submit_source(source, timeout_ms=timeout_ms)
+        job_id = cpsat_registry.submit_source(
+            source,
+            timeout_ms=timeout_ms,
+            problem=problem,
+            checker=checker,
+            checker_timeout_ms=checker_timeout_ms,
+        )
         return cpsat_registry.get(job_id)
 
     @mcp.tool(
@@ -801,8 +810,17 @@ def create_mcp_server() -> FastMCP:
     def submit_cpsat_python_file_job(
         script_path: str,
         timeout_ms: int = DEFAULT_PYEXEC_TIMEOUT_MS,
+        problem: str | None = None,
+        checker: str | None = None,
+        checker_timeout_ms: int | None = None,
     ) -> CpsatPythonJobStatus:
-        job_id = cpsat_registry.submit_file(Path(script_path), timeout_ms=timeout_ms)
+        job_id = cpsat_registry.submit_file(
+            Path(script_path),
+            timeout_ms=timeout_ms,
+            problem=problem,
+            checker=checker,
+            checker_timeout_ms=checker_timeout_ms,
+        )
         return cpsat_registry.get(job_id)
 
     @mcp.tool(name="get_cpsat_python_job", description=GET_CPSAT_PYTHON_JOB_DESCRIPTION)

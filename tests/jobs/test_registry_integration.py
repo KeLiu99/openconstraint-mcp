@@ -19,7 +19,7 @@ import time
 
 import pytest
 
-from openconstraint_mcp.jobs import JobRegistry
+from openconstraint_mcp.jobs.registry import JobRegistry
 from openconstraint_mcp.minizinc.core import solve_model
 from openconstraint_mcp.runtime import is_runtime_installed
 from openconstraint_mcp.schemas import SolveJobStatus

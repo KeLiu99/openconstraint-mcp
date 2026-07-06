@@ -775,11 +775,33 @@ SOLVE_CPSAT_PYTHON_PROMPT_DESCRIPTION = (
 
 # --- CP-SAT background job descriptions -------------------------------------
 
+# Shared optional-checker paragraph for both CP-SAT job submit tools. The
+# checker is DIAGNOSTIC only: it never gates saving (saving always replays
+# through save_verified_cpsat_python) and never upgrades a solver status.
+_CPSAT_JOB_CHECKER_NOTE = (
+    "OPTIONAL DIAGNOSTIC CHECKER: pass `checker` (a Python checker source "
+    "string, same protocol as save_verified_cpsat_python's checker gate), plus "
+    "optional `problem` (forwarded to the checker payload) and "
+    "`checker_timeout_ms` (defaults to `timeout_ms`; echoed on the job status "
+    "as the effective value). After the solver child finishes with a non-empty "
+    "solution and status `optimal`/`feasible`/`timeout`, the checker runs as a "
+    "second bounded child while the job stays `running`; its "
+    "CpsatCheckerReport (`accepted`/`rejected`/`error`/`timeout`) lands in the "
+    "job status `checker` field. A supplied checker that did not run sets "
+    "`checker_skipped_reason` instead. The report is DIAGNOSTIC ONLY: a "
+    "checked `timeout` incumbent stays unsavable, and saving still re-runs "
+    "verification through `save_verified_cpsat_python`. Bad checker arguments "
+    "are rejected before a job is admitted. "
+)
+
 SUBMIT_CPSAT_PYTHON_JOB_DESCRIPTION = (
     "Submit an OR-Tools CP-SAT Python INLINE SOURCE as a BACKGROUND JOB and return "
     "immediately, so a long solve cannot hit a synchronous MCP client timeout. "
-    "Takes the same `source` and `timeout_ms` as `run_cpsat_python`. " + _CPSAT_JSON_CONTRACT + " "
-    "Returns a CpsatPythonJobStatus with a server-generated opaque `job_id` and "
+    "Takes the same `source` and `timeout_ms` as `run_cpsat_python`. "
+    + _CPSAT_JSON_CONTRACT
+    + " "
+    + _CPSAT_JOB_CHECKER_NOTE
+    + "Returns a CpsatPythonJobStatus with a server-generated opaque `job_id` and "
     "an initial `state` of `queued` or `running` (a very fast job may already be "
     "terminal); poll with `get_cpsat_python_job(job_id)` and "
     "stop with `cancel_cpsat_python_job(job_id)`. "
@@ -804,6 +826,7 @@ SUBMIT_CPSAT_PYTHON_FILE_JOB_DESCRIPTION = (
     "Same output contract as `run_cpsat_python_file`; same admission bounds, "
     "polling (`get_cpsat_python_job`), and cancel (`cancel_cpsat_python_job`) as "
     "`submit_cpsat_python_job` — the `job_id` is kind-agnostic. "
+    + _CPSAT_JOB_CHECKER_NOTE
     + _REGISTRY_NOTE
     + " "
     + _returns_immediately_note("get_cpsat_python_job")
@@ -815,7 +838,13 @@ GET_CPSAT_PYTHON_JOB_DESCRIPTION = (
     "`submit_cpsat_python_job` or `submit_cpsat_python_file_job`). "
     "Returns a CpsatPythonJobStatus: `job_id`, `state`, `timeout_ms`, "
     "`submitted_at_ms`, `started_at_ms`, `finished_at_ms`, `elapsed_ms`, an "
-    "optional `result` (the full CpsatPythonResult), and an optional `message`. "
+    "optional `result` (the full CpsatPythonResult), an optional `message`, and "
+    "— when the job was submitted with a checker — the diagnostic checker "
+    "outcome: `checker` (a CpsatCheckerReport) or `checker_skipped_reason`, "
+    "plus the effective `checker_timeout_ms` echo. `timeout_ms` caps the SOLVER "
+    "child only; a checked job may stay `running` past it for the checker "
+    "phase, up to `checker_timeout_ms`. A checker report never changes `state` "
+    "or savability (a checked `timeout` incumbent stays unsavable). "
     "`state` is one of `queued`, `running`, `succeeded`, `failed`, `timeout`, "
     "`cancelled`. "
     + _job_result_contract("a script-level `error` verdict (a crash or bad JSON)")

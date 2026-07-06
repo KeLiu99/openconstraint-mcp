@@ -31,7 +31,7 @@ from uuid import uuid4
 # jobs reuses core's internal solve helpers (validation, arg-building, process
 # teardown) rather than re-implementing them; they're package-internal, not a public API.
 # noinspection PyProtectedMember
-from .minizinc.core import (
+from ..minizinc.core import (
     DEFAULT_SOLVE_TIMEOUT_MS,
     DEFAULT_SOLVER,
     _enforce_solver_capabilities,
@@ -44,15 +44,15 @@ from .minizinc.core import (
 # D1.9 invariant ("result present iff state in this set") and schemas owns it, so
 # _finalize and the SolveJobStatus validator can never drift apart.
 # noinspection PyProtectedMember
-from .schemas import (
+from ..schemas import (
     _RESULT_BEARING_STATES,
     JobState,
     SolveJobStatus,
     SolveResult,
     job_state_for_result,
 )
-from .shared.job_errors import JobRejectedError, exception_summary, now_ms
-from .shared.proc import terminate_process_tree as _terminate_process_tree
+from ..shared.job_errors import JobRejectedError, exception_summary, now_ms
+from ..shared.proc import terminate_process_tree as _terminate_process_tree
 
 # States with no further transitions (jobs-only; the result-bearing subset of
 # these is _RESULT_BEARING_STATES, imported from schemas).
