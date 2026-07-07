@@ -1997,6 +1997,59 @@ def test_save_verified_model_unsatisfiable_solve_writes_nothing(
     assert not target.exists()
 
 
+def test_save_verified_model_compile_error_surfaces_gate_diagnostic(
+    fake_minizinc_binary: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    _fake_check_then_solve(
+        monkeypatch,
+        check=FakeCompletedProcess(stdout="", stderr="type error: undefined 'xz'", returncode=1),
+        solve=FakeCompletedProcess(stdout=STREAM_SATISFY, stderr="", returncode=0),
+    )
+
+    result = save_verified_model(_SAVE_MODEL, target_dir=tmp_path / "project")
+
+    # The failed compile gate's own classification is surfaced, not a bare
+    # not_verified, so the client can branch on the specific modeling error.
+    assert result.diagnostic is not None
+    assert result.diagnostic.category == "type_error"
+
+
+def test_save_verified_model_unsatisfiable_surfaces_infeasible_diagnostic(
+    fake_minizinc_binary: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    _fake_check_then_solve(
+        monkeypatch,
+        check=FakeCompletedProcess(stdout="", stderr="", returncode=0),
+        solve=FakeCompletedProcess(stdout=STREAM_UNSAT, stderr="", returncode=0),
+    )
+
+    result = save_verified_model(_SAVE_MODEL, target_dir=tmp_path / "project")
+
+    assert result.diagnostic is not None
+    assert result.diagnostic.category == "infeasible"
+
+
+def test_save_verified_model_saved_has_no_diagnostic(
+    fake_minizinc_binary: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    _fake_check_then_solve(
+        monkeypatch,
+        check=FakeCompletedProcess(stdout="", stderr="", returncode=0),
+        solve=FakeCompletedProcess(stdout=STREAM_SATISFY, stderr="", returncode=0),
+    )
+
+    result = save_verified_model(_SAVE_MODEL, target_dir=tmp_path / "project")
+
+    assert result.status == "saved"
+    assert result.diagnostic is None
+
+
 def test_save_verified_model_solve_timeout_blocks_saving(
     fake_minizinc_binary: Path,
     monkeypatch: pytest.MonkeyPatch,

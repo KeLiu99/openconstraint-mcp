@@ -133,6 +133,51 @@ The package exposes five commands:
   MiniZinc runtime. Requires the runtime to be installed; exits 1 with a clear
   error otherwise.
 
+## Structured diagnostics
+
+Every solve, check, inspect, unsat-core, save, job, portfolio, checker, and
+experiment result carries an optional `diagnostic` field so a client can branch
+on a **stable category** before scraping raw `stdout`/`stderr`/transcripts:
+
+- `diagnostic: null` is the clean-success signal — a diagnostic is present only
+  when there is something actionable or noteworthy.
+- `diagnostic.category` is a stable enum (below); `diagnostic.message` is a
+  concise human summary; `diagnostic.details` is an optional compact dict of
+  machine-readable facts (`return_code`, `timed_out`, `truncated`, `solver`,
+  `checker_status`, …). Raw streams remain available and unchanged.
+
+Existing `status`/`state` fields are unchanged and remain the primary
+success/failure outcome; `diagnostic` is additive. Pre-result MCP errors (raised
+before any result model exists) expose the same contract through a documented
+first line, `Diagnostic: <category> — <message>`, in the error text.
+
+| category | what happened | typical client action |
+| --- | --- | --- |
+| `syntax_or_compile_error` | the model did not compile | fix the model syntax and re-check |
+| `missing_data` | a required parameter/data value is missing | supply the missing data (`.dzn` or inline) |
+| `type_error` | a type/type-inst error | fix the offending declaration/expression |
+| `solver_unavailable` | the requested solver id is unknown/unusable | pick an available solver (`list_available_solvers`) |
+| `infeasible` | the model is unsatisfiable | relax constraints; try `find_unsat_core` |
+| `unbounded` | the objective is unbounded | add a bound to the objective |
+| `infeasible_or_unbounded` | unsat or unbounded, solver can't tell | add bounds and re-solve to disambiguate |
+| `timeout_no_incumbent` | hit the time limit, no solution found | raise `timeout_ms` or simplify the model |
+| `timeout_with_incumbent` | hit the time limit, best-so-far returned | accept the incumbent or raise `timeout_ms` for a proof |
+| `cancelled` | a job was cancelled | resubmit if still needed |
+| `job_failed` | a background job failed with no result | read `message`; fix inputs and resubmit |
+| `child_process_error` | the CP-SAT child failed or broke its output contract | fix the script; check `stderr`/`return_code` |
+| `output_truncated` | the child's output exceeded the byte cap | reduce printed output |
+| `invalid_save_target` | the save `target_dir` is invalid/occupied | pick an absolute, empty/owned dir; pass `overwrite=true` |
+| `not_verified` | a save/verification gate rejected the result | address the gate (objective/checker) and retry |
+| `checker_failed` | the solution checker rejected/errored/timed out | inspect `checker`; fix the solution or checker |
+| `runtime_missing` | the managed MiniZinc runtime is not installed | run `openconstraint-mcp install-runtime` |
+| `unsupported_feature` | a requested control/feature is unsupported | drop it or choose a supporting solver |
+| `invalid_request` | malformed/invalid input rejected pre-result | fix the argument/path; retry |
+| `no_winner` | a portfolio/experiment accepted no attempt | broaden attempts or relax the gate |
+| `unknown` | no safe classification | read the raw `status`/`stderr` |
+
+The server never performs LLM repair and does not sandbox CP-SAT children; a
+diagnostic describes only what the local wrapper observed.
+
 ## MCP tools
 
 The stdio server exposes two runtime-introspection tools, a model-check tool, a

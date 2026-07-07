@@ -27,6 +27,7 @@ from ..schemas.cpsat import (
     CpsatPythonResult,
     cpsat_job_state_for_result,
 )
+from ..schemas.diagnostics import Diagnostic, wrapper_job_diagnostic
 from ..schemas.job_state import RESULT_BEARING_STATES, TERMINAL_STATES, JobState
 from ..shared.job_errors import JobRejectedError, exception_summary, now_ms
 from ..shared.proc import terminate_process_tree as _terminate_process_tree
@@ -42,6 +43,7 @@ from .core import (
     run_cpsat_python_file,
     validate_checker_args,
 )
+from .diagnostics import checker_report_diagnostic
 from .eligibility import diagnostic_incumbent_eligibility
 
 
@@ -302,7 +304,35 @@ class CpsatJobRegistry:
             checker=record.checker_report,
             checker_skipped_reason=record.checker_skipped_reason,
             checker_timeout_ms=record.request.effective_checker_timeout_ms,
+            diagnostic=CpsatJobRegistry._job_diagnostic(record),
         )
+
+    @staticmethod
+    def _job_diagnostic(record: _CpsatJobRecord) -> Diagnostic | None:
+        # failed/cancelled -> wrapper diagnostic. Result-bearing states derive
+        # from the embedded result; a job-level checker verdict that failed then
+        # overrides to checker_failed unless the result timed out. A set
+        # checker_skipped_reason (checker
+        # supplied but result not checker-eligible) adds no diagnostic on its
+        # own — the result-derived diagnostic already reflects the ineligibility.
+        wrapper = wrapper_job_diagnostic(
+            record.state,
+            message=record.message or f"job {record.state}",
+            details={"job_id": record.job_id, "state": record.state},
+        )
+        if wrapper is not None:
+            return wrapper
+        diagnostic = record.result.diagnostic if record.result is not None else None
+        if diagnostic is not None and diagnostic.category in (
+            "timeout_no_incumbent",
+            "timeout_with_incumbent",
+        ):
+            return diagnostic
+        if record.checker_report is not None:
+            checker_diag = checker_report_diagnostic(record.checker_report)
+            if checker_diag is not None:
+                return checker_diag
+        return diagnostic
 
     def _finalize(
         self,
@@ -435,4 +465,5 @@ class CpsatJobRegistry:
                 timed_out=False,
                 truncated=False,
             )
+            report.diagnostic = checker_report_diagnostic(report)
         return report, None

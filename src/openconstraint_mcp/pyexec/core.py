@@ -71,6 +71,7 @@ from typing import Any
 from ..schemas.cpsat import CpsatPythonResult, CpsatStatus
 from ..shared.childproc import ChildProcessTracker
 from ..shared.save_target import text_sha256
+from .diagnostics import cpsat_result_diagnostic
 from .runner import ChildExecutionResult, execute_child
 from .runner import python_script_argv as _python_script_argv
 
@@ -264,8 +265,15 @@ def _result_from_child(child: ChildExecutionResult) -> CpsatPythonResult:
 
     This is the CP-SAT protocol layer: the generic ``execute_child`` knows nothing
     about ``status``/``objective``/``solution``; that parsing lives here so the
-    clean-exit, timeout, and truncation shapes are decided in one place.
+    clean-exit, timeout, and truncation shapes are decided in one place. The
+    structured diagnostic is derived from the finished result as the single tail.
     """
+    result = _classify_child_result(child)
+    result.diagnostic = cpsat_result_diagnostic(result)
+    return result
+
+
+def _classify_child_result(child: ChildExecutionResult) -> CpsatPythonResult:
     if child.timed_out:
         # Recover the best-so-far if the script emitted intermediate result blocks
         # (e.g. one per improved solution from a CpSolverSolutionCallback). The

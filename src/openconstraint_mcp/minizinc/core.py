@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Any, NamedTuple
 
 from ..runtime import RuntimeMissingError, get_minizinc_binary, is_runtime_installed
+from ..schemas.diagnostics import Diagnostic
 from ..schemas.minizinc import (
     CheckerReport,
     CheckerStatus,
@@ -40,6 +41,12 @@ from ..shared.proc import (
 from ..shared.save_target import text_sha256, validate_save_target
 from .artifacts import write_verified_model_dir
 from .checker import _parse_checker_stream
+from .diagnostics import (
+    check_diagnostic,
+    inspection_diagnostic,
+    solve_diagnostic,
+    unsat_core_diagnostic,
+)
 from .interface import parse_model_interface
 from .stream import _parse_solve_stream
 from .unsat_core import _parse_unsat_core
@@ -565,24 +572,20 @@ def _build_solve_result(outcome: _RunOutcome, *, solver: str) -> SolveResult:
 
 
 def _build_check_result(outcome: _RunOutcome, *, solver: str) -> CheckResult:
-    if outcome.timed_out:
-        return CheckResult(
-            status="timeout",
-            solver=solver,
-            stdout=outcome.stdout,
-            stderr=outcome.stderr,
-            elapsed_ms=outcome.elapsed_ms,
-        )
     # A pure `-c` compile emits no status object, so the process return code is
     # the whole signal here — unlike solve, which classifies from the stream.
-    status: CheckStatus = "ok" if outcome.returncode == 0 else "error"
-    return CheckResult(
+    status: CheckStatus = (
+        "timeout" if outcome.timed_out else ("ok" if outcome.returncode == 0 else "error")
+    )
+    result = CheckResult(
         status=status,
         solver=solver,
         stdout=outcome.stdout,
         stderr=outcome.stderr,
         elapsed_ms=outcome.elapsed_ms,
     )
+    result.diagnostic = check_diagnostic(result)
+    return result
 
 
 def _build_inspection_result(outcome: _RunOutcome, *, solver: str) -> ModelInspectionResult:
@@ -594,6 +597,13 @@ def _build_inspection_result(outcome: _RunOutcome, *, solver: str) -> ModelInspe
     rc 0 degrades to ``error`` (with the parse failure folded into stderr) rather
     than mis-reporting a partial interface. ``interface`` is populated only on ``ok``.
     """
+    result = _classify_inspection_outcome(outcome, solver=solver)
+    result.diagnostic = inspection_diagnostic(result)
+    return result
+
+
+def _classify_inspection_outcome(outcome: _RunOutcome, *, solver: str) -> ModelInspectionResult:
+    """Classify the run into a ModelInspectionResult (diagnostic set by the caller)."""
     if outcome.timed_out:
         return ModelInspectionResult(
             status="timeout",
@@ -634,6 +644,14 @@ def _build_inspection_result(outcome: _RunOutcome, *, solver: str) -> ModelInspe
 
 
 def _build_unsat_core_result(
+    outcome: _RunOutcome, model: str, *, model_filename: str = _MODEL_FILENAME
+) -> UnsatCoreResult:
+    result = _classify_unsat_core_outcome(outcome, model, model_filename=model_filename)
+    result.diagnostic = unsat_core_diagnostic(result)
+    return result
+
+
+def _classify_unsat_core_outcome(
     outcome: _RunOutcome, model: str, *, model_filename: str = _MODEL_FILENAME
 ) -> UnsatCoreResult:
     if outcome.timed_out:
@@ -714,6 +732,23 @@ def _build_checker_report(outcome: _RunOutcome, solve: SolveResult) -> CheckerRe
         checks=checks,
         transcript=outcome.stdout,
     )
+
+
+def _attach_checker_and_diagnose(
+    result: SolveResult, outcome: _RunOutcome, *, attach_checker: bool
+) -> SolveResult:
+    """Attach the nested checker report (when one ran) and set the solve diagnostic.
+
+    The single tail every solve path shares: ``_run_solve``, the cancellable job
+    solve, and the path-based solve each build a ``SolveResult``, optionally
+    attach a ``--solution-checker`` report, then derive the structured diagnostic
+    from the finished result (checker verdict included). Centralized so the three
+    cannot drift.
+    """
+    if attach_checker:
+        result.checker = _build_checker_report(outcome, result)
+    result.diagnostic = solve_diagnostic(result)
+    return result
 
 
 def find_unsat_core(
@@ -903,9 +938,7 @@ def _run_solve(
         tracker=tracker,
     )
     result = _build_solve_result(outcome, solver=solver)
-    if checker is not None:
-        result.checker = _build_checker_report(outcome, result)
-    return result
+    return _attach_checker_and_diagnose(result, outcome, attach_checker=checker is not None)
 
 
 def solve_model(
@@ -992,9 +1025,7 @@ def solve_model_cancellable(
         on_start=on_start,
     )
     result = _build_solve_result(outcome, solver=solver)
-    if checker is not None:
-        result.checker = _build_checker_report(outcome, result)
-    return result
+    return _attach_checker_and_diagnose(result, outcome, attach_checker=checker is not None)
 
 
 def check_model(
@@ -1043,6 +1074,24 @@ def inspect_model(
         tracker=tracker,
     )
     return _build_inspection_result(outcome, solver=solver)
+
+
+def _save_gate_diagnostic(gate_diagnostic: Diagnostic | None) -> Diagnostic:
+    """Surface the failing gate's own diagnostic on a ``not_verified`` save.
+
+    The compile check or the solve already classified WHY it failed
+    (``syntax_or_compile_error``, ``infeasible``, ``timeout_*``,
+    ``checker_failed``, …) — that specific category is more actionable than a
+    bare ``not_verified``, so it is reused when present. A gate with no
+    diagnostic (a defensive fallback that should not occur, since a failed gate
+    is always classified) degrades to a generic ``not_verified``.
+    """
+    if gate_diagnostic is not None:
+        return gate_diagnostic
+    return Diagnostic(
+        category="not_verified",
+        message="the save verification gate failed; nothing was written",
+    )
 
 
 def _verification_failure(solve: SolveResult, *, checker_supplied: bool) -> str | None:
@@ -1242,6 +1291,7 @@ def save_verified_model(
             ),
             target_dir=str(target),
             check=check,
+            diagnostic=_save_gate_diagnostic(check.diagnostic),
         )
 
     solve = _run_solve(
@@ -1261,6 +1311,7 @@ def save_verified_model(
             target_dir=str(target),
             check=check,
             solve=solve,
+            diagnostic=_save_gate_diagnostic(solve.diagnostic),
         )
 
     files, warning = write_verified_model_dir(
@@ -1454,9 +1505,7 @@ def solve_model_path(
         tracker=tracker,
     )
     result = _build_solve_result(outcome, solver=solver)
-    if checker_path is not None:
-        result.checker = _build_checker_report(outcome, result)
-    return result
+    return _attach_checker_and_diagnose(result, outcome, attach_checker=checker_path is not None)
 
 
 def check_model_path(

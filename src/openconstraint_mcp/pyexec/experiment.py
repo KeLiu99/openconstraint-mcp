@@ -63,6 +63,7 @@ from .core import (
     validate_cpsat_random_seed,
     write_config_file,
 )
+from .diagnostics import experiment_attempt_diagnostic, experiment_diagnostic
 from .eligibility import diagnostic_incumbent_eligibility
 
 # The synchronous experiment's pre-flight wall-clock budget, matching the
@@ -519,6 +520,9 @@ def _run_attempt(
         truncated=result.truncated,
         duration_ms=result.duration_ms,
         stderr_tail=stderr_tail,
+        diagnostic=experiment_attempt_diagnostic(
+            result, accepted=accepted, checker_status=checker_status, message=message
+        ),
     )
     return row, (result if accepted else None)
 
@@ -655,7 +659,7 @@ def run_cpsat_python_experiment(
     if winner is not None:
         warnings.append(_REPRODUCIBILITY_WARNING)
 
-    return CpsatPythonExperimentResult(
+    experiment_result = CpsatPythonExperimentResult(
         status="winner" if winner is not None else "no_winner",
         winner_index=winner_index,
         winner_name=winner_name,
@@ -669,3 +673,5 @@ def run_cpsat_python_experiment(
         problem_sha256=problem_sha,
         warnings=warnings,
     )
+    experiment_result.diagnostic = experiment_diagnostic(experiment_result)
+    return experiment_result

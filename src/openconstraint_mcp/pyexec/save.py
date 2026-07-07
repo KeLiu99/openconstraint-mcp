@@ -45,6 +45,7 @@ from .core import (
     validate_cpsat_random_seed,
     write_config_file,
 )
+from .diagnostics import save_failure_diagnostic
 
 SCRIPT_FILENAME: str = "solution.py"
 PROBLEM_FILENAME: str = "problem.txt"
@@ -97,6 +98,7 @@ def _failure(
         expectation=expectation,
         expectation_passed=expectation_passed,
         checker=checker,
+        diagnostic=save_failure_diagnostic(run_result, checker),
     )
 
 

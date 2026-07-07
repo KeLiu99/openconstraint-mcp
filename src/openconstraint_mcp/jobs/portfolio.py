@@ -25,11 +25,14 @@ import time
 from collections.abc import Sequence
 from typing import NamedTuple
 
+from pydantic import JsonValue
+
 # noinspection PyProtectedMember
 from ..minizinc.core import (
     _resolve_capability_map,
     _validate_solver_capabilities,
 )
+from ..schemas.diagnostics import Diagnostic
 from ..schemas.job_state import TERMINAL_STATES, JobState
 from ..schemas.minizinc import SolveJobStatus, SolveResult
 from ..schemas.portfolio import (
@@ -287,7 +290,31 @@ def _build_portfolio_result(
         data_sha256=data_sha256,
         checker_sha256=checker_sha256,
         solve_controls=solve_controls,
+        diagnostic=_portfolio_result_diagnostic(status_value, winner_result, attempts),
     )
+
+
+def _portfolio_result_diagnostic(
+    status: PortfolioStatus,
+    winner: SolveResult | None,
+    attempts: Sequence[PortfolioAttempt],
+) -> Diagnostic | None:
+    """Diagnose a race result: ``no_winner``, else the winner's own diagnostic.
+
+    A ``no_winner`` race (no attempt produced a usable result) is ``no_winner``
+    with the attempt states seen; a winner surfaces the winning ``SolveResult``'s
+    own diagnostic (None for a decisive win, ``timeout_with_incumbent`` for a
+    best-available timeout fallback), so the race never invents an outcome the
+    winning attempt did not have.
+    """
+    if status == "no_winner":
+        states: list[JsonValue] = [s for s in sorted({attempt.state for attempt in attempts})]
+        return Diagnostic(
+            category="no_winner",
+            message="no attempt produced a usable result",
+            details={"attempts": len(attempts), "states": states},
+        )
+    return winner.diagnostic if winner is not None else None
 
 
 def _validate_plan_capabilities(
@@ -410,4 +437,8 @@ def _to_attempt(
         checker_status=(
             result.checker.status if result is not None and result.checker is not None else None
         ),
+        # The underlying solve job already computed this attempt's diagnostic
+        # (wrapper for failed/cancelled, result-derived — checker included — for
+        # succeeded/timeout), so reuse it rather than re-deriving.
+        diagnostic=status.diagnostic,
     )

@@ -33,6 +33,7 @@ from dataclasses import dataclass, field
 from uuid import uuid4
 
 from ..minizinc.core import DEFAULT_SOLVE_TIMEOUT_MS
+from ..schemas.diagnostics import wrapper_job_diagnostic
 from ..schemas.portfolio import (
     PortfolioJobState,
     PortfolioJobStatus,
@@ -92,6 +93,16 @@ def _to_status(record: _PortfolioRecord) -> PortfolioJobStatus:
         elapsed_ms = record.elapsed_ms
     else:
         elapsed_ms = max(now_ms() - record.started_at_ms, 0)
+    # `cancelled` gets a wrapper diagnostic; `succeeded` derives from the race
+    # result (None for a decisive winner, no_winner/timeout otherwise); `running`
+    # has none. A portfolio has no `failed`/`timeout` state.
+    diagnostic = wrapper_job_diagnostic(
+        record.state,
+        message=record.message or f"portfolio {record.state}",
+        details={"job_id": record.job_id, "state": record.state},
+    )
+    if diagnostic is None and record.result is not None:
+        diagnostic = record.result.diagnostic
     return PortfolioJobStatus(
         job_id=record.job_id,
         state=record.state,
@@ -102,6 +113,7 @@ def _to_status(record: _PortfolioRecord) -> PortfolioJobStatus:
         elapsed_ms=elapsed_ms,
         result=record.result,
         message=record.message,
+        diagnostic=diagnostic,
     )
 
 

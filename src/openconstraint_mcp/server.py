@@ -94,6 +94,7 @@ from .schemas.cpsat import (
     CpsatPythonResult,
     SaveVerifiedPythonResult,
 )
+from .schemas.diagnostics import Diagnostic
 from .schemas.minizinc import (
     CheckResult,
     ModelInspectionResult,
@@ -276,6 +277,53 @@ _DEFAULT_MCP_ERROR_TYPES: tuple[type[Exception], ...] = (
 )
 
 
+def _classify_domain_error(exc: Exception) -> Diagnostic | None:
+    """Map a pre-result domain exception to a structured ``Diagnostic``, or None.
+
+    Stage 2 gives clients a stable branch point for the errors raised *before*
+    any result model exists. Type wins where it can (``RuntimeMissingError`` ->
+    ``runtime_missing``); the remaining pre-result rejections are plain
+    ``ValueError``s, classified by stable message markers into the specific
+    ``unsupported_feature``/``invalid_save_target`` buckets, with every other
+    ``ValueError`` falling into the coarse ``invalid_request`` bucket (malformed
+    paths, invalid arguments, the experiment wall-clock budget rejection).
+    Exceptions that are neither (``MiniZincExecutionError`` runtime corruption,
+    ``JobRejectedError`` transient capacity) return None and pass through as a
+    plain message, since they are not a client-repairable input state.
+    """
+    if isinstance(exc, RuntimeMissingError):
+        return Diagnostic(category="runtime_missing", message=str(exc))
+    if not isinstance(exc, ValueError):
+        return None
+
+    text = str(exc)
+    if "does not support" in text:
+        return Diagnostic(category="unsupported_feature", message=text)
+    if "target_dir" in text or "refusing to overwrite" in text or "refusing to write into" in text:
+        return Diagnostic(category="invalid_save_target", message=text)
+    return Diagnostic(category="invalid_request", message=text)
+
+
+def _translated_error(exc: Exception) -> RuntimeError:
+    """Build the ``RuntimeError`` an MCP tool raises for a domain exception.
+
+    When the exception classifies to a ``Diagnostic``, the first line is the
+    documented fallback ``Diagnostic: <category> — <summary>`` (the mcp SDK's
+    tool-exception path surfaces only the message string, so the contract rides
+    in that line), with any remaining original detail preserved on following
+    lines. An unclassified exception is re-raised with its verbatim message, as
+    before.
+    """
+    diagnostic = _classify_domain_error(exc)
+    if diagnostic is None:
+        return RuntimeError(str(exc))
+    first_line, _, rest = diagnostic.message.partition("\n")
+    text = f"Diagnostic: {diagnostic.category} — {first_line}"
+    if rest:
+        text = f"{text}\n{rest}"
+    return RuntimeError(text)
+
+
 def _as_mcp_error(
     *exc_types: type[Exception],
 ) -> Callable[[Callable[_P, _R]], Callable[_P, _R]]:
@@ -283,18 +331,16 @@ def _as_mcp_error(
 
     The single home for the ``(domain exception -> RuntimeError)`` invariant: on
     any of ``exc_types`` (defaulting to the runtime/execution/value triad), the
-    domain message is re-raised verbatim as a ``RuntimeError`` with the original
-    exception preserved as ``__cause__``. Pass a narrower tuple to catch less —
-    ``list_available_solvers`` takes no user arguments, so it deliberately does
-    not translate ``ValueError`` (a ``ValueError`` there is a real bug, not an
-    actionable user message).
+    domain error is re-raised as a ``RuntimeError`` (original preserved as
+    ``__cause__``). Pre-result errors clients need to branch on are prefixed with
+    a structured ``Diagnostic: <category> — …`` first line (see
+    ``_translated_error``); others keep their verbatim message. Pass a narrower
+    tuple to catch less — ``list_available_solvers`` takes no user arguments, so
+    it deliberately does not translate ``ValueError`` (a ``ValueError`` there is a
+    real bug, not an actionable user message).
 
-    v0 policy is to surface the message string so MCP clients see something
-    actionable. A future structured error envelope (e.g. ``{"code":
-    "runtime_missing", "hint": "run install-runtime"}``) that lets clients branch
-    programmatically instead of parsing the message belongs here, in this one
-    place. ``functools.wraps`` preserves the wrapped tool's signature and
-    annotations so FastMCP derives an unchanged schema from the decorated tool.
+    ``functools.wraps`` preserves the wrapped tool's signature and annotations so
+    FastMCP derives an unchanged schema from the decorated tool.
     """
     caught = exc_types or _DEFAULT_MCP_ERROR_TYPES
 
@@ -311,7 +357,7 @@ def _as_mcp_error(
                 try:
                     return await coro_fn(*args, **kwargs)
                 except caught as exc:
-                    raise RuntimeError(str(exc)) from exc
+                    raise _translated_error(exc) from exc
 
             return cast("Callable[_P, _R]", _async_wrapper)
 
@@ -320,7 +366,7 @@ def _as_mcp_error(
             try:
                 return fn(*args, **kwargs)
             except caught as exc:
-                raise RuntimeError(str(exc)) from exc
+                raise _translated_error(exc) from exc
 
         return _wrapper
 

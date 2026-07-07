@@ -4,6 +4,7 @@ from typing import Literal, cast
 
 from pydantic import BaseModel, Field, model_validator
 
+from .diagnostics import Diagnostic
 from .job_state import JobState
 from .minizinc import CheckerStatus, SolveResult, SolveStatus
 
@@ -68,6 +69,7 @@ class PortfolioAttempt(BaseModel):
     elapsed_ms: int | None = None
     message: str | None = None
     checker_status: CheckerStatus | None = None
+    diagnostic: Diagnostic | None = None
 
 
 class PortfolioSolveControls(BaseModel):
@@ -133,6 +135,7 @@ class PortfolioSolveResult(BaseModel):
     data_sha256: str | None
     checker_sha256: str | None
     solve_controls: PortfolioSolveControls
+    diagnostic: Diagnostic | None = None
 
     @model_validator(mode="after")
     def _winner_presence_matches_status(self) -> PortfolioSolveResult:
@@ -194,6 +197,7 @@ class PortfolioJobStatus(BaseModel):
     elapsed_ms: int | None = None
     result: PortfolioSolveResult | None = None
     message: str | None = None
+    diagnostic: Diagnostic | None = None
 
     @model_validator(mode="after")
     def _result_presence_matches_state(self) -> PortfolioJobStatus:

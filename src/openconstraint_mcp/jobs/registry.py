@@ -44,6 +44,7 @@ from ..minizinc.core import (
 # the load-bearing D1.9 invariant ("result present iff state in this set") and
 # schemas.job_state owns it, so _finalize and the SolveJobStatus validator can
 # never drift apart.
+from ..schemas.diagnostics import Diagnostic, wrapper_job_diagnostic
 from ..schemas.job_state import RESULT_BEARING_STATES, TERMINAL_STATES, JobState
 from ..schemas.minizinc import SolveJobStatus, SolveResult, job_state_for_result
 from ..shared.job_errors import JobRejectedError, exception_summary, now_ms
@@ -366,7 +367,23 @@ class JobRegistry:
             elapsed_ms=elapsed_ms,
             result=record.result,
             message=record.message,
+            diagnostic=JobRegistry._job_diagnostic(record),
         )
+
+    @staticmethod
+    def _job_diagnostic(record: _JobRecord) -> Diagnostic | None:
+        # Non-result-bearing terminal states (failed/cancelled) get a wrapper
+        # diagnostic; result-bearing states (succeeded/timeout) derive theirs
+        # from the embedded result, so a result-carried timeout_with_incumbent
+        # wins over a generic wrapper timeout (D3 invariant).
+        wrapper = wrapper_job_diagnostic(
+            record.state,
+            message=record.message or f"job {record.state}",
+            details={"job_id": record.job_id, "state": record.state},
+        )
+        if wrapper is not None:
+            return wrapper
+        return record.result.diagnostic if record.result is not None else None
 
     def _finalize(
         self,

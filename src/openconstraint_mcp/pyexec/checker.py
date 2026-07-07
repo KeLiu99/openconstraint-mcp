@@ -32,6 +32,7 @@ from typing import TypedDict
 
 from ..schemas.cpsat import CpsatCheckerReport, CpsatPythonResult
 from ..shared.childproc import ChildProcessTracker
+from .diagnostics import checker_report_diagnostic
 from .runner import execute_child
 
 _ACCEPTED_STATUS = "accepted"
@@ -46,6 +47,14 @@ class _CheckerKw(TypedDict):
     duration_ms: int
 
 
+def _finalize(report: CpsatCheckerReport) -> CpsatCheckerReport:
+    """Set the structured diagnostic on a built report — the single tail every
+    checker-report factory funnels through so a failed verdict is never emitted
+    without its ``checker_failed`` diagnostic."""
+    report.diagnostic = checker_report_diagnostic(report)
+    return report
+
+
 def _error(
     msg: str,
     *,
@@ -54,14 +63,16 @@ def _error(
     duration_ms: int,
     truncated: bool = False,
 ) -> CpsatCheckerReport:
-    return CpsatCheckerReport(
-        status="error",
-        errors=[msg],
-        stdout=stdout,
-        stderr=stderr,
-        duration_ms=duration_ms,
-        timed_out=False,
-        truncated=truncated,
+    return _finalize(
+        CpsatCheckerReport(
+            status="error",
+            errors=[msg],
+            stdout=stdout,
+            stderr=stderr,
+            duration_ms=duration_ms,
+            timed_out=False,
+            truncated=truncated,
+        )
     )
 
 
@@ -115,15 +126,17 @@ def _normalize_checker_result(
             "checker returned accepted with a non-empty errors list (self-contradictory)", **kw
         )
 
-    return CpsatCheckerReport(
-        status=raw_status,  # type: ignore[arg-type]
-        errors=list(raw_errors),
-        details=raw_details,
-        stdout=stdout,
-        stderr=stderr,
-        duration_ms=duration_ms,
-        timed_out=False,
-        truncated=False,
+    return _finalize(
+        CpsatCheckerReport(
+            status=raw_status,  # type: ignore[arg-type]
+            errors=list(raw_errors),
+            details=raw_details,
+            stdout=stdout,
+            stderr=stderr,
+            duration_ms=duration_ms,
+            timed_out=False,
+            truncated=False,
+        )
     )
 
 
@@ -176,12 +189,14 @@ def run_checker(
     }
 
     if child_result.timed_out:
-        return CpsatCheckerReport(
-            status="timeout",
-            errors=["checker timed out"],
-            timed_out=True,
-            truncated=child_result.truncated,
-            **kw,
+        return _finalize(
+            CpsatCheckerReport(
+                status="timeout",
+                errors=["checker timed out"],
+                timed_out=True,
+                truncated=child_result.truncated,
+                **kw,
+            )
         )
     if child_result.truncated:
         return _error("checker output was truncated", truncated=True, **kw)
