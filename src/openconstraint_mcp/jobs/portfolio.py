@@ -30,7 +30,8 @@ from ..minizinc.core import (
     _resolve_capability_map,
     _validate_solver_capabilities,
 )
-from ..schemas.minizinc import JobState, SolveJobStatus, SolveResult
+from ..schemas.job_state import TERMINAL_STATES, JobState
+from ..schemas.minizinc import SolveJobStatus, SolveResult
 from ..schemas.portfolio import (
     PortfolioAttempt,
     PortfolioAttemptState,
@@ -40,11 +41,10 @@ from ..schemas.portfolio import (
 )
 from ..shared.save_target import text_sha256
 
-# portfolio consumes the registry (provider) and reuses its terminal-state set
-# (one definition, two call sites) plus core's capability resolver/validator. These
-# package-internal helpers keep plan-time enforcement identical to the single solve.
-# noinspection PyProtectedMember
-from .registry import _TERMINAL_STATES, JobRegistry, SolveRequest
+# portfolio consumes the registry (provider) plus core's capability
+# resolver/validator; these package-internal helpers keep plan-time enforcement
+# identical to the single solve.
+from .registry import JobRegistry, SolveRequest
 
 # The solve verdicts that end the race immediately (a proof or a satisfaction
 # solution). The first attempt to reach one of these wins; the rest are cancelled.
@@ -226,11 +226,11 @@ def _select_portfolio_outcome(
     """
     statuses = [registry.get(job_id) for job_id in job_ids]
     winner_index = _first_decisive_index(statuses)
-    if winner_index is None and not all(s.state in _TERMINAL_STATES for s in statuses):
+    if winner_index is None and not all(s.state in TERMINAL_STATES for s in statuses):
         return None
     if winner_index is not None:
         for job_id, status in zip(job_ids, statuses, strict=True):
-            if status.state not in _TERMINAL_STATES:
+            if status.state not in TERMINAL_STATES:
                 registry.cancel(job_id)
         statuses = _await_all_terminal(registry, job_ids)
     return _build_portfolio_result(
@@ -328,7 +328,7 @@ def _await_all_terminal(registry: JobRegistry, job_ids: Sequence[str]) -> list[S
     deadline = time.monotonic() + _CANCEL_SETTLE_SECONDS
     while True:
         statuses = [registry.get(job_id) for job_id in job_ids]
-        if all(status.state in _TERMINAL_STATES for status in statuses):
+        if all(status.state in TERMINAL_STATES for status in statuses):
             return statuses
         if time.monotonic() >= deadline:
             return statuses
