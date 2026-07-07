@@ -4,7 +4,7 @@ import pytest
 from pydantic import ValidationError
 
 from openconstraint_mcp.minizinc.interface import parse_model_interface
-from openconstraint_mcp.schemas import (
+from openconstraint_mcp.schemas.minizinc import (
     InterfaceType,
     ModelInspectionResult,
     ModelInterface,

@@ -12,7 +12,7 @@ import pytest
 from mcp.types import CallToolResult
 
 from openconstraint_mcp.jobs.registry import JobRegistry
-from openconstraint_mcp.schemas import (
+from openconstraint_mcp.schemas.minizinc import (
     SolverCapabilities,
     SolveResult,
     SolverInfo,
@@ -2030,7 +2030,7 @@ async def test_save_verified_minizinc_model_with_portfolio_result_writes_experim
     tmp_path: Path,
 ) -> None:
     """A self-consistent `portfolio_result` reaches the core save and is persisted."""
-    from openconstraint_mcp.schemas import (
+    from openconstraint_mcp.schemas.portfolio import (
         PortfolioAttempt,
         PortfolioSolveControls,
         PortfolioSolveResult,
@@ -2694,7 +2694,7 @@ async def test_run_cpsat_python_tool_is_listed() -> None:
 async def test_run_cpsat_python_routes_to_cpsat_result(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from openconstraint_mcp.schemas import CpsatPythonResult
+    from openconstraint_mcp.schemas.cpsat import CpsatPythonResult
 
     fake_result = CpsatPythonResult(
         status="optimal",
@@ -2733,7 +2733,7 @@ async def test_run_cpsat_python_experiment_tool_is_listed() -> None:
 async def test_run_cpsat_python_experiment_routes_to_experiment_result(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from openconstraint_mcp.schemas import (
+    from openconstraint_mcp.schemas.cpsat import (
         CpsatPythonExperimentAttempt,
         CpsatPythonExperimentAttemptResult,
         CpsatPythonExperimentResult,
@@ -2822,7 +2822,7 @@ async def test_run_cpsat_python_experiment_routes_to_experiment_result(
 async def test_run_cpsat_python_experiment_forwards_include_winner_stdout(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from openconstraint_mcp.schemas import (
+    from openconstraint_mcp.schemas.cpsat import (
         CpsatPythonExperimentAttempt,
         CpsatPythonExperimentAttemptResult,
         CpsatPythonExperimentResult,
@@ -2895,7 +2895,7 @@ async def test_run_cpsat_python_experiment_forwards_include_winner_stdout(
 async def test_run_cpsat_python_experiment_prints_warnings_section(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from openconstraint_mcp.schemas import (
+    from openconstraint_mcp.schemas.cpsat import (
         CpsatPythonExperimentAttempt,
         CpsatPythonExperimentAttemptResult,
         CpsatPythonExperimentResult,
@@ -2976,7 +2976,7 @@ async def test_run_cpsat_python_experiment_attempt_line_shows_best_objective_bou
     """An unknown/rejected attempt's best_objective_bound must be visible in the
     plain-text attempt table too, not just structuredContent — otherwise a
     text-only client loses the diagnostic this field exists for."""
-    from openconstraint_mcp.schemas import (
+    from openconstraint_mcp.schemas.cpsat import (
         CpsatPythonExperimentAttempt,
         CpsatPythonExperimentAttemptResult,
         CpsatPythonExperimentResult,
@@ -3047,7 +3047,7 @@ async def test_run_cpsat_python_file_routes_path_to_cpsat_result(
 ) -> None:
     from pathlib import Path
 
-    from openconstraint_mcp.schemas import CpsatPythonResult
+    from openconstraint_mcp.schemas.cpsat import CpsatPythonResult
 
     fake_result = CpsatPythonResult(
         status="optimal",
@@ -3082,7 +3082,7 @@ async def test_run_cpsat_python_file_routes_path_to_cpsat_result(
 
 
 def _fake_cpsat_result(status: str = "optimal") -> Any:
-    from openconstraint_mcp.schemas import CpsatPythonResult
+    from openconstraint_mcp.schemas.cpsat import CpsatPythonResult
 
     return CpsatPythonResult(
         status=status,  # type: ignore[arg-type]
@@ -3098,7 +3098,7 @@ def _fake_cpsat_result(status: str = "optimal") -> Any:
 
 
 def _fake_checker_report() -> Any:
-    from openconstraint_mcp.schemas import CpsatCheckerReport
+    from openconstraint_mcp.schemas.cpsat import CpsatCheckerReport
 
     return CpsatCheckerReport(
         status="accepted",
@@ -3271,7 +3271,7 @@ def _fake_cpsat_run_result(
     stdout: str = '{"status":"optimal","objective":3,"solution":{"x":3}}',
     duration_ms: int = 10,
 ) -> Any:
-    from openconstraint_mcp.schemas import CpsatPythonResult
+    from openconstraint_mcp.schemas.cpsat import CpsatPythonResult
 
     return CpsatPythonResult(
         status=status,  # type: ignore[arg-type]
@@ -3292,7 +3292,7 @@ def _fake_cpsat_save_result(
     saved: bool = True,
     verification_level: str = "reported",
 ) -> Any:
-    from openconstraint_mcp.schemas import SaveVerifiedPythonResult
+    from openconstraint_mcp.schemas.cpsat import SaveVerifiedPythonResult
 
     return SaveVerifiedPythonResult(
         status=status,  # type: ignore[arg-type]

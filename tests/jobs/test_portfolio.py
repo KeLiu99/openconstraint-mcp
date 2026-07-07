@@ -28,16 +28,15 @@ from openconstraint_mcp.jobs.portfolio import (
 )
 from openconstraint_mcp.jobs.registry import JobRegistry
 from openconstraint_mcp.minizinc.core import DEFAULT_SOLVE_TIMEOUT_MS
-from openconstraint_mcp.schemas import (
+from openconstraint_mcp.schemas.minizinc import (
     CheckerReport,
-    PortfolioSolveControls,
-    PortfolioSolveResult,
     SolveJobStatus,
     SolverCapabilities,
     SolveResult,
     SolverInfo,
     SolverList,
 )
+from openconstraint_mcp.schemas.portfolio import PortfolioSolveControls, PortfolioSolveResult
 from openconstraint_mcp.shared.job_errors import JobRejectedError
 from openconstraint_mcp.shared.save_target import text_sha256
 

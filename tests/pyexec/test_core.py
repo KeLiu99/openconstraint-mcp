@@ -24,7 +24,7 @@ from openconstraint_mcp.pyexec.core import (
     normalize_objective as _normalize_objective,
 )
 from openconstraint_mcp.pyexec.runner import MAX_OUTPUT_BYTES, _read_capped
-from openconstraint_mcp.schemas import CpsatPythonResult
+from openconstraint_mcp.schemas.cpsat import CpsatPythonResult
 
 _VALID_SOLUTION = {"x": 3, "y": 7}
 _VALID_STDOUT = json.dumps({"status": "optimal", "objective": 10, "solution": _VALID_SOLUTION})

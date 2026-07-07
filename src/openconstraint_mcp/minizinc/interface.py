@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 from typing import Any
 
-from ..schemas import InterfaceType, ModelInterface
+from ..schemas.minizinc import InterfaceType, ModelInterface
 
 
 def _build_interface_type(spec: dict[str, Any]) -> InterfaceType:

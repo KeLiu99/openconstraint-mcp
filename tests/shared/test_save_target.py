@@ -9,7 +9,7 @@ from pathlib import Path
 
 import pytest
 
-from openconstraint_mcp.schemas import SavedModelArtifact
+from openconstraint_mcp.schemas.artifacts import SavedModelArtifact
 from openconstraint_mcp.shared.save_target import (
     MANIFEST_FILENAME,
     commit_staged_dir,

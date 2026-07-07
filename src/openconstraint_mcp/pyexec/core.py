@@ -68,7 +68,7 @@ from pathlib import Path
 from subprocess import Popen
 from typing import Any
 
-from ..schemas import CpsatPythonResult, CpsatStatus
+from ..schemas.cpsat import CpsatPythonResult, CpsatStatus
 from ..shared.childproc import ChildProcessTracker
 from ..shared.save_target import text_sha256
 from .runner import ChildExecutionResult, execute_child

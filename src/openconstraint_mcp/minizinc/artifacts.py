@@ -15,14 +15,12 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-from ..schemas import (
+from ..schemas.artifacts import SavedArtifactRole, SavedModelArtifact
+from ..schemas.minizinc import CheckResult, SolveResult
+from ..schemas.portfolio import (
     PORTFOLIO_ATTEMPT_TERMINAL_STATES,
-    CheckResult,
     PortfolioAttempt,
     PortfolioSolveResult,
-    SavedArtifactRole,
-    SavedModelArtifact,
-    SolveResult,
 )
 from ..shared.save_target import (
     EXPERIMENT_LOG_FILENAME,

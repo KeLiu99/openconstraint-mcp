@@ -10,13 +10,12 @@ from pathlib import Path
 from typing import Any, NamedTuple
 
 from ..runtime import RuntimeMissingError, get_minizinc_binary, is_runtime_installed
-from ..schemas import (
+from ..schemas.minizinc import (
     CheckerReport,
     CheckerStatus,
     CheckResult,
     CheckStatus,
     ModelInspectionResult,
-    PortfolioSolveResult,
     SaveVerifiedModelResult,
     SolutionCheck,
     SolverCapabilities,
@@ -27,6 +26,7 @@ from ..schemas import (
     UnsatCoreConstraint,
     UnsatCoreResult,
 )
+from ..schemas.portfolio import PortfolioSolveResult
 from ..shared.childproc import ChildProcessTracker
 from ..shared.proc import (
     CREATION_FLAGS as _CREATION_FLAGS,

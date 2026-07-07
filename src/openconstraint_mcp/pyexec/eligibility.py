@@ -16,7 +16,7 @@ Dependency-light leaf: imports only ``schemas``. Never imports ``minizinc``,
 
 from __future__ import annotations
 
-from ..schemas import CpsatPythonResult
+from ..schemas.cpsat import CpsatPythonResult
 
 # Statuses whose result is a usable diagnostic incumbent.
 DIAGNOSTIC_ACCEPT_STATUSES: frozenset[str] = frozenset({"optimal", "feasible", "timeout"})

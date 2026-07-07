@@ -10,7 +10,7 @@ from typing import Any
 import pytest
 
 from openconstraint_mcp.pyexec.jobs import CpsatJobRegistry
-from openconstraint_mcp.schemas import CpsatCheckerReport, CpsatPythonResult, CpsatStatus
+from openconstraint_mcp.schemas.cpsat import CpsatCheckerReport, CpsatPythonResult, CpsatStatus
 from openconstraint_mcp.shared.job_errors import JobRejectedError
 
 

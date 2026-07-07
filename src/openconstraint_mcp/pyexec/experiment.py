@@ -40,7 +40,7 @@ from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import NamedTuple, cast
 
-from ..schemas import (
+from ..schemas.cpsat import (
     CpsatExperimentSelectionPolicy,
     CpsatObjectiveSense,
     CpsatPythonExperimentAttempt,

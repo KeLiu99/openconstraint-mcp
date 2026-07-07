@@ -85,25 +85,26 @@ from .pyexec.experiment import run_cpsat_python_experiment
 from .pyexec.jobs import CpsatJobRegistry
 from .pyexec.save import save_verified_cpsat_python
 from .runtime import RuntimeMissingError, get_runtime_status
-from .schemas import (
-    CheckResult,
+from .schemas.cpsat import (
     CpsatExpectation,
     CpsatObjectiveSense,
     CpsatPythonExperimentAttempt,
     CpsatPythonExperimentResult,
     CpsatPythonJobStatus,
     CpsatPythonResult,
-    ModelInspectionResult,
-    PortfolioJobStatus,
-    PortfolioSolveResult,
-    RuntimeStatus,
-    SaveVerifiedModelResult,
     SaveVerifiedPythonResult,
+)
+from .schemas.minizinc import (
+    CheckResult,
+    ModelInspectionResult,
+    SaveVerifiedModelResult,
     SolveJobStatus,
     SolveResult,
     SolverList,
     UnsatCoreResult,
 )
+from .schemas.portfolio import PortfolioJobStatus, PortfolioSolveResult
+from .schemas.runtime import RuntimeStatus
 from .shared.childproc import ChildProcessTracker
 from .shared.job_errors import JobRejectedError
 

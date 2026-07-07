@@ -4,7 +4,7 @@ import json
 from collections.abc import Sequence
 from typing import Any, NamedTuple
 
-from ..schemas import SolveStatus
+from ..schemas.minizinc import SolveStatus
 
 # MiniZinc's `--json-stream` emits one JSON object per line. Each object has a
 # `type`; the solve parser consumes `solution`, `status`, `statistics`, `error`,
