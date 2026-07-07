@@ -8,7 +8,7 @@ from pathlib import Path
 import pytest
 
 from openconstraint_mcp.pyexec.core import VERIFIED_STATUSES, config_sha256
-from openconstraint_mcp.schemas import (
+from openconstraint_mcp.schemas.cpsat import (
     CpsatCheckerReport,
     CpsatExpectation,
     CpsatPythonExperimentAttemptResult,
@@ -624,7 +624,7 @@ def test_save_accepted_checker_manifest_has_scalar_summary_only(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Accepted checker: manifest carries only scalar summary, never free-text fields."""
-    from openconstraint_mcp.schemas import CpsatCheckerReport
+    from openconstraint_mcp.schemas.cpsat import CpsatCheckerReport
 
     _patch_executor(monkeypatch, _OPTIMAL_RESULT)
     sensitive_report = CpsatCheckerReport(

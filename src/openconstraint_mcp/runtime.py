@@ -8,7 +8,7 @@ from pathlib import Path
 from platformdirs import PlatformDirs
 from pydantic import ValidationError
 
-from .schemas import InstallConfig, RuntimeStatus
+from .schemas.runtime import InstallConfig, RuntimeStatus
 
 _APP_NAME = "openconstraint-mcp"
 _ENV_RUNTIME_DIR = "OPENCONSTRAINT_MCP_RUNTIME_DIR"

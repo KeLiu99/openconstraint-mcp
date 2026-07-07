@@ -30,7 +30,7 @@ from pathlib import Path
 from subprocess import Popen
 from typing import TypedDict
 
-from ..schemas import CpsatCheckerReport, CpsatPythonResult
+from ..schemas.cpsat import CpsatCheckerReport, CpsatPythonResult
 from ..shared.childproc import ChildProcessTracker
 from .runner import execute_child
 

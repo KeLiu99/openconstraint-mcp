@@ -15,12 +15,8 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
-    from ..schemas import (
-        CpsatPythonExperimentResult,
-        SaveVerifiedModelResult,
-        SolveResult,
-        SolverList,
-    )
+    from ..schemas.cpsat import CpsatPythonExperimentResult
+    from ..schemas.minizinc import SaveVerifiedModelResult, SolveResult, SolverList
 
 STATS_PRESENTATION_REQUIREMENT = (
     "Final answer requirement: copy the entire Statistics section below into "

@@ -33,7 +33,7 @@ from dataclasses import dataclass, field
 from uuid import uuid4
 
 from ..minizinc.core import DEFAULT_SOLVE_TIMEOUT_MS
-from ..schemas import (
+from ..schemas.portfolio import (
     PortfolioJobState,
     PortfolioJobStatus,
     PortfolioSolveControls,

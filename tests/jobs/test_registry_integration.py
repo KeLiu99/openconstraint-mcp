@@ -22,7 +22,7 @@ import pytest
 from openconstraint_mcp.jobs.registry import JobRegistry
 from openconstraint_mcp.minizinc.core import solve_model
 from openconstraint_mcp.runtime import is_runtime_installed
-from openconstraint_mcp.schemas import SolveJobStatus
+from openconstraint_mcp.schemas.minizinc import SolveJobStatus
 
 pytestmark = pytest.mark.integration
 

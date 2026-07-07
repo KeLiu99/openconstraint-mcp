@@ -3,7 +3,7 @@ from __future__ import annotations
 import pytest
 
 from openconstraint_mcp.minizinc.stream import _parse_solve_stream
-from openconstraint_mcp.schemas import SolveStatus
+from openconstraint_mcp.schemas.minizinc import SolveStatus
 from tests.minizinc.helpers import (
     STREAM_ERROR,
     STREAM_OPTIMAL_MULTI,

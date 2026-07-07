@@ -18,7 +18,7 @@ from openconstraint_mcp.minizinc.core import (
     solve_model_path,
 )
 from openconstraint_mcp.runtime import RuntimeMissingError
-from openconstraint_mcp.schemas import (
+from openconstraint_mcp.schemas.minizinc import (
     CheckResult,
     ModelInspectionResult,
     SolverCapabilities,

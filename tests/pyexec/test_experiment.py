@@ -14,7 +14,7 @@ from openconstraint_mcp.pyexec.experiment import (
     MAX_CPSAT_EXPERIMENT_WALL_CLOCK_MS,
     run_cpsat_python_experiment,
 )
-from openconstraint_mcp.schemas import (
+from openconstraint_mcp.schemas.cpsat import (
     CpsatCheckerReport,
     CpsatPythonExperimentAttempt,
     CpsatPythonResult,

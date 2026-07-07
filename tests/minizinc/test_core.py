@@ -37,16 +37,18 @@ from openconstraint_mcp.minizinc.core import (
     solver_supports_num_solutions,
 )
 from openconstraint_mcp.runtime import RuntimeMissingError
-from openconstraint_mcp.schemas import (
+from openconstraint_mcp.schemas.minizinc import (
     CheckResult,
     ModelInspectionResult,
-    PortfolioAttempt,
-    PortfolioSolveControls,
-    PortfolioSolveResult,
     SolverCapabilities,
     SolveResult,
     SolverInfo,
     SolverList,
+)
+from openconstraint_mcp.schemas.portfolio import (
+    PortfolioAttempt,
+    PortfolioSolveControls,
+    PortfolioSolveResult,
 )
 from openconstraint_mcp.shared.save_target import EXPERIMENT_LOG_FILENAME, text_sha256
 from tests.minizinc.helpers import (

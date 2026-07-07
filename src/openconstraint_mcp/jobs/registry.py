@@ -44,7 +44,7 @@ from ..minizinc.core import (
 # D1.9 invariant ("result present iff state in this set") and schemas owns it, so
 # _finalize and the SolveJobStatus validator can never drift apart.
 # noinspection PyProtectedMember
-from ..schemas import (
+from ..schemas.minizinc import (
     _RESULT_BEARING_STATES,
     JobState,
     SolveJobStatus,

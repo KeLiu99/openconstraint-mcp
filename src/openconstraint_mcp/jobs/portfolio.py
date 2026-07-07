@@ -30,15 +30,13 @@ from ..minizinc.core import (
     _resolve_capability_map,
     _validate_solver_capabilities,
 )
-from ..schemas import (
-    JobState,
+from ..schemas.minizinc import JobState, SolveJobStatus, SolveResult
+from ..schemas.portfolio import (
     PortfolioAttempt,
     PortfolioAttemptState,
     PortfolioSolveControls,
     PortfolioSolveResult,
     PortfolioStatus,
-    SolveJobStatus,
-    SolveResult,
 )
 from ..shared.save_target import text_sha256
 

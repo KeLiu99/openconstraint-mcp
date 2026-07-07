@@ -11,7 +11,7 @@ from __future__ import annotations
 import pytest
 
 from openconstraint_mcp.pyexec.experiment import run_cpsat_python_experiment
-from openconstraint_mcp.schemas import CpsatPythonExperimentAttempt
+from openconstraint_mcp.schemas.cpsat import CpsatPythonExperimentAttempt
 
 # maximize x + y subject to x + 2y <= 10, x,y in [0, 10]; unique optimum x=10, y=0.
 _BASELINE = """

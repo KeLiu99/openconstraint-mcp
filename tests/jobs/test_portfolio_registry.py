@@ -17,7 +17,8 @@ import pytest
 
 from openconstraint_mcp.jobs.portfolio_registry import PortfolioJobRegistry
 from openconstraint_mcp.jobs.registry import JobRegistry
-from openconstraint_mcp.schemas import PortfolioSolveControls, PortfolioSolveResult, SolveResult
+from openconstraint_mcp.schemas.minizinc import SolveResult
+from openconstraint_mcp.schemas.portfolio import PortfolioSolveControls, PortfolioSolveResult
 from openconstraint_mcp.shared.job_errors import JobRejectedError
 
 _TERMINAL = {"succeeded", "cancelled"}

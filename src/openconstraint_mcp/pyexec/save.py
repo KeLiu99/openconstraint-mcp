@@ -13,14 +13,13 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-from ..schemas import (
+from ..schemas.artifacts import SavedArtifactRole, SavedModelArtifact
+from ..schemas.cpsat import (
     CpsatCheckerReport,
     CpsatExpectation,
     CpsatPythonExperimentResult,
     CpsatPythonResult,
     CpsatVerificationLevel,
-    SavedArtifactRole,
-    SavedModelArtifact,
     SaveVerifiedPythonResult,
 )
 from ..shared.childproc import ChildProcessTracker

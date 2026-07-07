@@ -14,7 +14,7 @@ from collections.abc import Callable
 from importlib import metadata
 from pathlib import Path
 
-from ..schemas import SavedModelArtifact
+from ..schemas.artifacts import SavedModelArtifact
 
 # The manifest doubles as the managed-directory marker: only a directory whose
 # marker parses (see _prior_manifest_filenames) may ever be overwritten.

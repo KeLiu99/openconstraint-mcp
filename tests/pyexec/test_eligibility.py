@@ -5,7 +5,7 @@ from __future__ import annotations
 import pytest
 
 from openconstraint_mcp.pyexec.eligibility import diagnostic_incumbent_eligibility
-from openconstraint_mcp.schemas import CpsatPythonResult, CpsatStatus
+from openconstraint_mcp.schemas.cpsat import CpsatPythonResult, CpsatStatus
 
 
 def _result(status: CpsatStatus, solution: dict | None) -> CpsatPythonResult:

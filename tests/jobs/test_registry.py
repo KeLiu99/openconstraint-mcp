@@ -7,7 +7,7 @@ from typing import Any
 import pytest
 
 from openconstraint_mcp.jobs.registry import JobRegistry, SolveRequest
-from openconstraint_mcp.schemas import (
+from openconstraint_mcp.schemas.minizinc import (
     SolverCapabilities,
     SolveResult,
     SolverInfo,

@@ -4,7 +4,7 @@ import re
 from collections.abc import Iterator
 from pathlib import Path
 
-from ..schemas import UnsatCoreConstraint
+from ..schemas.minizinc import UnsatCoreConstraint
 
 
 def _slice_source(model: str, sl: int, sc: int, el: int, ec: int) -> str:

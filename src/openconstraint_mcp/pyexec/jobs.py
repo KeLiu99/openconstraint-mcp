@@ -21,7 +21,7 @@ from subprocess import Popen
 from typing import cast
 from uuid import uuid4
 
-from ..schemas import (
+from ..schemas.cpsat import (
     _CPSAT_RESULT_BEARING_STATES,
     CpsatCheckerReport,
     CpsatJobState,

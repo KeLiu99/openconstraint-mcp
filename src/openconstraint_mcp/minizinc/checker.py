@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 from typing import Any
 
-from ..schemas import SolutionCheck
+from ..schemas.minizinc import SolutionCheck
 
 # MiniZinc's `--solution-checker` emits one `{"type":"checker"}` object per
 # produced solution, immediately BEFORE that solution, on the same `--json-stream`
