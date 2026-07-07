@@ -4,7 +4,8 @@ from typing import Literal, cast
 
 from pydantic import BaseModel, Field, model_validator
 
-from .minizinc import CheckerStatus, JobState, SolveResult, SolveStatus
+from .job_state import JobState
+from .minizinc import CheckerStatus, SolveResult, SolveStatus
 
 # One portfolio attempt's lifecycle as the portfolio observed it. `submitted`/
 # `running` are non-terminal (the poll budget can return while an attempt is still

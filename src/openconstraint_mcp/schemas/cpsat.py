@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import math
-from typing import Literal, cast
+from typing import Literal
 
 from pydantic import (
     BaseModel,
@@ -14,6 +14,7 @@ from pydantic import (
 )
 
 from .artifacts import SavedModelArtifact
+from .job_state import RESULT_BEARING_STATES, JobState
 
 # ---------------------------------------------------------------------------
 # CP-SAT Python executor output models (moved from pyexec/core.py per D7 so
@@ -44,16 +45,8 @@ class CpsatPythonResult(BaseModel):
     duration_ms: int
 
 
-# A background CP-SAT job's lifecycle state. Mirrors JobState; result-bearing
-# set is {succeeded, timeout} — same invariant as SolveJobStatus (D3).
-CpsatJobState = Literal["queued", "running", "succeeded", "failed", "timeout", "cancelled"]
-_CPSAT_RESULT_BEARING_STATES: frozenset[CpsatJobState] = cast(
-    "frozenset[CpsatJobState]", frozenset({"succeeded", "timeout"})
-)
-
-
-def cpsat_job_state_for_result(result: CpsatPythonResult) -> CpsatJobState:
-    """Map a produced ``CpsatPythonResult`` to its terminal ``CpsatJobState`` (D3).
+def cpsat_job_state_for_result(result: CpsatPythonResult) -> JobState:
+    """Map a produced ``CpsatPythonResult`` to its terminal ``JobState`` (D3).
 
     ``timeout`` → ``timeout`` (result-bearing; partial recovered).
     All other statuses — including ``error`` — → ``succeeded``: ``status="error"``
@@ -123,7 +116,7 @@ class CpsatPythonJobStatus(BaseModel):
     """
 
     job_id: str
-    state: CpsatJobState
+    state: JobState
     timeout_ms: int
     submitted_at_ms: int
     started_at_ms: int | None = None
@@ -138,7 +131,7 @@ class CpsatPythonJobStatus(BaseModel):
     @model_validator(mode="after")
     def _result_presence_matches_state(self) -> CpsatPythonJobStatus:
         has_result = self.result is not None
-        expects_result = self.state in _CPSAT_RESULT_BEARING_STATES
+        expects_result = self.state in RESULT_BEARING_STATES
         if has_result and not expects_result:
             raise ValueError(
                 f"CpsatPythonJobStatus state={self.state!r} must not carry a result "

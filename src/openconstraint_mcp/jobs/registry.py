@@ -40,25 +40,14 @@ from ..minizinc.core import (
     solve_model_cancellable,
 )
 
-# _RESULT_BEARING_STATES is imported, not re-declared: it is the load-bearing
-# D1.9 invariant ("result present iff state in this set") and schemas owns it, so
-# _finalize and the SolveJobStatus validator can never drift apart.
-# noinspection PyProtectedMember
-from ..schemas.minizinc import (
-    _RESULT_BEARING_STATES,
-    JobState,
-    SolveJobStatus,
-    SolveResult,
-    job_state_for_result,
-)
+# RESULT_BEARING_STATES/TERMINAL_STATES are imported, not re-declared: they are
+# the load-bearing D1.9 invariant ("result present iff state in this set") and
+# schemas.job_state owns it, so _finalize and the SolveJobStatus validator can
+# never drift apart.
+from ..schemas.job_state import RESULT_BEARING_STATES, TERMINAL_STATES, JobState
+from ..schemas.minizinc import SolveJobStatus, SolveResult, job_state_for_result
 from ..shared.job_errors import JobRejectedError, exception_summary, now_ms
 from ..shared.proc import terminate_process_tree as _terminate_process_tree
-
-# States with no further transitions (jobs-only; the result-bearing subset of
-# these is _RESULT_BEARING_STATES, imported from schemas).
-_TERMINAL_STATES: frozenset[JobState] = cast(
-    "frozenset[JobState]", frozenset({"succeeded", "failed", "timeout", "cancelled"})
-)
 
 
 @dataclass(frozen=True)
@@ -247,7 +236,7 @@ class JobRegistry:
         """
         with self._lock:
             record = self._require_record(job_id)
-            if record.state in _TERMINAL_STATES:
+            if record.state in TERMINAL_STATES:
                 return self._to_status(record)
             record.cancel_requested = True
             future = record.future
@@ -296,7 +285,7 @@ class JobRegistry:
             # child the instant it launches, so wait=True joins promptly instead of
             # blocking on the full solve timeout.
             for record in self._records.values():
-                if record.state not in _TERMINAL_STATES:
+                if record.state not in TERMINAL_STATES:
                     record.cancel_requested = True
             records = list(self._records.values())
         # A pending job's future.cancel() succeeds, so its worker will never run to
@@ -311,7 +300,7 @@ class JobRegistry:
             handles = [
                 cast("Popen[str]", r.handle)
                 for r in self._records.values()
-                if r.handle is not None and r.state not in _TERMINAL_STATES
+                if r.handle is not None and r.state not in TERMINAL_STATES
             ]
         for handle in handles:
             _terminate_process_tree(handle)
@@ -360,7 +349,7 @@ class JobRegistry:
         # `elapsed_ms` is frozen at finalize for terminal jobs; for a started-but-
         # running job it is derived from `started_at_ms` on each read so it advances
         # (a `running` job reports `state` + `elapsed_ms` — README / SolveJobStatus).
-        if record.state in _TERMINAL_STATES:
+        if record.state in TERMINAL_STATES:
             elapsed_ms = record.elapsed_ms
         elif record.started_at_ms is not None:
             elapsed_ms = max(now_ms() - record.started_at_ms, 0)
@@ -388,14 +377,14 @@ class JobRegistry:
     ) -> None:
         # Caller holds the lock. Idempotent against a late cancel: a record already
         # terminal is left untouched.
-        if record.state in _TERMINAL_STATES:
+        if record.state in TERMINAL_STATES:
             return
         now = now_ms()
         record.state = state
         record.finished_at_ms = now
         if record.started_at_ms is not None:
             record.elapsed_ms = max(now - record.started_at_ms, 0)
-        record.result = result if state in _RESULT_BEARING_STATES else None
+        record.result = result if state in RESULT_BEARING_STATES else None
         record.message = message
         self._in_flight -= 1
         self._terminal_order.append(record.job_id)

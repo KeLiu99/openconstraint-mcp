@@ -1,10 +1,11 @@
 from __future__ import annotations
 
-from typing import Any, Literal, cast
+from typing import Any, Literal
 
 from pydantic import BaseModel, Field, model_validator
 
 from .artifacts import SavedModelArtifact
+from .job_state import RESULT_BEARING_STATES, JobState
 
 
 class SolverCapabilities(BaseModel):
@@ -122,20 +123,6 @@ class SolveResult(BaseModel):
     checker: CheckerReport | None = None
 
 
-# A background solve job's lifecycle state. `queued`/`running` are non-terminal;
-# `succeeded`/`failed`/`timeout`/`cancelled` are terminal. See `job_state_for_result`
-# and `SolveJobStatus` for the result-presence invariant (D1.9).
-JobState = Literal["queued", "running", "succeeded", "failed", "timeout", "cancelled"]
-# The terminal states that carry a produced `SolveResult`. The load-bearing D1.9
-# invariant: a `SolveJobStatus` has a `result` IFF its state is one of these
-# (`result present ⇔ state ∈ {succeeded, timeout}`). For `failed` this is one-way
-# only — `failed ⇒ result is None`, but `result is None` also holds for
-# `queued`/`running`/`cancelled`.
-_RESULT_BEARING_STATES: frozenset[JobState] = cast(
-    "frozenset[JobState]", frozenset({"succeeded", "timeout"})
-)
-
-
 def job_state_for_result(result: SolveResult) -> JobState:
     """Map a produced ``SolveResult`` to its terminal ``JobState`` (D1.9).
 
@@ -189,7 +176,7 @@ class SolveJobStatus(BaseModel):
     @model_validator(mode="after")
     def _result_presence_matches_state(self) -> SolveJobStatus:
         has_result = self.result is not None
-        expects_result = self.state in _RESULT_BEARING_STATES
+        expects_result = self.state in RESULT_BEARING_STATES
         if has_result and not expects_result:
             raise ValueError(
                 f"SolveJobStatus state={self.state!r} must not carry a result "

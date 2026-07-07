@@ -22,13 +22,12 @@ from typing import cast
 from uuid import uuid4
 
 from ..schemas.cpsat import (
-    _CPSAT_RESULT_BEARING_STATES,
     CpsatCheckerReport,
-    CpsatJobState,
     CpsatPythonJobStatus,
     CpsatPythonResult,
     cpsat_job_state_for_result,
 )
+from ..schemas.job_state import RESULT_BEARING_STATES, TERMINAL_STATES, JobState
 from ..shared.job_errors import JobRejectedError, exception_summary, now_ms
 from ..shared.proc import terminate_process_tree as _terminate_process_tree
 from .checker import run_checker
@@ -44,11 +43,6 @@ from .core import (
     validate_checker_args,
 )
 from .eligibility import diagnostic_incumbent_eligibility
-
-_TERMINAL_STATES: frozenset[CpsatJobState] = cast(
-    "frozenset[CpsatJobState]",
-    frozenset({"succeeded", "failed", "timeout", "cancelled"}),
-)
 
 
 @dataclass(frozen=True)
@@ -88,7 +82,7 @@ class _CpsatJobRecord:
     job_id: str
     request: _CpsatJobRequest
     submitted_at_ms: int
-    state: CpsatJobState
+    state: JobState
     started_at_ms: int | None = None
     finished_at_ms: int | None = None
     elapsed_ms: int | None = None
@@ -220,7 +214,7 @@ class CpsatJobRegistry:
         """
         with self._lock:
             record = self._require_record(job_id)
-            if record.state in _TERMINAL_STATES:
+            if record.state in TERMINAL_STATES:
                 return self._to_status(record)
             record.cancel_requested = True
             future = record.future
@@ -238,7 +232,7 @@ class CpsatJobRegistry:
         """Terminate running children and tear down the worker pool (lifespan exit)."""
         with self._lock:
             for record in self._records.values():
-                if record.state not in _TERMINAL_STATES:
+                if record.state not in TERMINAL_STATES:
                     record.cancel_requested = True
             records = list(self._records.values())
         for record in records:
@@ -250,7 +244,7 @@ class CpsatJobRegistry:
             handles = [
                 cast("Popen[str]", r.handle)
                 for r in self._records.values()
-                if r.handle is not None and r.state not in _TERMINAL_STATES
+                if r.handle is not None and r.state not in TERMINAL_STATES
             ]
         for handle in handles:
             _terminate_process_tree(handle)
@@ -289,7 +283,7 @@ class CpsatJobRegistry:
 
     @staticmethod
     def _to_status(record: _CpsatJobRecord) -> CpsatPythonJobStatus:
-        if record.state in _TERMINAL_STATES:
+        if record.state in TERMINAL_STATES:
             elapsed_ms = record.elapsed_ms
         elif record.started_at_ms is not None:
             elapsed_ms = max(now_ms() - record.started_at_ms, 0)
@@ -313,21 +307,21 @@ class CpsatJobRegistry:
     def _finalize(
         self,
         record: _CpsatJobRecord,
-        state: CpsatJobState,
+        state: JobState,
         result: CpsatPythonResult | None,
         message: str | None,
         *,
         checker_report: CpsatCheckerReport | None = None,
         checker_skipped_reason: str | None = None,
     ) -> None:
-        if record.state in _TERMINAL_STATES:
+        if record.state in TERMINAL_STATES:
             return
         now = now_ms()
         record.state = state
         record.finished_at_ms = now
         if record.started_at_ms is not None:
             record.elapsed_ms = max(now - record.started_at_ms, 0)
-        result_bearing = state in _CPSAT_RESULT_BEARING_STATES
+        result_bearing = state in RESULT_BEARING_STATES
         record.result = result if result_bearing else None
         # Checker outcomes ride only on result-bearing states — a cancelled or
         # failed job discards them, matching the status model's invariant.
