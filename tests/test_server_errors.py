@@ -8,11 +8,14 @@ import pytest
 
 from openconstraint_mcp.minizinc.core import MiniZincExecutionError
 from openconstraint_mcp.runtime import RuntimeMissingError
+from openconstraint_mcp.schemas.cpsat import CpsatPythonExperimentAttempt
 
 # Tests deliberately white-box server internals, which are private by design.
 # noinspection PyProtectedMember
 from openconstraint_mcp.server import (
     _as_mcp_error,
+    _classify_domain_error,
+    _translated_error,
     create_mcp_server,
 )
 from openconstraint_mcp.shared.job_errors import JobRejectedError
@@ -57,7 +60,9 @@ def test_as_mcp_error_translates_default_domain_exceptions(exc: Exception) -> No
         tool()
 
     assert type(exc_info.value) is RuntimeError
-    assert str(exc_info.value) == str(exc)
+    # The original message is always preserved; a classifiable pre-result error
+    # additionally gains a `Diagnostic: <category> — …` first line.
+    assert str(exc) in str(exc_info.value)
     assert exc_info.value.__cause__ is exc
 
 
@@ -121,7 +126,7 @@ async def test_as_mcp_error_translates_domain_exception_from_async_tool() -> Non
         await tool()
 
     assert type(exc_info.value) is RuntimeError
-    assert str(exc_info.value) == str(boom)
+    assert str(boom) in str(exc_info.value)
     assert exc_info.value.__cause__ is boom
 
 
@@ -346,3 +351,127 @@ def test_submit_solve_job_translates_capability_gate_runtime_error_with_cause(
     assert type(exc_info.value) is RuntimeError
     assert "install-runtime" in str(exc_info.value)
     assert exc_info.value.__cause__ is boom
+
+
+# --- Stage 2: structured diagnostic on pre-result MCP errors ----------------
+#
+# The mcp SDK's tool-exception path surfaces only the message string, so the
+# structured contract rides in a documented `Diagnostic: <category> — …` first
+# line (see server._translated_error). These tests pin the classifier and prove
+# the contract reaches clients through the real MCP tool path.
+
+
+def test_classify_runtime_missing() -> None:
+    diag = _classify_domain_error(RuntimeMissingError("runtime not found"))
+    assert diag is not None
+    assert diag.category == "runtime_missing"
+
+
+def test_classify_unsupported_control() -> None:
+    diag = _classify_domain_error(
+        ValueError("solver 'cp-sat' does not support free_search (the -f flag).")
+    )
+    assert diag is not None
+    assert diag.category == "unsupported_feature"
+
+
+def test_classify_invalid_save_target() -> None:
+    diag = _classify_domain_error(ValueError("target_dir must be an absolute path: rel"))
+    assert diag is not None
+    assert diag.category == "invalid_save_target"
+
+
+def test_classify_refusing_to_overwrite_is_invalid_save_target() -> None:
+    diag = _classify_domain_error(
+        ValueError("refusing to overwrite the prior saved model at /x; pass overwrite=true")
+    )
+    assert diag is not None
+    assert diag.category == "invalid_save_target"
+
+
+def test_classify_generic_value_error_is_invalid_request() -> None:
+    diag = _classify_domain_error(ValueError("model must not be empty"))
+    assert diag is not None
+    assert diag.category == "invalid_request"
+
+
+def test_classify_experiment_budget_is_invalid_request() -> None:
+    diag = _classify_domain_error(
+        ValueError("projected experiment budget 300000 ms exceeds MAX_CPSAT_EXPERIMENT...")
+    )
+    assert diag is not None
+    assert diag.category == "invalid_request"
+
+
+@pytest.mark.parametrize("exc", [MiniZincExecutionError("corrupt"), JobRejectedError("queue full")])
+def test_classify_non_prerequest_errors_pass_through(exc: Exception) -> None:
+    # Runtime corruption and transient capacity are not client-repairable input
+    # states, so they carry no Diagnostic and keep their verbatim message.
+    assert _classify_domain_error(exc) is None
+
+
+def test_translated_error_leads_with_diagnostic_line() -> None:
+    err = _translated_error(RuntimeMissingError("runtime not found; run install-runtime"))
+    assert str(err).startswith("Diagnostic: runtime_missing — runtime not found")
+
+
+def test_translated_error_preserves_multiline_detail() -> None:
+    err = _translated_error(ValueError("first line\nsecond line of detail"))
+    lines = str(err).splitlines()
+    assert lines[0] == "Diagnostic: invalid_request — first line"
+    assert lines[1] == "second line of detail"
+
+
+def test_translated_error_unclassified_stays_verbatim() -> None:
+    err = _translated_error(MiniZincExecutionError("bad config"))
+    assert str(err) == "bad config"
+    assert not str(err).startswith("Diagnostic:")
+
+
+@pytest.mark.asyncio
+async def test_tool_malformed_model_path_exposes_invalid_request(tmp_path: Path) -> None:
+    # Required through-the-tool proof: a nonexistent model_path raises ValueError
+    # before the runtime gate, and the client sees the invalid_request contract.
+    fn = _tool_fn("solve_minizinc_files")
+    with pytest.raises(RuntimeError) as exc_info:
+        await fn(model_path=str(tmp_path / "nope.mzn"))
+    assert str(exc_info.value).startswith("Diagnostic: invalid_request — ")
+    assert "does not exist" in str(exc_info.value)
+
+
+@pytest.mark.asyncio
+async def test_tool_relative_target_dir_exposes_invalid_save_target(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr("openconstraint_mcp.minizinc.core.subprocess.Popen", _no_subprocess)
+    fn = _tool_fn("save_verified_minizinc_model")
+    with pytest.raises(RuntimeError) as exc_info:
+        await fn(model="solve satisfy;", target_dir="relative/project")
+    assert str(exc_info.value).startswith("Diagnostic: invalid_save_target — ")
+
+
+def test_tool_runtime_missing_exposes_runtime_missing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # A gated control makes submit resolve capabilities via list_solvers; an
+    # uninstalled runtime raises RuntimeMissingError before any job exists.
+    def _raise() -> object:
+        raise RuntimeMissingError("Managed MiniZinc runtime not found. Run install-runtime.")
+
+    monkeypatch.setattr("openconstraint_mcp.minizinc.core.list_solvers", _raise)
+    fn = _tool_fn("submit_solve_job")
+    with pytest.raises(RuntimeError) as exc_info:
+        fn(model="solve satisfy;", free_search=True)
+    assert str(exc_info.value).startswith("Diagnostic: runtime_missing — ")
+
+
+@pytest.mark.asyncio
+async def test_tool_experiment_budget_exposes_invalid_request() -> None:
+    # A per-attempt budget past the wall-clock cap is rejected before any child
+    # runs; the client sees invalid_request through the experiment tool.
+    fn = _tool_fn("run_cpsat_python_experiment")
+    attempt = CpsatPythonExperimentAttempt(source="print('x')")
+    with pytest.raises(RuntimeError) as exc_info:
+        await fn(attempts=[attempt], default_timeout_ms=10_000_000)
+    assert str(exc_info.value).startswith("Diagnostic: invalid_request — ")
+    assert "budget" in str(exc_info.value)

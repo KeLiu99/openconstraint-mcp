@@ -106,6 +106,13 @@ Otherwise:
    workflow, or tool names you used unless the user explicitly asks for
    those implementation details. Read the fields rather than guessing, and
    always cover:
+   - the `diagnostic` first when present: `diagnostic.category` is a stable
+     enum (`infeasible`, `unbounded`, `timeout_no_incumbent`,
+     `timeout_with_incumbent`, `checker_failed`, `syntax_or_compile_error`,
+     `missing_data`, `type_error`, …) you branch on before reading raw
+     `stdout`/`stderr`. It is `null` on a clean success. Treat `status` and
+     `diagnostic.category` as the primary signals and stdout/stderr/transcripts
+     as supporting evidence.
    - the `status`, in plain language: distinguish a proven-optimal solution
      (`optimal`) from a feasible-but-unproven one (`satisfied`), and both
      from `unsatisfiable`, `unbounded`, `unknown`, `error`, and `timeout`.
@@ -273,9 +280,15 @@ User problem:
    locally in a child process (not remote, not sandboxed) and returns a
    `CpsatPythonResult` with `status`, `solution`, `objective`,
    `best_objective_bound` (diagnostic only — see step 3), `stdout`,
-   `stderr`, `timed_out`, `truncated`, and `duration_ms`.
+   `stderr`, `timed_out`, `truncated`, `duration_ms`, and a structured
+   `diagnostic` (`null` on a clean success).
 
 5. Present the result clearly:
+   - Read `diagnostic` first when present: `diagnostic.category` is a stable
+     enum (`infeasible`, `timeout_no_incumbent`, `timeout_with_incumbent`,
+     `output_truncated`, `child_process_error`, `checker_failed`, …) to branch
+     on before scraping raw `stdout`/`stderr`. Treat it and `status` as the
+     primary signals, the raw streams as supporting evidence.
    - Distinguish `optimal` (proven best) from `feasible` (valid but
      unproven optimal). Never describe a `feasible` result as optimal.
    - For `infeasible` or `error`, say so plainly; point at `stderr` on

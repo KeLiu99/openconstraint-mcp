@@ -16,7 +16,22 @@ from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from ..schemas.cpsat import CpsatPythonExperimentResult
+    from ..schemas.diagnostics import Diagnostic
     from ..schemas.minizinc import SaveVerifiedModelResult, SolveResult, SolverList
+
+
+def _diagnostic_prefix(diagnostic: Diagnostic | None) -> str:
+    """Lead model-visible text with a stable ``Diagnostic:`` line, or nothing.
+
+    A client can branch on ``structuredContent``'s ``diagnostic.category``; this
+    line makes the same signal visible in the prose the model reads, so a
+    non-clean outcome is never buried below stdout/stderr. Clean successes
+    (``diagnostic is None``) add no line.
+    """
+    if diagnostic is None:
+        return ""
+    return f"Diagnostic: {diagnostic.category} — {diagnostic.message}\n\n"
+
 
 STATS_PRESENTATION_REQUIREMENT = (
     "Final answer requirement: copy the entire Statistics section below into "
@@ -85,11 +100,12 @@ def _format_solve_result_content(result: SolveResult) -> str:
         lines.extend([f"- {key}: {result.statistics[key]}" for key in (preferred + others)])
 
     solve_text = "\n".join(lines)
+    prefix = _diagnostic_prefix(result.diagnostic)
     if result.checker is None:
-        return solve_text
+        return prefix + solve_text
 
     violations = sum(1 for check in result.checker.checks if check.violation)
-    return "\n".join(
+    return prefix + "\n".join(
         [
             f"Checker status: {result.checker.status}",
             f"Solve status: {result.status}",
@@ -123,14 +139,15 @@ def _format_save_result_content(result: SaveVerifiedModelResult) -> str:
         )
     lines.extend(["", f"Check status: {result.check.status}"])
 
+    prefix = _diagnostic_prefix(result.diagnostic)
     solve = result.solve
     if solve is None:
-        return "\n".join(lines)
+        return prefix + "\n".join(lines)
 
     lines.append(f"Solve status: {solve.status}")
     if solve.checker is not None:
         lines.append(f"Checker status: {solve.checker.status}")
-    return "\n".join(lines)
+    return prefix + "\n".join(lines)
 
 
 def _format_cpsat_experiment_content(result: CpsatPythonExperimentResult) -> str:
@@ -185,7 +202,7 @@ def _format_cpsat_experiment_content(result: CpsatPythonExperimentResult) -> str
         lines.append("")
         lines.append("Warnings:")
         lines.extend(f"- {w}" for w in result.warnings)
-    return "\n".join(lines)
+    return _diagnostic_prefix(result.diagnostic) + "\n".join(lines)
 
 
 def _format_solver_list_content(result: SolverList) -> str:

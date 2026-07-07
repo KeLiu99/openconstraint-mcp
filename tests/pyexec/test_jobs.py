@@ -505,6 +505,8 @@ def test_checker_infrastructure_exception_preserves_solver_result(
     assert status.result.status == "optimal"
     assert status.checker is not None
     assert status.checker.status == "error"
+    assert status.checker.diagnostic is not None
+    assert status.checker.diagnostic.category == "checker_failed"
     assert any("tempdir vanished" in e for e in status.checker.errors)
 
 

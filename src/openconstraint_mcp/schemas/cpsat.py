@@ -14,6 +14,7 @@ from pydantic import (
 )
 
 from .artifacts import SavedModelArtifact
+from .diagnostics import Diagnostic
 from .job_state import RESULT_BEARING_STATES, JobState
 
 # ---------------------------------------------------------------------------
@@ -43,6 +44,7 @@ class CpsatPythonResult(BaseModel):
     timed_out: bool
     truncated: bool
     duration_ms: int
+    diagnostic: Diagnostic | None = None
 
 
 def cpsat_job_state_for_result(result: CpsatPythonResult) -> JobState:
@@ -85,6 +87,7 @@ class CpsatCheckerReport(BaseModel):
     duration_ms: int
     timed_out: bool
     truncated: bool
+    diagnostic: Diagnostic | None = None
 
 
 class CpsatPythonJobStatus(BaseModel):
@@ -127,6 +130,7 @@ class CpsatPythonJobStatus(BaseModel):
     checker: CpsatCheckerReport | None = None
     checker_skipped_reason: str | None = None
     checker_timeout_ms: int | None = None
+    diagnostic: Diagnostic | None = None
 
     @model_validator(mode="after")
     def _result_presence_matches_state(self) -> CpsatPythonJobStatus:
@@ -226,6 +230,7 @@ class SaveVerifiedPythonResult(BaseModel):
     expectation: CpsatExpectation | None = None
     expectation_passed: bool | None = None
     checker: CpsatCheckerReport | None = None
+    diagnostic: Diagnostic | None = None
 
     @computed_field  # type: ignore[prop-decorator]
     @property
@@ -323,6 +328,7 @@ class CpsatPythonExperimentAttemptResult(BaseModel):
     truncated: bool
     duration_ms: int
     stderr_tail: str | None = None
+    diagnostic: Diagnostic | None = None
 
 
 class CpsatPythonExperimentResult(BaseModel):
@@ -374,6 +380,7 @@ class CpsatPythonExperimentResult(BaseModel):
     checker_sha256: str | None = None
     problem_sha256: str | None = None
     warnings: list[str] = Field(default_factory=list)
+    diagnostic: Diagnostic | None = None
 
     @model_validator(mode="after")
     def _winner_presence_matches_status(self) -> CpsatPythonExperimentResult:

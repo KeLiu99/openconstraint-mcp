@@ -54,6 +54,7 @@ def test_solve_result_round_trips() -> None:
         # An ordinary solve carries no checker; the additive field renders as null,
         # consistent with the other always-emitted nullable fields.
         "checker": None,
+        "diagnostic": None,
     }
 
 
@@ -108,6 +109,7 @@ def test_check_result_round_trips() -> None:
         "stdout": "",
         "stderr": "",
         "elapsed_ms": 12,
+        "diagnostic": None,
     }
 
 
@@ -155,6 +157,7 @@ def test_unsat_core_result_round_trips() -> None:
         "stdout": "MUS: 1 2\n",
         "stderr": "",
         "elapsed_ms": 7,
+        "diagnostic": None,
     }
 
 

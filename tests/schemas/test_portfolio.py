@@ -65,6 +65,7 @@ def test_portfolio_attempt_round_trips() -> None:
         "elapsed_ms": 80,
         "message": None,
         "checker_status": None,
+        "diagnostic": None,
     }
 
 

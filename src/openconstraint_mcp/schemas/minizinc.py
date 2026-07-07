@@ -5,6 +5,7 @@ from typing import Any, Literal
 from pydantic import BaseModel, Field, model_validator
 
 from .artifacts import SavedModelArtifact
+from .diagnostics import Diagnostic
 from .job_state import RESULT_BEARING_STATES, JobState
 
 
@@ -121,6 +122,9 @@ class SolveResult(BaseModel):
     # `--solution-checker`); None for an ordinary solve. The checker validates
     # each produced solution; it never proves optimality (see CheckerReport).
     checker: CheckerReport | None = None
+    # Stage 2 structured diagnostic (None on a clean success). Additive: the
+    # authoritative outcome stays `status`; this is the stable branch point.
+    diagnostic: Diagnostic | None = None
 
 
 def job_state_for_result(result: SolveResult) -> JobState:
@@ -172,6 +176,7 @@ class SolveJobStatus(BaseModel):
     elapsed_ms: int | None = None
     result: SolveResult | None = None
     message: str | None = None
+    diagnostic: Diagnostic | None = None
 
     @model_validator(mode="after")
     def _result_presence_matches_state(self) -> SolveJobStatus:
@@ -203,6 +208,7 @@ class CheckResult(BaseModel):
     stdout: str
     stderr: str
     elapsed_ms: int
+    diagnostic: Diagnostic | None = None
 
 
 SaveStatus = Literal[
@@ -231,6 +237,7 @@ class SaveVerifiedModelResult(BaseModel):
     files: list[SavedModelArtifact] = Field(default_factory=list)
     check: CheckResult
     solve: SolveResult | None = None
+    diagnostic: Diagnostic | None = None
 
 
 # MiniZinc 2.9.7 `--model-interface-only` base-type vocabulary, verified against
@@ -301,6 +308,7 @@ class ModelInspectionResult(BaseModel):
     stdout: str
     stderr: str
     elapsed_ms: int
+    diagnostic: Diagnostic | None = None
 
 
 class UnsatCoreConstraint(BaseModel):
@@ -342,3 +350,4 @@ class UnsatCoreResult(BaseModel):
     stdout: str
     stderr: str
     elapsed_ms: int
+    diagnostic: Diagnostic | None = None
