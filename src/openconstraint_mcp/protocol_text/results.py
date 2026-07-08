@@ -78,7 +78,7 @@ _PREFERRED_STAT_KEYS = (
 )
 
 
-def _format_solve_result_content(result: SolveResult) -> str:
+def format_solve_result_content(result: SolveResult) -> str:
     """Return model-visible solve output that leads with the solution, stats last."""
     lines = [
         f"Status: {result.status}",
@@ -119,7 +119,7 @@ def _format_solve_result_content(result: SolveResult) -> str:
     )
 
 
-def _format_save_result_content(result: SaveVerifiedModelResult) -> str:
+def format_save_result_content(result: SaveVerifiedModelResult) -> str:
     """Return model-visible save output: the outcome and target first, files after.
 
     Deliberately concise — the verifying ``SolveResult`` (solutions, statistics,
@@ -150,7 +150,7 @@ def _format_save_result_content(result: SaveVerifiedModelResult) -> str:
     return prefix + "\n".join(lines)
 
 
-def _format_cpsat_experiment_content(result: CpsatPythonExperimentResult) -> str:
+def format_cpsat_experiment_content(result: CpsatPythonExperimentResult) -> str:
     """Return model-visible experiment output: winner first, then the attempt table.
 
     Concise — the full per-attempt ``CpsatPythonResult`` winner and metadata ride in
@@ -205,7 +205,7 @@ def _format_cpsat_experiment_content(result: CpsatPythonExperimentResult) -> str
     return _diagnostic_prefix(result.diagnostic) + "\n".join(lines)
 
 
-def _format_solver_list_content(result: SolverList) -> str:
+def format_solver_list_content(result: SolverList) -> str:
     """Return model-visible solver inventory: a complete id/name/version table.
 
     Leads with a presentation requirement so a client renders every row instead

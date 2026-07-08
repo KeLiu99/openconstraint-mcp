@@ -200,6 +200,7 @@ def _write_staged_artifacts(
         "managed_by": "openconstraint-mcp",
         "tool_version": _tool_version(),
         "created_at": datetime.now(UTC).isoformat(),
+        "backend": "minizinc",
         "solver": solve.solver,
         "solve_controls": solve_controls,
         "verification": verification,

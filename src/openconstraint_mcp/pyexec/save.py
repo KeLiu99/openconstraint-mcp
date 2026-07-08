@@ -236,6 +236,8 @@ def _write_staged_artifacts(
     seed: int | None,
     config: dict[str, Any] | None,
     experiment_result: CpsatPythonExperimentResult | None,
+    timeout_ms: int,
+    checker_timeout_ms: int | None,
 ) -> list[SavedModelArtifact]:
     texts: list[tuple[SavedArtifactRole, str, str]] = [("model", SCRIPT_FILENAME, source)]
     if problem is not None:
@@ -276,7 +278,10 @@ def _write_staged_artifacts(
         "level": verification_level,
         "reported_status": run_result.status,
         "objective": run_result.objective,
+        "timeout_ms": timeout_ms,
     }
+    if checker_timeout_ms is not None:
+        verification["checker_timeout_ms"] = checker_timeout_ms
     if seed is not None:
         # The saved solution.py is byte-for-byte the client's script: the seed lives
         # in the manifest, not the code. A manual re-run without the env var hits the
@@ -322,6 +327,7 @@ def _write_staged_artifacts(
         "managed_by": "openconstraint-mcp",
         "tool_version": _tool_version(),
         "created_at": datetime.now(UTC).isoformat(),
+        "backend": "cpsat_python",
         "verification": verification,
         "artifacts": [artifact.model_dump(mode="json") for artifact in artifacts],
     }
@@ -485,6 +491,8 @@ def save_verified_cpsat_python(
             seed=seed,
             config=normalized_config,
             experiment_result=experiment_result,
+            timeout_ms=timeout_ms,
+            checker_timeout_ms=checker_timeout_ms,
         )
 
     files, _ = commit_staged_dir(target, overwrite=overwrite, write_files=_writer)

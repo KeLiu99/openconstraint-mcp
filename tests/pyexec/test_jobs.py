@@ -125,6 +125,26 @@ def test_submit_source_echoes_timeout_ms(monkeypatch: pytest.MonkeyPatch) -> Non
         registry.shutdown()
 
 
+def test_submit_source_clears_cpsat_protocol_env_vars(monkeypatch: pytest.MonkeyPatch) -> None:
+    seen: dict[str, object] = {}
+
+    def _fake(source: str, *, on_start: Any, **kw: object) -> CpsatPythonResult:
+        seen["env"] = kw.get("env")
+        return _cpsat_result()
+
+    _patch_run_source(monkeypatch, _fake)
+    registry = CpsatJobRegistry()
+    try:
+        job_id = registry.submit_source("x=1")
+        _wait_until_terminal(registry, job_id)
+        assert seen["env"] == {
+            "OPENCONSTRAINT_MCP_CPSAT_SEED": None,
+            "OPENCONSTRAINT_MCP_CPSAT_CONFIG": None,
+        }
+    finally:
+        registry.shutdown()
+
+
 # --- submit_file happy path -------------------------------------------------
 
 
@@ -145,6 +165,30 @@ def test_submit_file_reaches_succeeded_with_result(
         assert status.state == "succeeded"
         assert status.result is not None
         assert status.result.status == "feasible"
+    finally:
+        registry.shutdown()
+
+
+def test_submit_file_clears_cpsat_protocol_env_vars(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    script = tmp_path / "sol.py"
+    script.write_text("print('x')", encoding="utf-8")
+    seen: dict[str, object] = {}
+
+    def _fake(path: Path, *, on_start: Any, **kw: object) -> CpsatPythonResult:
+        seen["env"] = kw.get("env")
+        return _cpsat_result()
+
+    _patch_run_file(monkeypatch, _fake)
+    registry = CpsatJobRegistry()
+    try:
+        job_id = registry.submit_file(script)
+        _wait_until_terminal(registry, job_id)
+        assert seen["env"] == {
+            "OPENCONSTRAINT_MCP_CPSAT_SEED": None,
+            "OPENCONSTRAINT_MCP_CPSAT_CONFIG": None,
+        }
     finally:
         registry.shutdown()
 

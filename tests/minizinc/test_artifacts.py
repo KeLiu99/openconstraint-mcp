@@ -226,6 +226,7 @@ def test_write_verified_model_dir_manifest_records_provenance(tmp_path: Path) ->
     assert manifest["managed_by"] == "openconstraint-mcp"
     assert "tool_version" in manifest
     datetime.fromisoformat(manifest["created_at"])  # absolute ISO timestamp
+    assert manifest["backend"] == "minizinc"
     assert manifest["solver"] == "cp-sat"
     assert manifest["solve_controls"] == controls
     assert manifest["verification"] == {

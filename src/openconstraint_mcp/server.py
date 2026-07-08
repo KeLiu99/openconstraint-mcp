@@ -4,6 +4,7 @@ import functools
 import inspect
 import os
 import sys
+import tempfile
 from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import AbstractAsyncContextManager, asynccontextmanager
 from importlib import metadata
@@ -71,15 +72,18 @@ from .protocol_text.descriptions import (
 )
 from .protocol_text.prompts import SOLVE_CONSTRAINT_PROBLEM_PROMPT, SOLVE_CPSAT_PYTHON_PROMPT
 from .protocol_text.results import (
-    _format_cpsat_experiment_content,
-    _format_save_result_content,
-    _format_solve_result_content,
-    _format_solver_list_content,
+    format_cpsat_experiment_content,
+    format_save_result_content,
+    format_solve_result_content,
+    format_solver_list_content,
 )
 from .pyexec.core import (
     DEFAULT_PYEXEC_TIMEOUT_MS,
     run_cpsat_python,
     run_cpsat_python_file,
+    seed_config_env,
+    validate_cpsat_random_seed,
+    write_config_file,
 )
 from .pyexec.experiment import run_cpsat_python_experiment
 from .pyexec.jobs import CpsatJobRegistry
@@ -163,7 +167,7 @@ def _log_boot_diagnostic() -> None:
 def _wrap_solve_result(result: SolveResult) -> CallToolResult:
     """Wrap a SolveResult as prose text content plus the full structured output."""
     return CallToolResult(
-        content=[TextContent(type="text", text=_format_solve_result_content(result))],
+        content=[TextContent(type="text", text=format_solve_result_content(result))],
         structuredContent=result.model_dump(mode="json"),
     )
 
@@ -171,7 +175,7 @@ def _wrap_solve_result(result: SolveResult) -> CallToolResult:
 def _wrap_save_result(result: SaveVerifiedModelResult) -> CallToolResult:
     """Wrap a SaveVerifiedModelResult as concise text plus full structured output."""
     return CallToolResult(
-        content=[TextContent(type="text", text=_format_save_result_content(result))],
+        content=[TextContent(type="text", text=format_save_result_content(result))],
         structuredContent=result.model_dump(mode="json"),
     )
 
@@ -179,7 +183,7 @@ def _wrap_save_result(result: SaveVerifiedModelResult) -> CallToolResult:
 def _wrap_cpsat_experiment_result(result: CpsatPythonExperimentResult) -> CallToolResult:
     """Wrap a CpsatPythonExperimentResult as concise text plus full structured output."""
     return CallToolResult(
-        content=[TextContent(type="text", text=_format_cpsat_experiment_content(result))],
+        content=[TextContent(type="text", text=format_cpsat_experiment_content(result))],
         structuredContent=result.model_dump(mode="json"),
     )
 
@@ -187,7 +191,7 @@ def _wrap_cpsat_experiment_result(result: CpsatPythonExperimentResult) -> CallTo
 def _wrap_solver_list(result: SolverList) -> CallToolResult:
     """Wrap a SolverList as a complete-inventory text block plus structured output."""
     return CallToolResult(
-        content=[TextContent(type="text", text=_format_solver_list_content(result))],
+        content=[TextContent(type="text", text=format_solver_list_content(result))],
         structuredContent=result.model_dump(mode="json"),
     )
 
@@ -425,6 +429,35 @@ def _env_int(name: str, default: int, *, minimum: int) -> int:
     if value < minimum:
         raise ValueError(f"{name} must be >= {minimum} (got {value})")
     return value
+
+
+def _run_cpsat_python_file_with_replay(
+    script_path: Path,
+    *,
+    timeout_ms: int,
+    seed: int | None,
+    config: dict[str, Any] | None,
+    tracker: ChildProcessTracker,
+) -> CpsatPythonResult:
+    """Run a CP-SAT Python file, always clearing/setting both protocol env vars.
+
+    Tool-layer replay support for a saved seeded/configured artifact: builds
+    the child env overlay via ``seed_config_env`` so an absent ``seed``/
+    ``config`` explicitly clears ``OPENCONSTRAINT_MCP_CPSAT_SEED``/``_CONFIG``
+    instead of leaking a value the server process happened to inherit. A
+    non-empty ``config`` is written to a temp file kept alive for the run
+    (mirroring the save path's ``TemporaryDirectory`` pattern in
+    ``pyexec/save.py``) and torn down on every exit path.
+    """
+    if config is not None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            config_path = write_config_file(Path(tmp_dir), config)
+            env = seed_config_env(seed=seed, config_path=config_path)
+            return run_cpsat_python_file(
+                script_path, timeout_ms=timeout_ms, tracker=tracker, env=env
+            )
+    env = seed_config_env(seed=seed, config_path=None)
+    return run_cpsat_python_file(script_path, timeout_ms=timeout_ms, tracker=tracker, env=env)
 
 
 def create_mcp_server() -> FastMCP:
@@ -892,9 +925,17 @@ def create_mcp_server() -> FastMCP:
         ctx: Context | None = None,
     ) -> CpsatPythonResult:
         await _status_starting(ctx, status.CPSAT_PYTHON_STAGES)
+        # No MCP-facing seed/config for this inline tool (see module docstring on
+        # `run_cpsat_python`'s `env` param); always clear both protocol env vars so
+        # a value inherited from the server's own launch environment cannot leak
+        # into the child.
         result = await _run_blocking(
             functools.partial(
-                run_cpsat_python, source, timeout_ms=timeout_ms, tracker=child_tracker
+                run_cpsat_python,
+                source,
+                timeout_ms=timeout_ms,
+                tracker=child_tracker,
+                env=seed_config_env(seed=None, config_path=None),
             )
         )
         await _status_finished(ctx, status.CPSAT_PYTHON_STAGES)
@@ -905,14 +946,20 @@ def create_mcp_server() -> FastMCP:
     async def run_cpsat_python_file_tool(
         script_path: str,
         timeout_ms: int = DEFAULT_PYEXEC_TIMEOUT_MS,
+        seed: StrictInt | None = None,
+        config: dict[str, JsonValue] | None = None,
         ctx: Context | None = None,
     ) -> CpsatPythonResult:
         await _status_starting(ctx, status.CPSAT_PYTHON_STAGES)
+        validated_seed = validate_cpsat_random_seed(seed) if seed is not None else None
+        normalized_config: dict[str, Any] | None = config if config else None
         result = await _run_blocking(
             functools.partial(
-                run_cpsat_python_file,
+                _run_cpsat_python_file_with_replay,
                 Path(script_path),
                 timeout_ms=timeout_ms,
+                seed=validated_seed,
+                config=normalized_config,
                 tracker=child_tracker,
             )
         )
