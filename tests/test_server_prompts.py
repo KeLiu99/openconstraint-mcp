@@ -677,6 +677,35 @@ async def test_solve_cpsat_python_prompt_checker_gate_safety_boundary() -> None:
 
 
 @pytest.mark.asyncio
+async def test_solve_cpsat_python_prompt_discourages_replay_config_for_ordinary_solves() -> None:
+    text = await _get_prompt_text("solve_cpsat_python", {"problem": SAMPLE_PROBLEM})
+    normalized = " ".join(text.split()).lower()
+
+    # For a single problem instance, the prompt must steer toward a concrete,
+    # self-contained script over a named scenario resolved via `config` — the
+    # cooperative config protocol is reserved for explicit multi-attempt or
+    # configured experiments, not the default modeling style for a one-off save.
+    assert "single" in normalized and "hardcode" in normalized
+    assert "not the default modeling style" in normalized
+    assert "explicit multi-attempt" in normalized
+
+
+@pytest.mark.asyncio
+async def test_solve_cpsat_python_prompt_documents_file_replay_workflow() -> None:
+    text = await _get_prompt_text("solve_cpsat_python", {"problem": SAMPLE_PROBLEM})
+
+    # The manual replay workflow must route through the existing file tool
+    # instead of promising a dedicated inspect/rerun tool, and must name the
+    # checked-replay limitation plus its save-tool workaround.
+    assert "run_cpsat_python_file" in text
+    assert ".openconstraint-model.json" in text
+    assert "replay-config.json" in text
+    normalized = " ".join(text.split()).lower()
+    assert "reported" in normalized and "level" in normalized
+    assert "save_verified_cpsat_python" in text
+
+
+@pytest.mark.asyncio
 async def test_solve_cpsat_python_prompt_save_step_gated_on_user_request() -> None:
     text = await _get_prompt_text("solve_cpsat_python", {"problem": SAMPLE_PROBLEM})
     normalized = " ".join(text.split()).lower()

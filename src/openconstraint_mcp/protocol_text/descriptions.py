@@ -567,7 +567,11 @@ RUN_CPSAT_PYTHON_DESCRIPTION = (
     "null. For a HARD "
     "instance — status is unknown/timeout, or incumbent quality is unclear — "
     "consider the MiniZinc portfolio path (`submit_portfolio_job`) to race "
-    "multiple formulations, solvers, and seeds for the same problem. " + _CPSAT_CHILD_POSTURE
+    "multiple formulations, solvers, and seeds for the same problem. This tool "
+    "has no `seed`/`config` parameters; it always clears "
+    "`OPENCONSTRAINT_MCP_CPSAT_SEED`/`OPENCONSTRAINT_MCP_CPSAT_CONFIG` for the "
+    "child so a value inherited from the server's own launch environment cannot "
+    "leak in. " + _CPSAT_CHILD_POSTURE
 )
 
 RUN_CPSAT_PYTHON_FILE_DESCRIPTION = (
@@ -585,7 +589,22 @@ RUN_CPSAT_PYTHON_FILE_DESCRIPTION = (
     "The returned CpsatPythonResult has the identical shape (`status`, "
     "`solution`, `objective`, `best_objective_bound`, `stdout`, `stderr`, "
     "`return_code`, `timed_out`, "
-    "`truncated`, `duration_ms`), including `timeout` partial recovery. " + _CPSAT_CHILD_POSTURE
+    "`truncated`, `duration_ms`), including `timeout` partial recovery. "
+    "Optional `seed` (a non-bool integer in the CP-SAT `random_seed` "
+    "signed-int32 range) and `config` (a JSON object) are REPLAY aids for "
+    "re-running a saved seeded/configured artifact through this file tool "
+    "instead of exporting environment variables by hand: `seed` sets "
+    "`OPENCONSTRAINT_MCP_CPSAT_SEED`, and a non-empty `config` is written to a "
+    "temp file whose path is set as `OPENCONSTRAINT_MCP_CPSAT_CONFIG` — the same "
+    "two cooperative, opt-in protocols as `save_verified_cpsat_python`'s "
+    "`seed`/`config`. An empty `config` (`{}`) is identical to omitting it. "
+    "When `seed`/`config` are omitted, both protocol environment variables are "
+    "explicitly cleared for the child rather than left to inherit a stale value "
+    "from the server's own launch environment. This tool has no checker "
+    "parameter: replaying a `checked`-level save this way only re-verifies at "
+    "the `reported` level; for full checked replay, call "
+    "`save_verified_cpsat_python` with the saved source/checker/seed/config and "
+    "a scratch `target_dir`. " + _CPSAT_CHILD_POSTURE
 )
 
 SOLVE_CONSTRAINT_PROBLEM_PROMPT_DESCRIPTION = (

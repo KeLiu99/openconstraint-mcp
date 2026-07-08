@@ -1462,7 +1462,7 @@ async def test_solve_minizinc_files_with_checker_visible_content_includes_statis
     fake_minizinc_binary: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    # The solve portion reuses _format_solve_result_content, so the Statistics
+    # The solve portion reuses format_solve_result_content, so the Statistics
     # section and its copy-entire-section requirement appear verbatim whenever the
     # nested solve carries statistics.
     model_path, checker_path = _write_solve_and_check_inputs(tmp_path)
@@ -2718,6 +2718,28 @@ async def test_run_cpsat_python_routes_to_cpsat_result(
     assert result["solution"] == {"x": 3}
 
 
+@pytest.mark.asyncio
+async def test_run_cpsat_python_clears_both_cpsat_protocol_env_vars(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # This inline tool has no MCP-facing seed/config: it must always clear both
+    # protocol env vars for the child rather than let a value the server process
+    # happens to have inherited from its own launch environment leak in.
+    seen: dict[str, object] = {}
+
+    def _fake(source: str, **kw: object) -> Any:
+        seen["env"] = kw.get("env")
+        return _fake_cpsat_result()
+
+    monkeypatch.setattr("openconstraint_mcp.server.run_cpsat_python", _fake)
+    mcp = create_mcp_server()
+    await mcp.call_tool("run_cpsat_python", {"source": "print('hi')"})
+    assert seen["env"] == {
+        "OPENCONSTRAINT_MCP_CPSAT_SEED": None,
+        "OPENCONSTRAINT_MCP_CPSAT_CONFIG": None,
+    }
+
+
 # --- run_cpsat_python_experiment ---------------------------------------------
 
 
@@ -3076,6 +3098,79 @@ async def test_run_cpsat_python_file_routes_path_to_cpsat_result(
     assert result["solution"] == {"x": 3}
     # The string path is wrapped in a Path before reaching the executor.
     assert seen["script_path"] == Path("/tmp/model.py")
+
+
+@pytest.mark.asyncio
+async def test_run_cpsat_python_file_tool_schema_includes_seed_and_config() -> None:
+    mcp = create_mcp_server()
+    tools = await mcp.list_tools()
+    tool = next(t for t in tools if t.name == "run_cpsat_python_file")
+    props = set(tool.inputSchema["properties"])
+    assert {"seed", "config"} <= props
+
+
+@pytest.mark.asyncio
+async def test_run_cpsat_python_file_seed_replay_passes_seed_env(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    seen: dict[str, object] = {}
+
+    def _fake(script_path: Path, **kw: object) -> Any:
+        seen["env"] = kw.get("env")
+        return _fake_cpsat_result()
+
+    monkeypatch.setattr("openconstraint_mcp.server.run_cpsat_python_file", _fake)
+    mcp = create_mcp_server()
+    await mcp.call_tool(
+        "run_cpsat_python_file", {"script_path": "/tmp/model.py", "seed": 7}
+    )
+    assert seen["env"] == {
+        "OPENCONSTRAINT_MCP_CPSAT_SEED": "7",
+        "OPENCONSTRAINT_MCP_CPSAT_CONFIG": None,
+    }
+
+
+@pytest.mark.asyncio
+async def test_run_cpsat_python_file_config_replay_passes_config_env(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured: dict[str, object] = {}
+
+    def _fake(script_path: Path, **kw: object) -> Any:
+        env = kw.get("env")
+        assert env is not None
+        config_path = Path(env["OPENCONSTRAINT_MCP_CPSAT_CONFIG"])  # type: ignore[index]
+        captured["seed_env"] = env["OPENCONSTRAINT_MCP_CPSAT_SEED"]  # type: ignore[index]
+        captured["config_contents"] = json.loads(config_path.read_text())
+        return _fake_cpsat_result()
+
+    monkeypatch.setattr("openconstraint_mcp.server.run_cpsat_python_file", _fake)
+    mcp = create_mcp_server()
+    await mcp.call_tool(
+        "run_cpsat_python_file",
+        {"script_path": "/tmp/model.py", "config": {"num_workers": 2}},
+    )
+    assert captured["seed_env"] is None
+    assert captured["config_contents"] == {"num_workers": 2}
+
+
+@pytest.mark.asyncio
+async def test_run_cpsat_python_file_without_seed_or_config_clears_both_env_vars(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    seen: dict[str, object] = {}
+
+    def _fake(script_path: Path, **kw: object) -> Any:
+        seen["env"] = kw.get("env")
+        return _fake_cpsat_result()
+
+    monkeypatch.setattr("openconstraint_mcp.server.run_cpsat_python_file", _fake)
+    mcp = create_mcp_server()
+    await mcp.call_tool("run_cpsat_python_file", {"script_path": "/tmp/model.py"})
+    assert seen["env"] == {
+        "OPENCONSTRAINT_MCP_CPSAT_SEED": None,
+        "OPENCONSTRAINT_MCP_CPSAT_CONFIG": None,
+    }
 
 
 # --- CP-SAT background job tool smoke tests ---------------------------------

@@ -113,6 +113,75 @@ def test_save_verified_cpsat_python_manifest_structure(
     assert "solution.py" in artifact_names
 
 
+# (a2b) manifest names the backend so a client can choose replay tooling without guessing
+def test_save_verified_cpsat_python_manifest_records_backend(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from openconstraint_mcp.pyexec.save import save_verified_cpsat_python
+
+    _patch_executor(monkeypatch, _OPTIMAL_RESULT)
+    target = tmp_path / "my_solution"
+    save_verified_cpsat_python(_SCRIPT, target_dir=target)
+
+    manifest = json.loads((target / MANIFEST_FILENAME).read_text())
+    assert manifest["backend"] == "cpsat_python"
+
+
+# (a2c) manifest records the save-time run timeout, always
+def test_save_verified_cpsat_python_manifest_records_timeout_ms(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from openconstraint_mcp.pyexec.save import save_verified_cpsat_python
+
+    _patch_executor(monkeypatch, _OPTIMAL_RESULT)
+    target = tmp_path / "my_solution"
+    save_verified_cpsat_python(_SCRIPT, target_dir=target, timeout_ms=12_345)
+
+    manifest = json.loads((target / MANIFEST_FILENAME).read_text())
+    assert manifest["verification"]["timeout_ms"] == 12_345
+
+
+# (a2d) manifest records an explicit checker_timeout_ms
+def test_save_verified_cpsat_python_manifest_records_explicit_checker_timeout_ms(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from openconstraint_mcp.pyexec.save import save_verified_cpsat_python
+
+    _patch_executor(monkeypatch, _OPTIMAL_RESULT)
+    _patch_checker(monkeypatch, _accepted_report())
+    target = tmp_path / "my_solution"
+
+    save_verified_cpsat_python(
+        _SCRIPT,
+        target_dir=target,
+        checker=_CHECKER_SOURCE,
+        checker_timeout_ms=9_999,
+    )
+
+    manifest = json.loads((target / MANIFEST_FILENAME).read_text())
+    assert manifest["verification"]["checker_timeout_ms"] == 9_999
+
+
+# (a2e) no explicit checker_timeout_ms -> manifest omits the field, matching replay_seed's contract
+def test_save_verified_cpsat_python_manifest_omits_checker_timeout_ms_when_not_supplied(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from openconstraint_mcp.pyexec.save import save_verified_cpsat_python
+
+    _patch_executor(monkeypatch, _OPTIMAL_RESULT)
+    _patch_checker(monkeypatch, _accepted_report())
+    target = tmp_path / "my_solution"
+
+    save_verified_cpsat_python(_SCRIPT, target_dir=target, checker=_CHECKER_SOURCE)
+
+    manifest = json.loads((target / MANIFEST_FILENAME).read_text())
+    assert "checker_timeout_ms" not in manifest["verification"]
+
+
 # (a3) problem.txt written when problem supplied
 def test_save_verified_cpsat_python_writes_problem_txt(
     tmp_path: Path,

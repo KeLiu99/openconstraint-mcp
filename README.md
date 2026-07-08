@@ -602,7 +602,7 @@ produced solution against a checker model without changing result shape:
   | `problem.md` | only when `problem` was passed | the original problem text |
   | `solve-result.json` | always | the verifying `SolveResult` as JSON |
   | `experiment-log.json` | only when `portfolio_result` was passed and the save succeeded | the portfolio's full attempt table (every model/solver/seed tried, statuses, checker verdicts), the race's shared solve controls, plus the winner's index/seed/solver |
-  | `.openconstraint-model.json` | always | manifest: tool version, timestamp, solver, the solve controls used, a verification summary (including a compact experiment-log summary when `portfolio_result` was supplied; `statuses_seen` lists MiniZinc result statuses, while `attempt_states_seen` lists portfolio lifecycle states), and per-file sha256 hashes |
+  | `.openconstraint-model.json` | always | manifest: tool version, timestamp, `backend` (`"minizinc"`), solver, the solve controls used, a verification summary (including a compact experiment-log summary when `portfolio_result` was supplied; `statuses_seen` lists MiniZinc result statuses, while `attempt_states_seen` lists portfolio lifecycle states), and per-file sha256 hashes |
 
   **Overwrite safety (marker-gated).** A brand-new path or an existing empty
   directory is written directly. A non-empty directory is replaced only when
@@ -623,6 +623,15 @@ produced solution against a checker model without changing result shape:
   already failed). The save runs entirely locally: no network, no LLM, no
   telemetry — and it writes only inside (and, transiently while staging,
   beside) the explicit `target_dir`.
+
+  **Reproducing a saved artifact:** there is no dedicated inspect/rerun tool —
+  read `.openconstraint-model.json` directly (it names the `backend` and the
+  `solve_controls` used) and call `solve_minizinc_files` with the saved
+  `model.mzn`/`data.dzn`/`checker.mzc.mzn` paths, `solver`, `timeout_ms`, and
+  the recorded solve controls, then compare the returned `SolveResult` to the
+  saved `solve-result.json`. See [Reproducing a saved CP-SAT
+  artifact](#reproducing-a-saved-cp-sat-artifact) for the CP-SAT Python
+  equivalent.
 
 ### Background solve jobs
 
@@ -957,17 +966,33 @@ server runs it in a **local child process**.
   if none was printed in time. On a clean run the final block (printed after
   `Solve` returns) is the authoritative result.
 
-- **`run_cpsat_python_file(script_path: str, timeout_ms: int = 30000)`** —
-  path-based sibling of `run_cpsat_python`. Pass a local `.py` path instead of
-  pasting the source, so iterating on a file does not mean re-copying it on
-  every call. The script runs with its working directory set to the file's own
-  directory, so a relative `open()` of a sibling data file or `import` of a
-  helper module resolves (mirroring `solve_minizinc_files`). `script_path` is
-  resolved to absolute and validated before any run — a missing path, a
-  non-file, an empty/whitespace-only script, or non-UTF-8 content is rejected
-  with a clear error and nothing runs. Same JSON output contract, output cap,
-  timeout, tree-kill, and `CpsatPythonResult` shape (including timeout partial
+- **`run_cpsat_python_file(script_path: str, timeout_ms: int = 30000, seed:
+  int | None = None, config: dict | None = None)`** — path-based sibling of
+  `run_cpsat_python`. Pass a local `.py` path instead of pasting the source, so
+  iterating on a file does not mean re-copying it on every call. The script
+  runs with its working directory set to the file's own directory, so a
+  relative `open()` of a sibling data file or `import` of a helper module
+  resolves (mirroring `solve_minizinc_files`). `script_path` is resolved to
+  absolute and validated before any run — a missing path, a non-file, an
+  empty/whitespace-only script, or non-UTF-8 content is rejected with a clear
+  error and nothing runs. Same JSON output contract, output cap, timeout,
+  tree-kill, and `CpsatPythonResult` shape (including timeout partial
   recovery) as `run_cpsat_python`.
+
+  `seed` and `config` are REPLAY inputs for re-running a saved seeded/
+  configured artifact through this file tool instead of exporting environment
+  variables by hand — the same two cooperative, opt-in protocols as
+  `save_verified_cpsat_python`'s `seed`/`config`: `seed` sets
+  `OPENCONSTRAINT_MCP_CPSAT_SEED`, and a non-empty `config` is written to a temp
+  file whose path is set as `OPENCONSTRAINT_MCP_CPSAT_CONFIG` (an empty `config`
+  (`{}`) is identical to omitting it). When both are omitted, both protocol
+  env vars are explicitly cleared for the child rather than left to inherit a
+  stale value from the server's own launch environment — the same clearing
+  rule `run_cpsat_python` applies unconditionally, since it has no
+  `seed`/`config` parameters of its own. This tool has no checker parameter,
+  so replaying a `checked`-level save this way re-verifies at the `reported`
+  level only — see [Reproducing a saved CP-SAT
+  artifact](#reproducing-a-saved-cp-sat-artifact) for full checked replay.
 
 - **`save_verified_cpsat_python(source, target_dir, …)`** — re-run `source`
   and persist it only when all supplied save gates pass. Gates run in order
@@ -1008,16 +1033,22 @@ server runs it in a **local child process**.
     `objective`, `stdout`, `stderr`, `timed_out`, `truncated`, `duration_ms`)
 
   The manifest records only a scalar checker summary (status, error count,
-  duration, timed_out, truncated) — no stdout/stderr/errors/details.
+  duration, timed_out, truncated) — no stdout/stderr/errors/details. It also
+  records a top-level `backend` (`"cpsat_python"`) and, under `verification`,
+  the save-time `timeout_ms` (always) and an explicit `checker_timeout_ms`
+  (only when supplied) — enough to choose replay tooling and pace a checked
+  replay without guessing.
 
   Pass `seed` (a non-bool integer in the CP-SAT `random_seed` signed-int32
   range) as a single-run replay aid: the re-run sets
   `OPENCONSTRAINT_MCP_CPSAT_SEED` so a cooperating script uses that seed, and the
-  manifest records it. The save gates are **unchanged** — a `timeout` result
-  still fails the reported gate even with its seed replayed. The saved
-  `solution.py` is byte-for-byte the script and carries only its own seed
-  fallback, so to reproduce a seeded save by hand you must set
-  `OPENCONSTRAINT_MCP_CPSAT_SEED` to the recorded seed.
+  manifest records it as `verification.replay_seed`. The save gates are
+  **unchanged** — a `timeout` result still fails the reported gate even with
+  its seed replayed. The saved `solution.py` is byte-for-byte the script and
+  carries only its own seed fallback, so to reproduce a seeded save by hand
+  you must set `OPENCONSTRAINT_MCP_CPSAT_SEED` to the recorded seed — or use
+  `run_cpsat_python_file`'s `seed`/`config` parameters instead; see
+  [Reproducing a saved CP-SAT artifact](#reproducing-a-saved-cp-sat-artifact).
 
 ### Explicit experiments
 
@@ -1145,6 +1176,35 @@ experiment provenance:
   search, solver version changes, and script-level nondeterminism can still
   produce a different incumbent; the fresh save-time verification run is
   always the authority.
+
+### Reproducing a saved CP-SAT artifact
+
+There is no dedicated inspect/rerun tool: a saved directory is a plain local
+folder, and its manifest is a JSON file a client can read directly.
+
+1. Read `.openconstraint-model.json` in the saved directory. It names the
+   `backend` (`"cpsat_python"`), and — under `verification` — `timeout_ms`,
+   `replay_seed` when the save was seeded, `replay_config_sha256` when it was
+   configured, and `checker_timeout_ms` when one was explicitly supplied.
+2. Call `run_cpsat_python_file` with `script_path` pointing at the saved
+   `solution.py`, `timeout_ms` from the manifest, `seed` from
+   `verification.replay_seed` when present, and — when a `replay-config.json`
+   sibling file exists — its parsed JSON contents as `config`. No manual
+   environment variables are needed; the tool builds the
+   `OPENCONSTRAINT_MCP_CPSAT_SEED`/`OPENCONSTRAINT_MCP_CPSAT_CONFIG` overlay for
+   you.
+3. Compare the returned `CpsatPythonResult` against the manifest's
+   `verification.reported_status`/`objective` and the saved `solution.json`
+   (when the save included a checker).
+
+**Known limitation:** `run_cpsat_python_file` has no checker parameter, so
+replaying a `checked`-level save this way only re-verifies at the `reported`
+level. For full checked replay — re-running every original gate, including
+the checker with the manifest's `verification.checker_timeout_ms` — call
+`save_verified_cpsat_python` again with the saved source (read from
+`solution.py`), checker (read from `checker.py`), `seed`, `config`, and a
+scratch `target_dir`. This is not a new tool; it is the same save path
+already documented above, applied to a saved artifact's own inputs.
 
 ### Background CP-SAT jobs
 

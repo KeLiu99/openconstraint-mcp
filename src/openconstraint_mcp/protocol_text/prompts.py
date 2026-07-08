@@ -200,7 +200,14 @@ User problem:
    tie-breakers), ask concise clarifying questions first. Do not silently
    invent values.
 
-3. Write a complete, runnable OR-Tools CP-SAT Python script:
+3. Write a complete, runnable OR-Tools CP-SAT Python script. For a SINGLE
+   problem instance — the common case — hardcode the actual parameter values
+   (e.g. the real player/group/week counts for a social golfer instance)
+   directly in the script rather than a named "scenario" that needs a
+   `config` to resolve. Reserve the cooperative `config` /
+   `OPENCONSTRAINT_MCP_CPSAT_CONFIG` protocol (step 6) for EXPLICIT
+   multi-attempt or configured experiments — it is not the default modeling
+   style for a one-off save.
    - Import `from ortools.sat.python import cp_model` and `import json`.
    - Build the model with `cp_model.CpModel()`, declare variables, add
      constraints, set the objective.
@@ -385,6 +392,30 @@ User problem:
    problem has structural constraints the reported `status` alone cannot
    confirm, or when the result will be reused and higher confidence is
    valuable.
+
+8. To replay a saved artifact later, read its
+   `.openconstraint-model.json` manifest and call `run_cpsat_python_file`
+   with the saved `solution.py` path, passing the manifest's
+   `verification.replay_seed` as `seed` and, when a `replay-config.json`
+   sibling exists, its parsed contents as `config` — no manual environment
+   variables needed. `run_cpsat_python_file` has no checker parameter, so
+   this only re-verifies at the `reported` level even for a `checked`-level
+   save. For full checked replay, call `save_verified_cpsat_python` again
+   with the saved source/checker/seed/config, a scratch `target_dir`, AND —
+   whenever the manifest or saved directory has them — the original
+   `problem` (read from `problem.txt` if a `problem` artifact is listed),
+   `expectation` (rebuilt from `verification.expectation.objective_sense` /
+   `objective_threshold` if present), and `timeout_ms` (from
+   `verification.timeout_ms`). Omitting any of these changes what gets
+   replayed: `problem` feeds the checker's payload directly, so a checker
+   that reads it validates against different input; `expectation` is a gate
+   that runs and can fail *before* the checker ever runs, so leaving it out
+   silently skips the objective-threshold check; and `timeout_ms` is the
+   solver's re-run budget (and, when `checker_timeout_ms` was not set
+   explicitly, the checker's timeout too) — a different value can reach a
+   different result under the same gates. Passing all of them reproduces
+   every gate the original save ran, including the checker with the
+   manifest's `verification.checker_timeout_ms` when present.
 
 Boundaries:
 - You write the CP-SAT Python script and any checker; openconstraint-mcp

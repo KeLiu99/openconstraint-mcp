@@ -41,6 +41,7 @@ from .core import (
     effective_checker_timeout_ms,
     run_cpsat_python,
     run_cpsat_python_file,
+    seed_config_env,
     validate_checker_args,
 )
 from .diagnostics import checker_report_diagnostic
@@ -394,6 +395,7 @@ class CpsatJobRegistry:
                     request.script_path,
                     timeout_ms=request.timeout_ms,
                     on_start=lambda proc: self._on_start(job_id, proc),
+                    env=seed_config_env(seed=None, config_path=None),
                 )
             else:
                 assert request.source is not None
@@ -401,6 +403,7 @@ class CpsatJobRegistry:
                     request.source,
                     timeout_ms=request.timeout_ms,
                     on_start=lambda proc: self._on_start(job_id, proc),
+                    env=seed_config_env(seed=None, config_path=None),
                 )
         except Exception as exc:  # noqa: BLE001 - worker boundary: never leak; record as failed
             with self._lock:
