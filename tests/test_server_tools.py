@@ -3121,9 +3121,7 @@ async def test_run_cpsat_python_file_seed_replay_passes_seed_env(
 
     monkeypatch.setattr("openconstraint_mcp.server.run_cpsat_python_file", _fake)
     mcp = create_mcp_server()
-    await mcp.call_tool(
-        "run_cpsat_python_file", {"script_path": "/tmp/model.py", "seed": 7}
-    )
+    await mcp.call_tool("run_cpsat_python_file", {"script_path": "/tmp/model.py", "seed": 7})
     assert seen["env"] == {
         "OPENCONSTRAINT_MCP_CPSAT_SEED": "7",
         "OPENCONSTRAINT_MCP_CPSAT_CONFIG": None,

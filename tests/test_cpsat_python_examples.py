@@ -43,7 +43,8 @@ def _payload(solution: dict[str, object], objective: int) -> dict[str, object]:
     }
 
 
-def _run_clinic_roster_checker(
+def _run_checker(
+    checker_name: str,
     tmp_path: Path,
     capsys: pytest.CaptureFixture[str],
     payload: dict[str, object],
@@ -51,7 +52,7 @@ def _run_clinic_roster_checker(
     payload_path = tmp_path / "payload.json"
     payload_path.write_text(json.dumps(payload), encoding="utf-8")
 
-    checker_path = _EXAMPLES / "clinic_roster_checker.py"
+    checker_path = _EXAMPLES / checker_name
     old_argv = sys.argv
     try:
         sys.argv = [str(checker_path), str(payload_path)]
@@ -63,6 +64,14 @@ def _run_clinic_roster_checker(
     result = json.loads(output)
     assert isinstance(result, dict)
     return result
+
+
+def _run_clinic_roster_checker(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    payload: dict[str, object],
+) -> dict[str, object]:
+    return _run_checker("clinic_roster_checker.py", tmp_path, capsys, payload)
 
 
 def test_clinic_roster_checker_accepts_valid_solution(
@@ -111,3 +120,41 @@ def test_clinic_roster_checker_rejects_missing_rest_after_night(
 
     assert result["status"] == "rejected"
     assert any("tue_night then wed_day without rest" in error for error in result["errors"])
+
+
+# Pentagon graph 0-1-2-3-4-0 plus diagonal 0-2 (see graph_coloring.py's EDGES).
+_VALID_GRAPH_COLORING = {"color_0": 0, "color_1": 1, "color_2": 2, "color_3": 0, "color_4": 1}
+
+
+def test_graph_coloring_checker_accepts_valid_coloring(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    result = _run_checker(
+        "graph_coloring_checker.py",
+        tmp_path,
+        capsys,
+        {"solution": _VALID_GRAPH_COLORING},
+    )
+
+    assert result["status"] == "accepted"
+    assert result["errors"] == []
+
+
+def test_graph_coloring_checker_rejects_plausible_looking_coloring(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # Correct on every edge except the first: vertices 0 and 1 both get color 0.
+    # A checker enforcing the adjacency rule the model already encodes still
+    # catches a wrong-but-plausible reported result, e.g. from a script bug
+    # that emits stale/corrupted variable values instead of the solver's own.
+    solution = dict(_VALID_GRAPH_COLORING, color_1=0)
+
+    result = _run_checker(
+        "graph_coloring_checker.py",
+        tmp_path,
+        capsys,
+        {"solution": solution},
+    )
+
+    assert result["status"] == "rejected"
+    assert any("vertices 0 and 1 share color 0" in error for error in result["errors"])

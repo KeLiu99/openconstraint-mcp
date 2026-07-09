@@ -1,8 +1,12 @@
-% Social Golfer instance 6-3-8: 18 golfers in 6 groups of 3, scheduled for 8
-% weeks so no pair of golfers ever shares a group more than once. Each golfer
-% shares a group with group_size - 1 = 2 others per week, so 9 weeks would need
-% 18 distinct partners out of only 17 others — 8 weeks is the most any 6-3
-% schedule can reach. model.mzn pins weeks 1-2 with a transversal symmetry break.
+% Kirkman's fifteen schoolgirls, framed as a Social Golfer instance: 15
+% golfers in 5 groups of 3, scheduled for 7 weeks so no pair of golfers ever
+% shares a group more than once. Each golfer shares a group with
+% group_size - 1 = 2 others per week, so 7 weeks uses exactly
+% 7 * 5 * C(3,2) = 105 = C(15,2) pairs — every pair exactly once, and the
+% most weeks any 5-3 schedule can reach. Since n_groups (5) is not a
+% multiple of group_size (3), model.mzn's week-2 transversal symmetry break
+% does not apply to this instance (its `if` guard is false); only the
+% weaker per-week ordering symmetry breaks are active.
 
 n_groups   = 5;
 group_size = 3;

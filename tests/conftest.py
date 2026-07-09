@@ -8,6 +8,15 @@ from pathlib import Path
 
 import pytest
 
+from openconstraint_mcp.runtime import is_runtime_installed
+
+
+@pytest.fixture
+def require_real_runtime() -> None:
+    """Skip a real-binary integration test when no managed runtime is installed."""
+    if not is_runtime_installed():
+        pytest.skip("managed MiniZinc runtime not installed")
+
 
 @pytest.fixture
 def fake_runtime_dir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:

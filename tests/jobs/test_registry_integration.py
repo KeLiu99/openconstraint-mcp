@@ -21,10 +21,9 @@ import pytest
 
 from openconstraint_mcp.jobs.registry import JobRegistry
 from openconstraint_mcp.minizinc.core import solve_model
-from openconstraint_mcp.runtime import is_runtime_installed
 from openconstraint_mcp.schemas.minizinc import SolveJobStatus
 
-pytestmark = pytest.mark.integration
+pytestmark = [pytest.mark.integration, pytest.mark.usefixtures("require_real_runtime")]
 
 _TERMINAL_STATES = {"succeeded", "failed", "timeout", "cancelled"}
 
@@ -52,12 +51,6 @@ _HARD_MODEL = (
     "constraint forall(d in differences)(d > 0);\n"
     "solve minimize mark[m];\n"
 )
-
-
-@pytest.fixture(autouse=True)
-def _require_runtime() -> None:
-    if not is_runtime_installed():
-        pytest.skip("managed MiniZinc runtime not installed")
 
 
 def _wait_until_terminal(
