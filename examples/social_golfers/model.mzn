@@ -2,15 +2,17 @@
 %
 % Key insight from Liu, Löffler, Hofstedt (2019): fixing week 2 with a
 % transversal cross-cutting of week-1 groups dramatically reduces the
-% search space for instances of the form g-s-w where g is a multiple of s.
-% For 6-3-8, this means: groups in week 2 take one golfer from each of
-% the first s week-1 groups (and similarly for subsequent blocks of s groups).
+% search space for instances of the form g-s-w where g is a multiple of s:
+% groups in week 2 take one golfer from each of the first s week-1 groups
+% (and similarly for subsequent blocks of s groups). E.g. for 6-3-8 (g=6, s=3):
 %
 % Week 1: natural partition (1,2,3)(4,5,6)(7,8,9)(10,11,12)(13,14,15)(16,17,18)
 % Week 2: transversal: (1,4,7)(2,5,8)(3,6,9)(10,13,16)(11,14,17)(12,15,18)
 %
 % This is valid symmetry breaking because any schedule can be relabelled
-% (permuting group labels in week 2) to satisfy this pattern.
+% (permuting group labels in week 2) to satisfy this pattern. The shipped
+% data.dzn (5-3-7) has g=5, s=3 — g is not a multiple of s, so the `if` guard
+% below is false and only the weaker per-week ordering breaks are active.
 
 include "globals.mzn";
 

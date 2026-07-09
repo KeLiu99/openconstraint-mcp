@@ -26,9 +26,8 @@ from openconstraint_mcp.minizinc.core import (
     solve_model,
     solve_model_path,
 )
-from openconstraint_mcp.runtime import is_runtime_installed
 
-pytestmark = pytest.mark.integration
+pytestmark = [pytest.mark.integration, pytest.mark.usefixtures("require_real_runtime")]
 
 _UNSAT_CORE_MODEL = (
     "var 0..10: x;\n"
@@ -64,12 +63,6 @@ _PARAM_UNSAT_MODEL = (
     "constraint x != y;\n"
     "solve satisfy;\n"
 )
-
-
-@pytest.fixture(autouse=True)
-def _require_runtime() -> None:
-    if not is_runtime_installed():
-        pytest.skip("managed MiniZinc runtime not installed")
 
 
 def test_valid_model_compiles_with_empty_stdout() -> None:

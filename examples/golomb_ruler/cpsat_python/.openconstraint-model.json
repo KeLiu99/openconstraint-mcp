@@ -1,7 +1,7 @@
 {
   "managed_by": "openconstraint-mcp",
   "tool_version": "0.1.0",
-  "created_at": "2026-07-05T08:55:19.100024+00:00",
+  "created_at": "2026-07-08T22:20:06.173994+00:00",
   "verification": {
     "level": "checked",
     "reported_status": "feasible",
@@ -14,7 +14,7 @@
     "checker": {
       "status": "accepted",
       "error_count": 0,
-      "duration_ms": 50,
+      "duration_ms": 51,
       "timed_out": false,
       "truncated": false
     }
@@ -23,12 +23,12 @@
     {
       "role": "model",
       "path": "solution.py",
-      "sha256": "66a68fa289654d337d3fd35a78502679717dda981150b1c23e7c5e8dd5b8ee90"
+      "sha256": "da9ae33ee260680a8f881fa1390434a22a8b251da9e64ce971d14cf38d0a8942"
     },
     {
       "role": "problem",
       "path": "problem.txt",
-      "sha256": "c239781b3b60bce392e244307dd57c466c77b9ea942e80da22c207ce71906708"
+      "sha256": "a56ba4d772517fc34bb073f2e322615e8f0c34510970b0a058d43585cbfe98b2"
     },
     {
       "role": "checker",
@@ -38,7 +38,7 @@
     {
       "role": "solution",
       "path": "solution.json",
-      "sha256": "e54808b51216cc3fba9402c9050b925eb73d577eb56ee285279d60afa6744275"
+      "sha256": "141517b4452a17effe7a3a68e351c30fea2969ae5689379495db34a717151360"
     }
   ]
 }
