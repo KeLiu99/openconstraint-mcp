@@ -1383,9 +1383,10 @@ snippet:
   the exploratory `run_cpsat_python_experiment` comparison behind the saved
   formulation (see [Persisting an attempt from an
   experiment](#persisting-an-attempt-from-an-experiment)).
-- **`examples/social_golfers/cpsat/`** and **`examples/social_golfers/cpsat_best/`**
-  — two saves of the same 7-3-10 social-golfers boundary instance (21 golfers,
-  7 groups of 3, 10 weeks) via a compact Fano-plane CP-SAT formulation.
+- **`examples/social_golfers/cpsat/`**, **`examples/social_golfers/cpsat_best/`**,
+  and **`examples/social_golfers/cpsat_24/`** — CP-SAT saves for social-golfers
+  boundary instances. `cpsat/` and `cpsat_best/` cover the same 7-3-10 instance
+  (21 golfers, 7 groups of 3, 10 weeks) via a compact Fano-plane formulation.
   `cpsat/` is an earlier `feasible` incumbent saved with the reported gate
   only; `cpsat_best/` supersedes it with a `checked`-level save — a checker,
   a `replay-config.json` from a cooperative `OPENCONSTRAINT_MCP_CPSAT_CONFIG`
@@ -1393,7 +1394,7 @@ snippet:
   replay coverage in `tests/pyexec/test_jobs_integration.py`
   (`test_submit_file_with_real_checker_reaches_optimal_and_accepted`) — the
   `submit_cpsat_python_file_job` + checker + saved-artifact workflow in one
-  example.
+  example. `cpsat_24/` is a reported-gate save for the 8-3-11 instance.
 
 The `examples/cpsat_python/` scripts can be run standalone
 (`python examples/cpsat_python/assignment.py`), and the first two are used as
@@ -1685,11 +1686,11 @@ honestly, rather than a tidy `"unsatisfiable"` verdict:
 3. **Repair.** Neither `solve` nor `find_unsat_core` resolved this instance
    cleanly, so acting on it means also reasoning about the domain, not
    pattern-matching on a single field: the infeasibility here is a genuine
-   counting bound (`8 * n_golfers/group_size` pairs-per-week `>`
-   `C(n_golfers, 2)` total pairs), so the fix is relaxing the instance, not
-   hunting for a modeling bug or waiting out a longer search. Drop `n_weeks`
-   back to the shipped `7` (or fewer) and re-solve — `status` returns to
-   `"satisfied"`.
+   counting bound (`8 * n_groups * C(group_size, 2) = 120` required pair
+   meetings `>` `C(n_golfers, 2) = 105` total pairs), so the fix is relaxing
+   the instance, not hunting for a modeling bug or waiting out a longer search.
+   Drop `n_weeks` back to the shipped `7` (or fewer) and re-solve — `status`
+   returns to `"satisfied"`.
 
 This is the general MiniZinc infeasibility-repair loop — `solve` ->
 inconclusive/`"unsatisfiable"` -> `find_unsat_core` -> read `core`/`stdout` ->
@@ -1718,12 +1719,14 @@ listed, not that it is exhaustive.
 | `examples/australia_map_coloring` | assignment/allocation | checker-backed solve (acceptance) | `solve_minizinc_files(checker_path=...)` | `test_examples_integration.py::test_australia_map_coloring_with_shipped_checker_completes_correct` | the shipped checker only demonstrates acceptance; see the CP-SAT checkers below for a violation demo |
 | `examples/golomb_ruler` | general CSP (no single roadmap domain) | reproducibility (save + file replay) | `save_verified_minizinc_model`, `solve_minizinc_files` | `test_examples_integration.py::test_golomb_ruler_files_reproduce_the_saved_optimum`, `test_examples_manifest.py` | none |
 | `examples/nonogram` | general CSP | reproducibility (satisfaction variant) | `save_verified_minizinc_model`, `solve_minizinc_files` | `test_examples_manifest.py` (manifest integrity only; replay verified manually, no dedicated integration test) | none |
+| `examples/nonogram/python` | general CSP | checked CP-SAT save for the same puzzle | `save_verified_cpsat_python` | `test_examples_manifest.py` | no live CP-SAT replay integration test |
 | `examples/cpsat_python/assignment.py` | assignment/allocation | CP-SAT direct solve | `run_cpsat_python` | `tests/pyexec/test_core_integration.py::test_run_cpsat_python_solves_assignment_example` | none |
 | `examples/cpsat_python/scheduling.py` | scheduling/rostering | CP-SAT direct solve | `run_cpsat_python` | `tests/pyexec/test_core_integration.py::test_run_cpsat_python_solves_scheduling_example` | none |
 | `examples/cpsat_python/graph_coloring.py` + `graph_coloring_checker.py` | assignment/allocation | checker-backed solve, incl. a violation | `run_cpsat_python`, checker protocol | `tests/test_cpsat_python_examples.py::test_graph_coloring_checker_*` | none |
 | `examples/cpsat_python/clinic_roster_checker.py` | scheduling/rostering | checker rejecting a plausible-looking wrong answer | checker protocol | `tests/test_cpsat_python_examples.py::test_clinic_roster_checker_*` | exercised standalone against synthetic payloads; no paired `solution.py` producing a live solve |
 | `examples/golomb_ruler/cpsat_python` | general CSP | checked save (expectation + checker gates) | `save_verified_cpsat_python` | `test_examples_manifest.py`; re-verified live during this closeout (see `problem.txt`) | the saved objective is not exactly reproducible run to run (documented in `problem.txt`) — an expected CP-SAT property, not a bug |
 | `examples/social_golfers/cpsat` + `cpsat_best` | scheduling/rostering | CP-SAT background job, saved artifact, and file-based replay | `submit_cpsat_python_file_job`, `get_cpsat_python_job`, `save_verified_cpsat_python` | `tests/pyexec/test_jobs_integration.py::test_submit_file_with_real_checker_reaches_optimal_and_accepted` | `cpsat/` (reported gate only, no checker) is superseded by `cpsat_best`; kept only for the reported-vs-checked contrast. `cpsat_best/replay-config.json` came from a `config`-only save, not an attached `experiment_result`, so this directory has no `experiment-log.json` — `RESULT.md` is a hand-written substitute for that provenance, not the generated artifact; see the explicit-experiment row below |
+| `examples/social_golfers/cpsat_24` | scheduling/rostering | CP-SAT saved artifact for the 8-3-11 boundary instance | `save_verified_cpsat_python` | `test_examples_manifest.py` | reported gate only; no checker or live replay integration test |
 | *(no dedicated example file)* | — | CP-SAT explicit experiment (`run_cpsat_python_experiment`) with a durable `experiment-log.json` | `run_cpsat_python_experiment`, `save_verified_cpsat_python(experiment_result=...)` | `tests/pyexec/test_experiment_integration.py`; `tests/pyexec/test_save.py::test_save_with_matching_experiment_result_writes_experiment_log` | no shipped example directory pairs a real `examples/` script with a saved `experiment-log.json` — the integration test is a small self-contained fixture and the save-path test uses synthetic fixtures too; this is the one required workflow this closeout leaves undemonstrated on a real example rather than papering over |
 
 ## Managed runtime
