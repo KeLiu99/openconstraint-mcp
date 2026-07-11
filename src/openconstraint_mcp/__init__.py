@@ -1,9 +1,9 @@
 from __future__ import annotations
 
-from .cli import app
-
-__all__ = ["app", "main"]
+__all__ = ["main"]
 
 
 def main() -> None:
+    from .cli import app
+
     app()
