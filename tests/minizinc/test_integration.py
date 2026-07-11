@@ -18,7 +18,7 @@ import pytest
 from openconstraint_mcp.minizinc.core import (
     _build_solve_result,
     _run_managed_minizinc,
-    _solve_extra_args,
+    build_solve_extra_args,
     check_model,
     check_model_path,
     find_unsat_core,
@@ -709,7 +709,7 @@ def test_save_verified_model_writes_project_end_to_end(tmp_path: Path) -> None:
 # --- Raw --json-stream status spellings --------------------------------------
 #
 # `solve_model()` returns normalized statuses only, so these probes drop one
-# level down: run the production solve transport (`_solve_extra_args` +
+# level down: run the production solve transport (`build_solve_extra_args` +
 # `_run_managed_minizinc`), read the raw `{"type": "status"}` objects straight
 # off the stream, and build the normalized result from the *same* execution via
 # `_build_solve_result`. Each probe asserts the exact raw spelling from
@@ -732,7 +732,7 @@ def _probe_raw_statuses(
     random_seed: int | None = None,
 ) -> tuple[list[str], SolveResult]:
     """Solve ``model`` once; return its raw stream statuses and normalized result."""
-    extra_args = _solve_extra_args(
+    extra_args = build_solve_extra_args(
         solver=solver,
         free_search=False,
         parallel=None,

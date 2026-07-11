@@ -10,13 +10,12 @@ import pytest
 from openconstraint_mcp.minizinc.core import (
     FINDMUS_SOLVER,
     MiniZincExecutionError,
-    _validate_checker_path,
-    _validate_model_data_paths,
     check_model_path,
     find_unsat_core_path,
     inspect_model_path,
     solve_model_path,
 )
+from openconstraint_mcp.minizinc.files import validate_checker_path, validate_model_data_paths
 from openconstraint_mcp.runtime import RuntimeMissingError
 from openconstraint_mcp.schemas.minizinc import (
     CheckResult,
@@ -402,24 +401,24 @@ def test_solve_model_path_rejects_unsupported_control_before_solve(
     assert "-f" in message
 
 
-# --- _validate_model_data_paths --------------------------------------------
+# --- validate_model_data_paths --------------------------------------------
 
 
 def test_validate_rejects_missing_model(tmp_path: Path) -> None:
     with pytest.raises(ValueError, match="does not exist"):
-        _validate_model_data_paths(tmp_path / "nope.mzn", None)
+        validate_model_data_paths(tmp_path / "nope.mzn", None)
 
 
 def test_validate_rejects_directory_model(tmp_path: Path) -> None:
     with pytest.raises(ValueError, match="not a file"):
-        _validate_model_data_paths(tmp_path, None)
+        validate_model_data_paths(tmp_path, None)
 
 
 def test_validate_rejects_missing_data(tmp_path: Path) -> None:
     model_path = tmp_path / "m.mzn"
     model_path.write_text(_MODEL_SRC)
     with pytest.raises(ValueError, match="does not exist"):
-        _validate_model_data_paths(model_path, tmp_path / "missing.dzn")
+        validate_model_data_paths(model_path, tmp_path / "missing.dzn")
 
 
 @pytest.mark.parametrize("body", ["", "   \n\t\n"])
@@ -427,7 +426,7 @@ def test_validate_rejects_empty_model(tmp_path: Path, body: str) -> None:
     model_path = tmp_path / "m.mzn"
     model_path.write_text(body)
     with pytest.raises(ValueError, match="empty"):
-        _validate_model_data_paths(model_path, None)
+        validate_model_data_paths(model_path, None)
 
 
 def test_validate_returns_resolved_absolute_paths(tmp_path: Path) -> None:
@@ -436,7 +435,7 @@ def test_validate_returns_resolved_absolute_paths(tmp_path: Path) -> None:
     data_path = tmp_path / "d.dzn"
     data_path.write_text("n = 1;\n")
 
-    resolved_model, resolved_data = _validate_model_data_paths(model_path, data_path)
+    resolved_model, resolved_data = validate_model_data_paths(model_path, data_path)
 
     assert resolved_model == model_path.resolve()
     assert resolved_model.is_absolute()
@@ -450,7 +449,7 @@ def test_validate_allows_empty_data(tmp_path: Path) -> None:
     data_path = tmp_path / "d.dzn"
     data_path.write_text("")
 
-    _, resolved_data = _validate_model_data_paths(model_path, data_path)
+    _, resolved_data = validate_model_data_paths(model_path, data_path)
 
     assert resolved_data == data_path.resolve()
 
@@ -789,14 +788,14 @@ def test_solve_model_path_with_checker_transcript_is_raw_transcript(
     assert "checker" not in result.stdout
 
 
-# --- _validate_checker_path -------------------------------------------------
+# --- validate_checker_path -------------------------------------------------
 
 
 def test_validate_checker_returns_resolved_absolute_path(tmp_path: Path) -> None:
     checker_path = tmp_path / "c.mzc.mzn"
     checker_path.write_text(_CHECKER_SRC)
 
-    resolved = _validate_checker_path(checker_path)
+    resolved = validate_checker_path(checker_path)
 
     assert resolved == checker_path.resolve()
     assert resolved.is_absolute()
@@ -806,7 +805,7 @@ def test_validate_checker_accepts_bare_mzc_suffix(tmp_path: Path) -> None:
     checker_path = tmp_path / "c.mzc"
     checker_path.write_text(_CHECKER_SRC)
 
-    assert _validate_checker_path(checker_path) == checker_path.resolve()
+    assert validate_checker_path(checker_path) == checker_path.resolve()
 
 
 @pytest.mark.parametrize("name", ["checker.mzn", "checker.mzc.txt"])
@@ -817,26 +816,26 @@ def test_validate_checker_rejects_bad_suffix(tmp_path: Path, name: str) -> None:
     checker_path = tmp_path / name
     checker_path.write_text(_CHECKER_SRC)
     with pytest.raises(ValueError, match="mzc"):
-        _validate_checker_path(checker_path)
+        validate_checker_path(checker_path)
 
 
 def test_validate_checker_rejects_missing(tmp_path: Path) -> None:
     with pytest.raises(ValueError, match="does not exist"):
-        _validate_checker_path(tmp_path / "missing.mzc.mzn")
+        validate_checker_path(tmp_path / "missing.mzc.mzn")
 
 
 def test_validate_checker_rejects_directory(tmp_path: Path) -> None:
     checker_dir = tmp_path / "dir.mzc.mzn"
     checker_dir.mkdir()
     with pytest.raises(ValueError, match="not a file"):
-        _validate_checker_path(checker_dir)
+        validate_checker_path(checker_dir)
 
 
 def test_validate_checker_rejects_non_utf8(tmp_path: Path) -> None:
     checker_path = tmp_path / "bad.mzc.mzn"
     checker_path.write_bytes(b"\xff\xfe garbage")
     with pytest.raises(ValueError, match="UTF-8"):
-        _validate_checker_path(checker_path)
+        validate_checker_path(checker_path)
 
 
 def test_solve_model_path_rejects_bad_checker_before_run(

@@ -276,6 +276,18 @@ async def _run_blocking[T](fn: Callable[[], T]) -> T:
     return await to_thread.run_sync(fn)
 
 
+async def _run_tool_with_status[T](
+    ctx: Context | None,
+    stages: tuple[str, str, str, str],
+    blocking_call: Callable[[], T],
+) -> T:
+    """Run status start -> blocking call -> status finish -> result."""
+    await _status_starting(ctx, stages)
+    result = await _run_blocking(blocking_call)
+    await _status_finished(ctx, stages)
+    return result
+
+
 _P = ParamSpec("_P")
 _R = TypeVar("_R")
 
@@ -535,8 +547,9 @@ def create_mcp_server() -> FastMCP:
         ctx: Context | None = None,
     ) -> Annotated[CallToolResult, SolveResult]:
         stages = status.solve_stages(checker is not None)
-        await _status_starting(ctx, stages)
-        result = await _run_blocking(
+        result = await _run_tool_with_status(
+            ctx,
+            stages,
             functools.partial(
                 solve_model,
                 model,
@@ -550,9 +563,8 @@ def create_mcp_server() -> FastMCP:
                 all_solutions=all_solutions,
                 num_solutions=num_solutions,
                 tracker=child_tracker,
-            )
+            ),
         )
-        await _status_finished(ctx, stages)
         return _wrap_solve_result(result)
 
     @mcp.tool(description=CHECK_MINIZINC_MODEL_DESCRIPTION)
@@ -564,8 +576,9 @@ def create_mcp_server() -> FastMCP:
         timeout_ms: int = DEFAULT_CHECK_TIMEOUT_MS,
         ctx: Context | None = None,
     ) -> CheckResult:
-        await _status_starting(ctx, status.CHECK_STAGES)
-        result = await _run_blocking(
+        return await _run_tool_with_status(
+            ctx,
+            status.CHECK_STAGES,
             functools.partial(
                 check_model,
                 model,
@@ -573,10 +586,8 @@ def create_mcp_server() -> FastMCP:
                 data=data,
                 timeout_ms=timeout_ms,
                 tracker=child_tracker,
-            )
+            ),
         )
-        await _status_finished(ctx, status.CHECK_STAGES)
-        return result
 
     @mcp.tool(description=INSPECT_MINIZINC_MODEL_DESCRIPTION)
     @_as_mcp_error()
@@ -587,8 +598,9 @@ def create_mcp_server() -> FastMCP:
         timeout_ms: int = DEFAULT_INSPECT_TIMEOUT_MS,
         ctx: Context | None = None,
     ) -> ModelInspectionResult:
-        await _status_starting(ctx, status.INSPECT_STAGES)
-        result = await _run_blocking(
+        return await _run_tool_with_status(
+            ctx,
+            status.INSPECT_STAGES,
             functools.partial(
                 inspect_model,
                 model,
@@ -596,10 +608,8 @@ def create_mcp_server() -> FastMCP:
                 data=data,
                 timeout_ms=timeout_ms,
                 tracker=child_tracker,
-            )
+            ),
         )
-        await _status_finished(ctx, status.INSPECT_STAGES)
-        return result
 
     @mcp.tool(description=FIND_UNSAT_CORE_DESCRIPTION)
     @_as_mcp_error()
@@ -609,14 +619,13 @@ def create_mcp_server() -> FastMCP:
         timeout_ms: int = DEFAULT_UNSAT_CORE_TIMEOUT_MS,
         ctx: Context | None = None,
     ) -> UnsatCoreResult:
-        await _status_starting(ctx, status.UNSAT_CORE_STAGES)
-        result = await _run_blocking(
+        return await _run_tool_with_status(
+            ctx,
+            status.UNSAT_CORE_STAGES,
             functools.partial(
                 _find_unsat_core, model, data=data, timeout_ms=timeout_ms, tracker=child_tracker
-            )
+            ),
         )
-        await _status_finished(ctx, status.UNSAT_CORE_STAGES)
-        return result
 
     @mcp.tool(description=SAVE_VERIFIED_MINIZINC_MODEL_DESCRIPTION)
     @_as_mcp_error()
@@ -637,8 +646,9 @@ def create_mcp_server() -> FastMCP:
         portfolio_result: PortfolioSolveResult | None = None,
         ctx: Context | None = None,
     ) -> Annotated[CallToolResult, SaveVerifiedModelResult]:
-        await _status_starting(ctx, status.SAVE_STAGES)
-        result = await _run_blocking(
+        result = await _run_tool_with_status(
+            ctx,
+            status.SAVE_STAGES,
             functools.partial(
                 save_verified_model,
                 model,
@@ -656,9 +666,8 @@ def create_mcp_server() -> FastMCP:
                 overwrite=overwrite,
                 portfolio_result=portfolio_result,
                 tracker=child_tracker,
-            )
+            ),
         )
-        await _status_finished(ctx, status.SAVE_STAGES)
         return _wrap_save_result(result)
 
     @mcp.tool(description=CHECK_MINIZINC_FILES_DESCRIPTION)
@@ -670,8 +679,9 @@ def create_mcp_server() -> FastMCP:
         timeout_ms: int = DEFAULT_CHECK_TIMEOUT_MS,
         ctx: Context | None = None,
     ) -> CheckResult:
-        await _status_starting(ctx, status.CHECK_STAGES)
-        result = await _run_blocking(
+        return await _run_tool_with_status(
+            ctx,
+            status.CHECK_STAGES,
             functools.partial(
                 check_model_path,
                 Path(model_path),
@@ -679,10 +689,8 @@ def create_mcp_server() -> FastMCP:
                 data_path=Path(data_path) if data_path is not None else None,
                 timeout_ms=timeout_ms,
                 tracker=child_tracker,
-            )
+            ),
         )
-        await _status_finished(ctx, status.CHECK_STAGES)
-        return result
 
     @mcp.tool(description=INSPECT_MINIZINC_FILES_DESCRIPTION)
     @_as_mcp_error()
@@ -693,8 +701,9 @@ def create_mcp_server() -> FastMCP:
         timeout_ms: int = DEFAULT_INSPECT_TIMEOUT_MS,
         ctx: Context | None = None,
     ) -> ModelInspectionResult:
-        await _status_starting(ctx, status.INSPECT_STAGES)
-        result = await _run_blocking(
+        return await _run_tool_with_status(
+            ctx,
+            status.INSPECT_STAGES,
             functools.partial(
                 inspect_model_path,
                 Path(model_path),
@@ -702,10 +711,8 @@ def create_mcp_server() -> FastMCP:
                 data_path=Path(data_path) if data_path is not None else None,
                 timeout_ms=timeout_ms,
                 tracker=child_tracker,
-            )
+            ),
         )
-        await _status_finished(ctx, status.INSPECT_STAGES)
-        return result
 
     @mcp.tool(description=SOLVE_MINIZINC_FILES_DESCRIPTION)
     @_as_mcp_error()
@@ -723,8 +730,9 @@ def create_mcp_server() -> FastMCP:
         ctx: Context | None = None,
     ) -> Annotated[CallToolResult, SolveResult]:
         stages = status.solve_stages(checker_path is not None)
-        await _status_starting(ctx, stages)
-        result = await _run_blocking(
+        result = await _run_tool_with_status(
+            ctx,
+            stages,
             functools.partial(
                 solve_model_path,
                 Path(model_path),
@@ -738,9 +746,8 @@ def create_mcp_server() -> FastMCP:
                 all_solutions=all_solutions,
                 num_solutions=num_solutions,
                 tracker=child_tracker,
-            )
+            ),
         )
-        await _status_finished(ctx, stages)
         return _wrap_solve_result(result)
 
     @mcp.tool(description=FIND_UNSAT_CORE_FILES_DESCRIPTION)
@@ -751,18 +758,17 @@ def create_mcp_server() -> FastMCP:
         timeout_ms: int = DEFAULT_UNSAT_CORE_TIMEOUT_MS,
         ctx: Context | None = None,
     ) -> UnsatCoreResult:
-        await _status_starting(ctx, status.UNSAT_CORE_STAGES)
-        result = await _run_blocking(
+        return await _run_tool_with_status(
+            ctx,
+            status.UNSAT_CORE_STAGES,
             functools.partial(
                 find_unsat_core_path,
                 Path(model_path),
                 data_path=Path(data_path) if data_path is not None else None,
                 timeout_ms=timeout_ms,
                 tracker=child_tracker,
-            )
+            ),
         )
-        await _status_finished(ctx, status.UNSAT_CORE_STAGES)
-        return result
 
     @mcp.tool(description=SUBMIT_SOLVE_JOB_DESCRIPTION)
     # Validation raises ValueError; a full bounded queue raises JobRejectedError
@@ -931,22 +937,21 @@ def create_mcp_server() -> FastMCP:
         timeout_ms: int = DEFAULT_PYEXEC_TIMEOUT_MS,
         ctx: Context | None = None,
     ) -> CpsatPythonResult:
-        await _status_starting(ctx, status.CPSAT_PYTHON_STAGES)
         # No MCP-facing seed/config for this inline tool (see module docstring on
         # `run_cpsat_python`'s `env` param); always clear both protocol env vars so
         # a value inherited from the server's own launch environment cannot leak
         # into the child.
-        result = await _run_blocking(
+        return await _run_tool_with_status(
+            ctx,
+            status.CPSAT_PYTHON_STAGES,
             functools.partial(
                 run_cpsat_python,
                 source,
                 timeout_ms=timeout_ms,
                 tracker=child_tracker,
                 env=seed_config_env(seed=None, config_path=None),
-            )
+            ),
         )
-        await _status_finished(ctx, status.CPSAT_PYTHON_STAGES)
-        return result
 
     @mcp.tool(name="run_cpsat_python_file", description=RUN_CPSAT_PYTHON_FILE_DESCRIPTION)
     @_as_mcp_error(ValueError)
@@ -988,8 +993,9 @@ def create_mcp_server() -> FastMCP:
         include_winner_stdout: bool = True,
         ctx: Context | None = None,
     ) -> Annotated[CallToolResult, CpsatPythonExperimentResult]:
-        await _status_starting(ctx, status.CPSAT_EXPERIMENT_STAGES)
-        result = await _run_blocking(
+        result = await _run_tool_with_status(
+            ctx,
+            status.CPSAT_EXPERIMENT_STAGES,
             functools.partial(
                 run_cpsat_python_experiment,
                 attempts,
@@ -1001,9 +1007,8 @@ def create_mcp_server() -> FastMCP:
                 checker_timeout_ms=checker_timeout_ms,
                 include_winner_stdout=include_winner_stdout,
                 tracker=child_tracker,
-            )
+            ),
         )
-        await _status_finished(ctx, status.CPSAT_EXPERIMENT_STAGES)
         return _wrap_cpsat_experiment_result(result)
 
     @mcp.tool(name="save_verified_cpsat_python", description=SAVE_VERIFIED_CPSAT_PYTHON_DESCRIPTION)
@@ -1023,8 +1028,9 @@ def create_mcp_server() -> FastMCP:
         ctx: Context | None = None,
     ) -> SaveVerifiedPythonResult:
         stages = status.cpsat_save_stages(with_checker=checker is not None)
-        await _status_starting(ctx, stages)
-        result = await _run_blocking(
+        return await _run_tool_with_status(
+            ctx,
+            stages,
             functools.partial(
                 save_verified_cpsat_python,
                 source,
@@ -1039,10 +1045,8 @@ def create_mcp_server() -> FastMCP:
                 config=config,
                 experiment_result=experiment_result,
                 tracker=child_tracker,
-            )
+            ),
         )
-        await _status_finished(ctx, stages)
-        return result
 
     @mcp.prompt(
         name="solve_constraint_problem",

@@ -47,6 +47,7 @@ from .diagnostics import (
     solve_diagnostic,
     unsat_core_diagnostic,
 )
+from .files import read_text_utf8, validate_checker_path, validate_model_data_paths
 from .interface import parse_model_interface
 from .stream import _parse_solve_stream
 from .unsat_core import _parse_unsat_core
@@ -72,11 +73,6 @@ DEFAULT_UNSAT_CORE_TIMEOUT_MS: int = DEFAULT_SOLVE_TIMEOUT_MS
 # analysis — so it shares the check budget rather than an independent literal that
 # could drift. The distinct name keeps the inspect call site from reading as a check.
 DEFAULT_INSPECT_TIMEOUT_MS: int = DEFAULT_CHECK_TIMEOUT_MS
-# MiniZinc rejects a `--solution-checker` whose filename does not end in `.mzc`
-# or `.mzc.mzn` at argument parsing. Matched on the full `name`, NOT `Path.suffix`
-# (which returns `.mzn` for `model.mzc.mzn`), so the validator rejects the wrong
-# suffix server-side before the doomed run.
-_CHECKER_SUFFIXES: tuple[str, ...] = (".mzc", ".mzc.mzn")
 # MiniZinc's read-only type-analysis flag: it reports the model's interface
 # (required params, output vars, method) and stops without flattening or solving.
 # It coexists with the --solver/--time-limit args _build_minizinc_cmd always
@@ -340,7 +336,7 @@ def _build_minizinc_cmd(
     ]
 
 
-def _validate_model_and_timeout(model: str, timeout_ms: int) -> None:
+def validate_model_and_timeout(model: str, timeout_ms: int) -> None:
     """Reject an empty/whitespace model or non-positive timeout with a clear error.
 
     The inline-argument gate shared by ``_run_managed_minizinc`` and
@@ -385,7 +381,7 @@ def _run_managed_minizinc(
     ``_build_minizinc_cmd`` remains the single place that orders flags before
     positional model/data arguments.
     """
-    _validate_model_and_timeout(model, timeout_ms)
+    validate_model_and_timeout(model, timeout_ms)
     binary = _require_minizinc_binary()
     with tempfile.TemporaryDirectory(prefix="openconstraint-mcp-") as tmp:
         tmp_dir = Path(tmp)
@@ -470,7 +466,7 @@ def _run_managed_minizinc_cancellable(
     cancel. Returns the same ``_RunOutcome``, so ``_build_solve_result`` consumes
     it unchanged.
     """
-    _validate_model_and_timeout(model, timeout_ms)
+    validate_model_and_timeout(model, timeout_ms)
     binary = _require_minizinc_binary()
 
     @contextmanager
@@ -779,7 +775,7 @@ def solver_supports_num_solutions(solver: str) -> bool:
     return solver in NUM_SOLUTIONS_SOLVERS
 
 
-def _solve_extra_args(
+def build_solve_extra_args(
     *,
     solver: str,
     free_search: bool,
@@ -829,7 +825,7 @@ def _solve_extra_args(
     return *_SOLVE_STREAM_ARGS, *flags
 
 
-def _validate_solver_capabilities(
+def validate_solver_capabilities(
     *,
     solver: str,
     capabilities: SolverCapabilities,
@@ -846,7 +842,7 @@ def _validate_solver_capabilities(
     ``supports_*`` field is False raises a ``ValueError`` naming the solver, the
     MCP control, and the MiniZinc flag, plus the actionable fix. ``num_solutions``
     is deliberately NOT checked here — it keeps its canonical allowlist gate in
-    ``_solve_extra_args`` (``org.gecode.gist`` lists ``-n`` but is excluded), so it
+    ``build_solve_extra_args`` (``org.gecode.gist`` lists ``-n`` but is excluded), so it
     must not be folded into these stdFlags-derived booleans.
     """
     checks = (
@@ -864,7 +860,7 @@ def _validate_solver_capabilities(
             )
 
 
-def _resolve_capability_map() -> dict[str, SolverCapabilities]:
+def resolve_capability_map() -> dict[str, SolverCapabilities]:
     """Resolve the runtime-local ``solver_id -> capabilities`` map (one ``list_solvers()``).
 
     A single ``--solvers-json`` subprocess; the result is not cached (D3). Keyed by
@@ -875,7 +871,7 @@ def _resolve_capability_map() -> dict[str, SolverCapabilities]:
     return {solver.id: solver.capabilities for solver in list_solvers().solvers}
 
 
-def _enforce_solver_capabilities(
+def enforce_solver_capabilities(
     *,
     solver: str,
     free_search: bool,
@@ -897,10 +893,10 @@ def _enforce_solver_capabilities(
     """
     if not (free_search or all_solutions or parallel is not None or random_seed is not None):
         return
-    capabilities = _resolve_capability_map().get(solver)
+    capabilities = resolve_capability_map().get(solver)
     if capabilities is None:
         return
-    _validate_solver_capabilities(
+    validate_solver_capabilities(
         solver=solver,
         capabilities=capabilities,
         free_search=free_search,
@@ -926,7 +922,7 @@ def _run_solve(
     ``save_verified_model``: both validate controls and enforce capabilities once
     up front (so the save path resolves capabilities at most once — D1), build the
     ``extra_args``, then call this to run and parse. ``extra_args`` already carries
-    the json-stream transport plus any control flags from ``_solve_extra_args``.
+    the json-stream transport plus any control flags from ``build_solve_extra_args``.
     """
     outcome = _run_managed_minizinc(
         model,
@@ -958,7 +954,7 @@ def solve_model(
     # Pure validation + arg build first (raises on a bad parallel/num_solutions
     # before any subprocess), THEN the lazy capability resolution (one
     # --solvers-json only when a gated control is requested), THEN the solve.
-    extra_args = _solve_extra_args(
+    extra_args = build_solve_extra_args(
         solver=solver,
         free_search=free_search,
         parallel=parallel,
@@ -966,7 +962,7 @@ def solve_model(
         all_solutions=all_solutions,
         num_solutions=num_solutions,
     )
-    _enforce_solver_capabilities(
+    enforce_solver_capabilities(
         solver=solver,
         free_search=free_search,
         parallel=parallel,
@@ -1003,7 +999,7 @@ def solve_model_cancellable(
     Identical solve semantics and ``SolveResult`` shape, but executed through the
     terminable ``_run_managed_minizinc_cancellable`` runner: the live child handle
     is published to ``on_start`` so a caller (the job registry) can terminate the
-    whole process tree to cancel the solve. Reuses ``_solve_extra_args`` for
+    whole process tree to cancel the solve. Reuses ``build_solve_extra_args`` for
     validation/argv and ``_build_solve_result`` / ``_build_checker_report`` for the
     parse, so a job's result is byte-for-byte what the synchronous tool would
     return for the same inputs.
@@ -1012,7 +1008,7 @@ def solve_model_cancellable(
         model,
         solver=solver,
         timeout_ms=timeout_ms,
-        extra_args=_solve_extra_args(
+        extra_args=build_solve_extra_args(
             solver=solver,
             free_search=free_search,
             parallel=parallel,
@@ -1246,11 +1242,11 @@ def save_verified_model(
     ``experiment-log.json`` as a durable record of the exploration that led
     here; it is never written on a failed save.
     """
-    _validate_model_and_timeout(model, timeout_ms)
+    validate_model_and_timeout(model, timeout_ms)
     # Validates the solve controls (parallel/num_solutions ranges and the
     # solver-gated -n) with the exact solve_model rules and keeps the built args so
     # the internal solve does not rebuild them.
-    extra_args = _solve_extra_args(
+    extra_args = build_solve_extra_args(
         solver=solver,
         free_search=free_search,
         parallel=parallel,
@@ -1261,7 +1257,7 @@ def save_verified_model(
     # Reject an unsupported -a/-f/-p/-r control before check, solve, or write
     # (one --solvers-json at most for the whole save — D1); the internal solve uses
     # _run_solve, which does not re-enforce.
-    _enforce_solver_capabilities(
+    enforce_solver_capabilities(
         solver=solver,
         free_search=free_search,
         parallel=parallel,
@@ -1346,76 +1342,6 @@ def save_verified_model(
     )
 
 
-def _read_text_utf8(path: Path) -> str:
-    """Read ``path`` as UTF-8, surfacing a bad encoding as a clear ValueError.
-
-    The path tools assume UTF-8 source (MiniZinc's convention); wrapping
-    ``UnicodeDecodeError`` here turns an opaque traceback into the repo's
-    "clear errors" bar, with the offending path named in the message.
-    """
-    try:
-        return path.read_text(encoding="utf-8")
-    except UnicodeDecodeError as exc:
-        raise ValueError(f"{path} is not valid UTF-8") from exc
-
-
-def _validate_model_data_paths(
-    model_path: Path, data_path: Path | None
-) -> tuple[Path, Path | None]:
-    """Resolve, validate, and return the model/data paths before any subprocess.
-
-    Resolves each input to an absolute path (``Path.resolve()`` — following a
-    symlink the caller named), then rejects a missing or non-regular-file
-    model/data, and an empty/whitespace-only or non-UTF-8 model, with a clear
-    ``ValueError`` naming the offending path. The resolved paths are *returned*
-    so callers use the same path for read, argv, and cwd — a relative input
-    can't then double-count its subdir (``cwd=parent`` + relative argv).
-
-    Model emptiness and UTF-8 are checked here (the model is read for the
-    check), so the failure is a clear ``ValueError`` before any run. Data
-    emptiness is allowed (a valid "no parameters" input, matching the inline
-    ``data`` contract).
-    """
-    model_path = model_path.resolve()
-    if not model_path.exists():
-        raise ValueError(f"model_path does not exist: {model_path}")
-    if not model_path.is_file():
-        raise ValueError(f"model_path is not a file: {model_path}")
-    if not _read_text_utf8(model_path).strip():
-        raise ValueError(f"model file is empty: {model_path}")
-    if data_path is None:
-        return model_path, None
-    data_path = data_path.resolve()
-    if not data_path.exists():
-        raise ValueError(f"data_path does not exist: {data_path}")
-    if not data_path.is_file():
-        raise ValueError(f"data_path is not a file: {data_path}")
-    return model_path, data_path
-
-
-def _validate_checker_path(checker_path: Path) -> Path:
-    """Resolve, validate, and return the checker path before any subprocess.
-
-    A sibling of ``_validate_model_data_paths`` for the ``--solution-checker``
-    argument: resolves to absolute (so the flag is unambiguous regardless of
-    cwd), then rejects — with a clear ``ValueError`` naming the path — a checker
-    whose filename does not end in ``.mzc``/``.mzc.mzn`` (MiniZinc rejects other
-    suffixes at argument parsing; the check is on ``name``, not ``Path.suffix``,
-    which returns ``.mzn`` for ``model.mzc.mzn``), a missing or non-regular-file
-    checker, and a non-UTF-8 checker. The resolved absolute path is returned so
-    the caller uses the same path the validation ran against.
-    """
-    checker_path = checker_path.resolve()
-    if not checker_path.name.endswith(_CHECKER_SUFFIXES):
-        raise ValueError(f"checker_path must end in .mzc or .mzc.mzn: {checker_path}")
-    if not checker_path.exists():
-        raise ValueError(f"checker_path does not exist: {checker_path}")
-    if not checker_path.is_file():
-        raise ValueError(f"checker_path is not a file: {checker_path}")
-    _read_text_utf8(checker_path)  # reject non-UTF-8 with a clear ValueError
-    return checker_path
-
-
 def _run_managed_minizinc_paths(
     model_path: Path,
     *,
@@ -1470,14 +1396,14 @@ def solve_model_path(
     parent, like normal MiniZinc CLI usage, so a relative ``include`` resolves
     against the model's own directory. Returns the inline tool's ``SolveResult``
     shape. The optional solver/search-control flags behave exactly as in
-    ``solve_model`` (see ``_solve_extra_args``). When ``checker_path`` is
+    ``solve_model`` (see ``build_solve_extra_args``). When ``checker_path`` is
     supplied, it is validated as a ``.mzc``/``.mzc.mzn`` checker and added to the
     same solve invocation; the returned ``SolveResult.checker`` then carries the
     per-solution checker report.
     """
-    model_path, data_path = _validate_model_data_paths(model_path, data_path)
-    checker_path = _validate_checker_path(checker_path) if checker_path is not None else None
-    extra_args = _solve_extra_args(
+    model_path, data_path = validate_model_data_paths(model_path, data_path)
+    checker_path = validate_checker_path(checker_path) if checker_path is not None else None
+    extra_args = build_solve_extra_args(
         solver=solver,
         free_search=free_search,
         parallel=parallel,
@@ -1487,7 +1413,7 @@ def solve_model_path(
     )
     # Reject an unsupported -a/-f/-p/-r control before the solve, same lazy
     # one-shot resolution as the inline path (D2/D4).
-    _enforce_solver_capabilities(
+    enforce_solver_capabilities(
         solver=solver,
         free_search=free_search,
         parallel=parallel,
@@ -1526,7 +1452,7 @@ def check_model_path(
     dir (auto-deleted) to keep the compile check from littering the project. Only
     the diagnostics and return code matter for the check, never the artifacts.
     """
-    model_path, data_path = _validate_model_data_paths(model_path, data_path)
+    model_path, data_path = validate_model_data_paths(model_path, data_path)
     with tempfile.TemporaryDirectory(prefix="openconstraint-mcp-") as tmp:
         outcome = _run_managed_minizinc_paths(
             model_path,
@@ -1559,7 +1485,7 @@ def inspect_model_path(
     model's parent), so a relative ``include`` resolves against the model's own
     directory; returns the inline ``inspect_model`` ``ModelInspectionResult`` shape.
     """
-    model_path, data_path = _validate_model_data_paths(model_path, data_path)
+    model_path, data_path = validate_model_data_paths(model_path, data_path)
     outcome = _run_managed_minizinc_paths(
         model_path,
         solver=solver,
@@ -1585,7 +1511,7 @@ def find_unsat_core_path(
     (best-effort, basename-only — see ``_iter_model_spans``); raw ``stdout``
     stays authoritative.
     """
-    model_path, data_path = _validate_model_data_paths(model_path, data_path)
+    model_path, data_path = validate_model_data_paths(model_path, data_path)
     outcome = _run_managed_minizinc_paths(
         model_path,
         solver=FINDMUS_SOLVER,
@@ -1594,5 +1520,5 @@ def find_unsat_core_path(
         data_path=data_path,
         tracker=tracker,
     )
-    model = _read_text_utf8(model_path)
+    model = read_text_utf8(model_path)
     return _build_unsat_core_result(outcome, model, model_filename=model_path.name)
