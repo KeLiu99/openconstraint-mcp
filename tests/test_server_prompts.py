@@ -3,6 +3,7 @@ from __future__ import annotations
 import pytest
 
 from openconstraint_mcp.protocol_text.descriptions import (
+    AUTO_TUNE_CONSTRAINT_PROBLEM_PROMPT_DESCRIPTION,
     LIST_AVAILABLE_SOLVERS_DESCRIPTION,
     MCP_SERVER_INSTRUCTIONS,
     RUN_CPSAT_PYTHON_DESCRIPTION,
@@ -10,6 +11,10 @@ from openconstraint_mcp.protocol_text.descriptions import (
     SOLVE_CPSAT_PYTHON_PROMPT_DESCRIPTION,
     SOLVE_MINIZINC_FILES_DESCRIPTION,
     SOLVE_MINIZINC_MODEL_DESCRIPTION,
+)
+from openconstraint_mcp.protocol_text.prompts import (
+    SOLVE_CONSTRAINT_PROBLEM_PROMPT,
+    SOLVE_CPSAT_PYTHON_PROMPT,
 )
 
 # Tests deliberately white-box server internals, which are private by design.
@@ -726,3 +731,534 @@ def test_solve_descriptions_state_checker_suffix_and_nested_report() -> None:
     assert ".mzc" in SOLVE_MINIZINC_FILES_DESCRIPTION
     assert "CheckerReport" in combined
     assert "transcript" in combined
+
+
+# --- auto_tune_constraint_problem ------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_auto_tune_constraint_problem_prompt_is_listed() -> None:
+    mcp = create_mcp_server()
+    prompts = await mcp.list_prompts()
+
+    names = {prompt.name for prompt in prompts}
+    assert "auto_tune_constraint_problem" in names
+
+    prompt = next(p for p in prompts if p.name == "auto_tune_constraint_problem")
+    argument_names = {arg.name for arg in (prompt.arguments or [])}
+    assert "problem" in argument_names
+
+
+@pytest.mark.asyncio
+async def test_auto_tune_constraint_problem_prompt_echoes_user_problem() -> None:
+    text = await _get_prompt_text("auto_tune_constraint_problem", {"problem": SAMPLE_PROBLEM})
+    assert SAMPLE_PROBLEM in text
+
+
+@pytest.mark.asyncio
+async def test_auto_tune_constraint_problem_prompt_passes_through_brace_input() -> None:
+    problem_with_braces = "Allocate workers across shifts {1..3} with budget constraints"
+
+    text = await _get_prompt_text("auto_tune_constraint_problem", {"problem": problem_with_braces})
+
+    assert problem_with_braces in text
+
+
+@pytest.mark.asyncio
+async def test_auto_tune_constraint_problem_prompt_smoke_precedes_tuning_race() -> None:
+    text = await _get_prompt_text("auto_tune_constraint_problem", {"problem": SAMPLE_PROBLEM})
+
+    # The tiny smoke check (step 5) must appear before either backend's
+    # representative-tuning race (steps 9/10) — smoke never ranks or selects.
+    smoke_idx = text.index("Create a tiny smoke instance")
+    minizinc_race_idx = text.index("Select the PROVISIONAL MiniZinc candidate")
+    cpsat_race_idx = text.index("Select the PROVISIONAL CP-SAT candidate")
+
+    assert smoke_idx < minizinc_race_idx
+    assert smoke_idx < cpsat_race_idx
+
+
+@pytest.mark.asyncio
+async def test_auto_tune_constraint_problem_prompt_minizinc_check_precedes_portfolio() -> None:
+    text = await _get_prompt_text("auto_tune_constraint_problem", {"problem": SAMPLE_PROBLEM})
+
+    # The smoke-stage MiniZinc check line (naming both inspect and check tools)
+    # must precede the tuning-stage portfolio racing step.
+    smoke_check_line = next(
+        line
+        for line in text.splitlines()
+        if "check_minizinc_model" in line and "inspect_minizinc_model" in line
+    )
+    smoke_idx = text.index(smoke_check_line)
+    portfolio_race_idx = text.index("Select the PROVISIONAL MiniZinc candidate")
+
+    assert smoke_idx < portfolio_race_idx
+
+
+@pytest.mark.asyncio
+async def test_auto_tune_constraint_problem_prompt_submit_tools_name_matching_poll_tools() -> None:
+    text = await _get_prompt_text("auto_tune_constraint_problem", {"problem": SAMPLE_PROBLEM})
+    normalized = " ".join(text.split())
+
+    # Each background submit tool must be paired with its own matching getter.
+    assert "submit_portfolio_job` polls with `get_portfolio_job`" in normalized
+    assert "submit_solve_job` polls with `get_solve_job`" in normalized
+    assert "submit_cpsat_python_job` polls with `get_cpsat_python_job`" in normalized
+
+
+@pytest.mark.asyncio
+async def test_auto_tune_constraint_problem_prompt_requires_explicit_save_paths() -> None:
+    text = await _get_prompt_text("auto_tune_constraint_problem", {"problem": SAMPLE_PROBLEM})
+    normalized = " ".join(text.split()).lower()
+
+    assert "target_dir" in text
+    assert "absolute" in normalized
+    assert "only when the user asks" in normalized
+
+
+@pytest.mark.asyncio
+async def test_auto_tune_constraint_problem_prompt_cpsat_default_safety() -> None:
+    text = await _get_prompt_text("auto_tune_constraint_problem", {"problem": SAMPLE_PROBLEM})
+    lower = " ".join(text.split()).lower()
+
+    # Every drafted/rewritten CP-SAT candidate carries the same no-network,
+    # no-file-mutation default as the single-backend solve_cpsat_python prompt.
+    assert "no network access, no file writes or deletes" in lower
+    assert "unless the user explicitly requested it" in lower
+
+
+@pytest.mark.asyncio
+async def test_auto_tune_constraint_problem_prompt_requires_per_candidate_portfolio_jobs() -> None:
+    text = await _get_prompt_text("auto_tune_constraint_problem", {"problem": SAMPLE_PROBLEM})
+    normalized = " ".join(text.split())
+    lower = normalized.lower()
+
+    assert (
+        "submitting one `submit_portfolio_job` call per smoke-surviving minizinc candidate" in lower
+    )
+    assert (
+        "never race multiple candidate formulations inside one `submit_portfolio_job` call" in lower
+    )
+
+
+@pytest.mark.asyncio
+async def test_auto_tune_constraint_problem_prompt_ranks_feasibility_without_objective() -> None:
+    text = await _get_prompt_text("auto_tune_constraint_problem", {"problem": SAMPLE_PROBLEM})
+    normalized = " ".join(text.split())
+    lower = normalized.lower()
+
+    # A pure `solve satisfy;` problem has no objective (SolveResult.objective
+    # is null), so ranking tuning-stage MiniZinc candidates by "best objective"
+    # only applies to optimization; feasibility candidates rank by status
+    # instead.
+    assert "for an optimization problem, rank by best `objective`, then elapsed time" in lower
+    assert "for a pure feasibility (`solve satisfy;`) problem there is no `objective`" in lower
+    assert "rank by `status` instead" in lower
+
+
+@pytest.mark.asyncio
+async def test_auto_tune_constraint_problem_prompt_states_portfolio_racing_reason() -> None:
+    text = await _get_prompt_text("auto_tune_constraint_problem", {"problem": SAMPLE_PROBLEM})
+    lower = " ".join(text.split()).lower()
+
+    # The reason a single formulation per submit_portfolio_job call is required:
+    # first-decisive-result treats unsatisfiable/unbounded as decisive, and the
+    # checker verdict never gates that selection, so a buggy candidate could win.
+    assert "first-decisive-result" in text
+    assert "unsatisfiable" in lower
+    assert "unbounded" in lower
+    assert "decisive" in lower
+    assert "observational" in lower
+    assert "buggy formulation could otherwise" in lower
+
+
+@pytest.mark.asyncio
+async def test_auto_tune_constraint_problem_prompt_cpsat_racing_not_split_per_candidate() -> None:
+    text = await _get_prompt_text("auto_tune_constraint_problem", {"problem": SAMPLE_PROBLEM})
+    normalized = " ".join(text.split())
+    lower = normalized.lower()
+
+    # Unlike MiniZinc portfolio racing, run_cpsat_python_experiment's own
+    # acceptance gate (solution required; checker-accepted when supplied)
+    # already excludes an incorrect formulation, so one call across candidates
+    # is safe and per-candidate calls are not required.
+    assert "one `run_cpsat_python_experiment` call across the smoke-surviving cp-sat" in lower
+    assert "not required to split into per-candidate calls" in lower
+    assert "present solution" in lower
+
+
+@pytest.mark.asyncio
+async def test_auto_tune_constraint_problem_prompt_backend_local_winner_selection() -> None:
+    text = await _get_prompt_text("auto_tune_constraint_problem", {"problem": SAMPLE_PROBLEM})
+    lower = " ".join(text.split()).lower()
+
+    assert "choose winners within a backend only" in lower
+    assert "never merge candidates from both backends into one race" in lower
+
+    # Cross-backend comparison is gated on matching objective and sense, and
+    # a mismatch defers to the user rather than an auto-picked winner.
+    assert (
+        "compare each backend's final, checker-validated result across "
+        "backends only when both represent the same objective and "
+        "objective sense" in lower
+    )
+    assert (
+        "when the objectives or senses don't match, ask the user which "
+        "backend/result to keep instead of picking one yourself" in lower
+    )
+
+
+@pytest.mark.asyncio
+async def test_auto_tune_constraint_problem_prompt_recheck_uses_bounded_solve_not_check() -> None:
+    text = await _get_prompt_text("auto_tune_constraint_problem", {"problem": SAMPLE_PROBLEM})
+    normalized = " ".join(text.split())
+    lower = normalized.lower()
+
+    # The full-instance re-check must use a bounded solve call, never the
+    # compile-only check tools, quoting their own "compiles, not satisfiable"
+    # disclaimer as the reason.
+    assert "a bounded `solve_minizinc_model`/`solve_minizinc_files` call" in lower
+    assert "never `check_minizinc_model`/`check_minizinc_files`" in lower
+    assert "`ok` means it compiles, not that it is satisfiable" in normalized
+
+    # CP-SAT's re-check must go through a CHECKED background job, since
+    # run_cpsat_python (the inline tool) has no checker parameter at all.
+    assert "submit_cpsat_python_job` with the checker" in normalized
+    assert "poll `get_cpsat_python_job` until terminal" in lower
+    assert "no `checker` parameter at all" in lower
+
+
+@pytest.mark.asyncio
+async def test_auto_tune_constraint_problem_prompt_recheck_pass_fail_inconclusive_gate() -> None:
+    text = await _get_prompt_text("auto_tune_constraint_problem", {"problem": SAMPLE_PROBLEM})
+    normalized = " ".join(text.split())
+    lower = normalized.lower()
+
+    # Stop on unsatisfiable/error/checker-violation; proceed-but-flag on
+    # timeout/unknown, since that is inconclusive rather than a hard failure.
+    assert "stop and report the failure to the user instead of proceeding to the" in lower
+    assert "inconclusive" in lower
+    assert "proceed to the final solve, but flag that the" in lower
+
+
+@pytest.mark.asyncio
+async def test_auto_tune_constraint_problem_prompt_recheck_stop_gate_is_backend_specific() -> None:
+    text = await _get_prompt_text("auto_tune_constraint_problem", {"problem": SAMPLE_PROBLEM})
+    normalized = " ".join(text.split())
+    lower = normalized.lower()
+
+    # CP-SAT's status vocabulary has no "unsatisfiable" value (it uses
+    # "infeasible" instead), so the stop gate must name each backend's own
+    # failure status rather than checking one literal for both.
+    assert "minizinc's `unsatisfiable`/`error`" in lower
+    assert "cp-sat's `infeasible`/`error`" in lower
+    assert "cp-sat's status vocabulary has no `unsatisfiable` value" in lower
+
+
+@pytest.mark.asyncio
+async def test_auto_tune_constraint_problem_prompt_recheck_requires_clean_checker_pass() -> None:
+    text = await _get_prompt_text("auto_tune_constraint_problem", {"problem": SAMPLE_PROBLEM})
+    normalized = " ".join(text.split())
+    lower = normalized.lower()
+
+    # Once a solution was produced, only a clean "completed"/"accepted"
+    # checker outcome counts as verified; a genuine checker error/timeout or
+    # an explicit violation/rejection must stop the re-check.
+    assert 'checker.status == "completed"' in lower
+    assert 'checker.status == "accepted"' in lower
+    assert "clean pass to count as verified" in lower
+    assert "has no inconclusive middle ground" in lower
+
+
+@pytest.mark.asyncio
+async def test_auto_tune_constraint_problem_prompt_recheck_exempts_no_incumbent_checker() -> None:
+    text = await _get_prompt_text("auto_tune_constraint_problem", {"problem": SAMPLE_PROBLEM})
+    normalized = " ".join(text.split())
+    lower = normalized.lower()
+
+    # A timeout/unknown re-check with NO incumbent has nothing for the
+    # checker to check (MiniZinc: checker.status "no_solution"; CP-SAT: a
+    # skipped checker) — that is the EXPECTED outcome in this case, not a
+    # separate failure, so it must not trip the checker clean-pass gate and
+    # contradict the status gate's own "proceed but flag" instruction.
+    assert "no incumbent solution is inconclusive" in lower
+    assert "a `checker.status` of `no_solution`" in lower
+    assert "sets `checker_skipped_reason` instead of running `checker`" in lower
+    assert "do not apply the checker gate below to it" in lower
+
+
+@pytest.mark.asyncio
+async def test_auto_tune_constraint_problem_prompt_gates_final_presentation_on_checker() -> None:
+    text = await _get_prompt_text("auto_tune_constraint_problem", {"problem": SAMPLE_PROBLEM})
+    normalized = " ".join(text.split())
+    lower = normalized.lower()
+
+    # submit_portfolio_job/submit_solve_job/submit_cpsat_python_job all treat
+    # their checker verdict as observational — none refuses a checker-violated
+    # result — so the prompt itself must gate presentation on that verdict
+    # rather than trusting the tools to have already done so.
+    assert "checker_status` is observational" in lower
+    assert "`solveresult.checker` and" in lower
+    assert "stop and report the violation to the user instead of presenting the result" in lower
+    assert "automatically satisfied whenever that path was used" in lower
+
+
+@pytest.mark.asyncio
+async def test_auto_tune_constraint_problem_prompt_final_presentation_requires_clean_checker() -> (
+    None
+):
+    text = await _get_prompt_text("auto_tune_constraint_problem", {"problem": SAMPLE_PROBLEM})
+    normalized = " ".join(text.split())
+    lower = normalized.lower()
+
+    # Once a solution was produced, a checker "error"/"timeout" or an
+    # explicit violation/rejection must also fail this gate, not just a
+    # nominal "not a clean pass" reading of any outcome.
+    assert "clean pass to count as verified" in lower
+    assert '`checker.status` of exactly `"completed"`' in lower
+    assert '`checker.status` of exactly `"accepted"`' in lower
+    assert "correctness was not confirmed" in lower
+
+
+@pytest.mark.asyncio
+async def test_auto_tune_constraint_problem_prompt_final_presentation_exempts_no_incumbent() -> (
+    None
+):
+    text = await _get_prompt_text("auto_tune_constraint_problem", {"problem": SAMPLE_PROBLEM})
+    normalized = " ".join(text.split())
+    lower = normalized.lower()
+
+    # The same no-incumbent exemption applies to the final terminal result:
+    # a timeout/unknown result with no solution has nothing for the checker
+    # to check, so that outcome must not block presenting it (flagged as
+    # unproven) — the checker requirement only binds once a solution exists.
+    assert "nothing for the checker to check" in lower
+    assert "reports `checker.status` of `no_solution`" in lower
+    assert "sets `checker_skipped_reason` instead of `checker`" in lower
+    assert "present that result (flagged as unproven)" in lower
+
+
+@pytest.mark.asyncio
+async def test_auto_tune_constraint_problem_prompt_smoke_reject_only_tuning_separate() -> None:
+    text = await _get_prompt_text("auto_tune_constraint_problem", {"problem": SAMPLE_PROBLEM})
+    normalized = " ".join(text.split())
+    lower = normalized.lower()
+
+    assert "use it only to reject structurally broken candidates" in lower
+    assert "this step never ranks or selects a winner among the candidates that pass" in lower
+    assert "create a separate, larger representative tuning instance" in lower
+    assert "never rank or select using the smoke instance's results" in lower
+
+
+@pytest.mark.asyncio
+async def test_auto_tune_constraint_problem_prompt_smoke_tuning_not_used_as_provenance() -> None:
+    text = await _get_prompt_text("auto_tune_constraint_problem", {"problem": SAMPLE_PROBLEM})
+    normalized = " ".join(text.split())
+    lower = normalized.lower()
+
+    assert (
+        "only the full-instance final run's result is ever presented to the user "
+        "or used as save-tool provenance" in lower
+    )
+    assert (
+        "do not present a provisional candidate as the answer, and do not use its "
+        "result as save-tool provenance" in lower
+    )
+    assert "never a smoke or representative-tuning result" in lower
+
+
+@pytest.mark.asyncio
+async def test_auto_tune_constraint_problem_prompt_requires_checker_for_multi_candidate() -> None:
+    text = await _get_prompt_text("auto_tune_constraint_problem", {"problem": SAMPLE_PROBLEM})
+    normalized = " ".join(text.split())
+    lower = normalized.lower()
+
+    assert "draft a checker whenever more than one candidate is being compared, not" in lower
+    assert (
+        "a checker is what stops an incorrect formulation from winning the "
+        "tuning-stage race" in lower
+    )
+
+
+@pytest.mark.asyncio
+async def test_auto_tune_constraint_problem_prompt_requires_two_checkers_cross_backend() -> None:
+    text = await _get_prompt_text("auto_tune_constraint_problem", {"problem": SAMPLE_PROBLEM})
+    normalized = " ".join(text.split())
+    lower = normalized.lower()
+
+    assert "draft two backend-specific checkers that enforce the same problem constraints" in lower
+    assert "not interchangeable source" in lower
+    assert "inline minizinc solution-checker source" in lower
+    assert "reads the solution as json from `sys.argv[1]`" in lower
+
+
+@pytest.mark.asyncio
+async def test_auto_tune_constraint_problem_prompt_ties_provenance_fields_to_specific_tools() -> (
+    None
+):
+    text = await _get_prompt_text("auto_tune_constraint_problem", {"problem": SAMPLE_PROBLEM})
+    normalized = " ".join(text.split())
+    lower = normalized.lower()
+
+    assert "its `solveresult` carries no `portfolio_result` field" in lower
+    assert "a final run made through `submit_solve_job` has no `portfolio_result` to pass" in lower
+    assert (
+        "a final run made through `submit_cpsat_python_job` has no `experiment_result` to pass"
+        in lower
+    )
+    assert "the synchronous `run_cpsat_python_experiment`" in normalized
+
+
+@pytest.mark.asyncio
+async def test_auto_tune_constraint_problem_prompt_save_provenance_conditional_on_finalist() -> (
+    None
+):
+    text = await _get_prompt_text("auto_tune_constraint_problem", {"problem": SAMPLE_PROBLEM})
+    normalized = " ".join(text.split())
+    lower = normalized.lower()
+
+    assert "plus `portfolio_result` only when the final run used `submit_portfolio_job`" in lower
+    assert (
+        "plus `experiment_result` only when the final run used the synchronous "
+        "`run_cpsat_python_experiment`" in lower
+    )
+
+
+@pytest.mark.asyncio
+async def test_auto_tune_constraint_problem_prompt_save_replays_checker_not_just_provenance() -> (
+    None
+):
+    text = await _get_prompt_text("auto_tune_constraint_problem", {"problem": SAMPLE_PROBLEM})
+    normalized = " ".join(text.split())
+    lower = normalized.lower()
+
+    # Provenance (`portfolio_result`/`experiment_result`) never re-runs or gates on a
+    # checker; only a `checker` argument passed directly to the save call does.
+    assert "`portfolio_result`/`experiment_result` are provenance only" in lower
+    assert (
+        "when the same `checker` you attached to the finalist run is passed directly "
+        "to the save call itself" in lower
+    )
+    assert "dropping `checker` from the save call silently saves at a weaker" in lower
+    # Both backend save bullets must carry the finalist's checker and problem text
+    # forward, not only their provenance object.
+    assert lower.count("the same `checker` (when one was drafted for the finalist run)") == 2
+    assert lower.count("the original problem text as `problem`") == 2
+
+
+@pytest.mark.asyncio
+async def test_auto_tune_constraint_problem_prompt_names_search_space_reduction_techniques() -> (
+    None
+):
+    text = await _get_prompt_text("auto_tune_constraint_problem", {"problem": SAMPLE_PROBLEM})
+    normalized = " ".join(text.split())
+    lower = normalized.lower()
+
+    # Candidates must vary along an axis that actually changes search-space
+    # size, not just cosmetic structure.
+    assert (
+        "vary something that actually changes the search space, not just cosmetic "
+        "structure" in lower
+    )
+    assert "symmetry breaking" in lower
+    assert "draft one candidate with symmetry breaking and one without" in lower
+    assert "implied/redundant constraints" in lower
+    assert "global vs. decomposed constraints" in lower
+    assert "variable domain tightening" in lower
+    assert (
+        "do not draft candidates that differ only in variable naming, constraint "
+        "ordering, or code style" in lower
+    )
+
+
+@pytest.mark.asyncio
+async def test_auto_tune_constraint_problem_prompt_names_search_strategy_techniques() -> None:
+    text = await _get_prompt_text("auto_tune_constraint_problem", {"problem": SAMPLE_PROBLEM})
+    normalized = " ".join(text.split())
+    lower = normalized.lower()
+
+    # Search strategy (exploration order) is distinct from search-space size.
+    assert (
+        "search strategy is a second, complementary axis, distinct from search "
+        "space size" in lower
+    )
+    # MiniZinc: restart annotations paired with seed racing, solver-gated.
+    assert "restart_luby" in lower
+    assert "restart_geometric" in lower
+    assert "only gecode/chuffed honor restart annotations" in lower
+    assert (
+        "cp-sat ignores them and runs its own restarts, so pair a restart-annotated "
+        "candidate with a restart-aware solver in `solvers`, not with `org.cp-sat`" in lower
+    )
+    # CP-SAT: num_workers enables automatic LNS/restarts; no hand-rolled LNS.
+    assert "solver.parameters.num_workers` above 1" in lower
+    assert "already includes automatic lns and restarts" in lower
+    assert "do not draft a custom fix-and-reoptimize lns loop" in lower
+
+
+@pytest.mark.asyncio
+async def test_auto_tune_constraint_problem_prompt_requires_shared_dzn_interface() -> None:
+    text = await _get_prompt_text("auto_tune_constraint_problem", {"problem": SAMPLE_PROBLEM})
+    normalized = " ".join(text.split())
+    lower = normalized.lower()
+
+    assert "fix one shared `.dzn` parameter interface" in lower
+    assert "the parameter interface itself stays fixed" in lower
+
+
+@pytest.mark.asyncio
+async def test_auto_tune_constraint_problem_prompt_requires_cpsat_rewrite_each_stage() -> None:
+    text = await _get_prompt_text("auto_tune_constraint_problem", {"problem": SAMPLE_PROBLEM})
+    normalized = " ".join(text.split())
+    lower = normalized.lower()
+
+    assert "it will be rewritten, not reused verbatim, at the representative" in lower
+    assert "rewritten with the representative tuning instance's values hardcoded" in lower
+    assert "rewrite the provisional approach with the full instance's" in lower
+
+
+@pytest.mark.asyncio
+async def test_auto_tune_constraint_problem_prompt_includes_existing_model_as_candidate() -> None:
+    text = await _get_prompt_text("auto_tune_constraint_problem", {"problem": SAMPLE_PROBLEM})
+    normalized = " ".join(text.split())
+    lower = normalized.lower()
+
+    assert "review it" in lower
+    assert "include it as one candidate formulation in the drafted set" in lower
+    assert "do not ignore it, and do not treat it as the only candidate" in lower
+
+
+@pytest.mark.asyncio
+async def test_auto_tune_constraint_problem_prompt_never_overwrites_original_except_save() -> None:
+    text = await _get_prompt_text("auto_tune_constraint_problem", {"problem": SAMPLE_PROBLEM})
+    normalized = " ".join(text.split())
+    lower = normalized.lower()
+
+    assert "must never be rewritten to fit it" in lower
+    assert "the original file is never overwritten in place by a" in lower
+    assert "the only write to the original file's path remains the explicit final save step" in (
+        lower
+    )
+
+
+@pytest.mark.asyncio
+async def test_auto_tune_constraint_problem_prompt_non_parameterized_mzn_needs_permission() -> None:
+    text = await _get_prompt_text("auto_tune_constraint_problem", {"problem": SAMPLE_PROBLEM})
+    normalized = " ".join(text.split())
+    lower = normalized.lower()
+
+    assert "hardcodes instance data instead of reading it from a `.dzn`" in lower
+    assert "cannot scale through data values alone" in lower
+    assert "ask the user before deriving a parameterized copy for multi-scale racing" in lower
+
+
+def test_auto_tune_constraint_problem_named_in_instructions_and_sibling_prompts() -> None:
+    # Mirrors test_backend_routing_presents_minizinc_and_cpsat_as_peers: a client
+    # without prompt-listing support must still be able to find the auto-tune
+    # prompt from the server instructions or either single-backend prompt.
+    assert "auto_tune_constraint_problem" in MCP_SERVER_INSTRUCTIONS
+    assert "auto_tune_constraint_problem" in SOLVE_CONSTRAINT_PROBLEM_PROMPT
+    assert "auto_tune_constraint_problem" in SOLVE_CPSAT_PYTHON_PROMPT
+
+    assert "solve_constraint_problem" in AUTO_TUNE_CONSTRAINT_PROBLEM_PROMPT_DESCRIPTION
+    assert "solve_cpsat_python" in AUTO_TUNE_CONSTRAINT_PROBLEM_PROMPT_DESCRIPTION
