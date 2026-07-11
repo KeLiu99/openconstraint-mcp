@@ -38,6 +38,7 @@ from .minizinc.core import (
 from .minizinc.core import find_unsat_core as _find_unsat_core
 from .protocol_text import status
 from .protocol_text.descriptions import (
+    AUTO_TUNE_CONSTRAINT_PROBLEM_PROMPT_DESCRIPTION,
     CANCEL_CPSAT_PYTHON_JOB_DESCRIPTION,
     CANCEL_PORTFOLIO_JOB_DESCRIPTION,
     CANCEL_SOLVE_JOB_DESCRIPTION,
@@ -70,7 +71,11 @@ from .protocol_text.descriptions import (
     SUBMIT_PORTFOLIO_JOB_DESCRIPTION,
     SUBMIT_SOLVE_JOB_DESCRIPTION,
 )
-from .protocol_text.prompts import SOLVE_CONSTRAINT_PROBLEM_PROMPT, SOLVE_CPSAT_PYTHON_PROMPT
+from .protocol_text.prompts import (
+    AUTO_TUNE_CONSTRAINT_PROBLEM_PROMPT,
+    SOLVE_CONSTRAINT_PROBLEM_PROMPT,
+    SOLVE_CPSAT_PYTHON_PROMPT,
+)
 from .protocol_text.results import (
     format_cpsat_experiment_content,
     format_save_result_content,
@@ -1052,6 +1057,13 @@ def create_mcp_server() -> FastMCP:
     )
     def solve_cpsat_python_prompt(problem: str) -> str:
         return SOLVE_CPSAT_PYTHON_PROMPT.format(problem=problem)
+
+    @mcp.prompt(
+        name="auto_tune_constraint_problem",
+        description=AUTO_TUNE_CONSTRAINT_PROBLEM_PROMPT_DESCRIPTION,
+    )
+    def auto_tune_constraint_problem_prompt(problem: str) -> str:
+        return AUTO_TUNE_CONSTRAINT_PROBLEM_PROMPT.format(problem=problem)
 
     return mcp
 

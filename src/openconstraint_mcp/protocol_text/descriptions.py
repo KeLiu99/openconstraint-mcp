@@ -106,7 +106,11 @@ MCP_SERVER_INSTRUCTIONS = (
     "checker verification, portfolio racing, and `num_solutions` enumeration. "
     "For a natural-language problem, use the matching prompt when the client "
     "supports MCP prompts: solve_constraint_problem (MiniZinc) or "
-    "solve_cpsat_python (CP-SAT Python). Without prompts: for MiniZinc, draft "
+    "solve_cpsat_python (CP-SAT Python). To compare several candidate "
+    "formulations before committing to one, use auto_tune_constraint_problem "
+    "instead — a three-tier smoke/tuning/full-instance workflow that races "
+    "candidates within one or both backends and presents only the "
+    "full-instance final result. Without prompts: for MiniZinc, draft "
     "the model in the client LLM, check it with check_minizinc_model, then "
     "solve with solve_minizinc_model; for CP-SAT, write a conforming script "
     "and run it with run_cpsat_python (bounded child process: timeout, 1 MB "
@@ -790,6 +794,21 @@ SOLVE_CPSAT_PYTHON_PROMPT_DESCRIPTION = (
     "solve_constraint_problem prompt: pick it for zero-install solving (no "
     "managed runtime needed), pure integer/scheduling problems, imperative "
     "pre-processing, or custom data structures."
+)
+
+AUTO_TUNE_CONSTRAINT_PROBLEM_PROMPT_DESCRIPTION = (
+    "Guide the MCP client's LLM through a three-tier auto-tuning workflow "
+    "that compares several MiniZinc and/or CP-SAT candidate formulations "
+    "before presenting one winner: a tiny smoke check that only rejects "
+    "structurally broken candidates (never ranks), a separate representative "
+    "tuning instance that races the survivors via submit_portfolio_job / "
+    "run_cpsat_python_experiment to a provisional per-backend candidate, and "
+    "a full-instance re-check plus final solve that alone supplies the "
+    "presented result and any save-tool provenance. A peer of "
+    "solve_constraint_problem and solve_cpsat_python: pick it when the "
+    "user's own framing asks for formulations to be compared before "
+    "committing to one, not as an automatic escalation from a single hard "
+    "run inside either single-backend prompt."
 )
 
 # --- CP-SAT background job descriptions -------------------------------------

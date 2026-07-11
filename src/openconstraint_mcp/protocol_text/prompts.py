@@ -99,7 +99,10 @@ Otherwise:
    Python path (`solve_cpsat_python` prompt, `run_cpsat_python`) on the
    same problem — neither backend dominates every problem shape, and the
    structured results and checkers from both let you compare outcomes
-   before committing to one.
+   before committing to one. When the user instead wants SEVERAL candidate
+   formulations raced against each other before committing to any one of
+   them, use the `auto_tune_constraint_problem` prompt instead of ad hoc
+   solo runs — it structures a three-tier smoke/tuning/full-instance race.
 
 7. Present the result as a short, structured summary; do not dump the raw
    `SolveResult`. Lead with the result itself; do not narrate the prompt,
@@ -311,7 +314,11 @@ User problem:
      consider the MiniZinc portfolio path (`solve_constraint_problem`
      prompt, `submit_portfolio_job`) on the same problem — neither backend
      dominates every problem shape, and the structured results and checkers
-     from both let you compare outcomes before committing to one.
+     from both let you compare outcomes before committing to one. When the
+     user instead wants SEVERAL candidate formulations raced against each
+     other before committing to any one of them, use the
+     `auto_tune_constraint_problem` prompt instead of ad hoc solo runs — it
+     structures a three-tier smoke/tuning/full-instance race.
 
 6. For MULTIPLE explicit attempts — comparing model/source variants, or the
    same source under different cooperative configs — use
@@ -426,4 +433,209 @@ Boundaries:
   uploads, no hidden network calls. The server wrapper makes no network
   calls; an LLM-generated script or checker that reaches the network is
   user-directed.
+"""
+
+AUTO_TUNE_CONSTRAINT_PROBLEM_PROMPT = """\
+You are the MCP client's reasoning model. Compare several MiniZinc and/or
+OR-Tools CP-SAT formulations, then present one full-instance result.
+
+Use this prompt only when the user asks to compare approaches, not
+automatically after a hard single-backend run. This is client-side
+orchestration: you draft and select candidates; openconstraint-mcp only
+checks, runs, and verifies them locally.
+
+User problem:
+{problem}
+
+Use three tiers: a tiny smoke instance rejects broken candidates, a separate
+representative tuning instance selects one provisional candidate per backend,
+and the full instance re-checks and solves each finalist. Only the
+full-instance final run's result is ever presented to the user or used as
+save-tool provenance.
+
+1. Identify the decision variables, domains, constraints, and objective. Ask
+   concise questions if required values, bounds, tie-breakers, or the objective
+   are missing; do not invent them.
+
+2. Look for an existing `.mzn`/`.dzn` pair or CP-SAT `solution.py`. If found,
+   review it (revise only with the user's agreement) and include it as ONE
+   candidate formulation in the drafted set. Do not ignore it, and do not
+   treat it as the only candidate.
+
+3. Draft a small candidate set. Vary something that actually changes the
+   SEARCH SPACE, not just cosmetic structure:
+   - symmetry breaking; for interchangeable objects, draft one candidate WITH
+     symmetry breaking and one WITHOUT;
+   - implied/redundant constraints;
+   - global vs. decomposed constraints such as `alldifferent`, `cumulative`,
+     or `circuit` and their CP-SAT equivalents;
+   - variable domain tightening.
+   Do not draft candidates that differ only in variable naming, constraint
+   ordering, or code style. Search STRATEGY is a second, complementary axis,
+   distinct from search space size.
+
+   Backend rules:
+   - MiniZinc: fix ONE shared `.dzn` parameter interface (names, types, and
+     shapes) across all candidates. Only data values scale between tiers; the
+     parameter interface itself stays fixed. When an existing `.mzn` is a
+     candidate, the shared interface is that model's interface: new candidates
+     conform to it, and the existing `.mzn` text must never be rewritten to
+     fit it. If the existing `.mzn` hardcodes instance data instead of reading
+     it from a `.dzn`, it cannot scale through data values alone: ask the user
+     before deriving a parameterized copy for multi-scale racing. Without
+     permission, race it only at its existing scale and skip tiers it cannot
+     reach. For search strategy, pair `restart_luby` or `restart_geometric`
+     with multiple tuning-stage seeds.
+     Only Gecode/Chuffed honor restart annotations; CP-SAT ignores them and
+     runs its own restarts, so pair a restart-annotated candidate with a
+     restart-aware solver in `solvers`, not with `org.cp-sat`.
+   - CP-SAT: hardcode the smoke values first. It will be REWRITTEN, not reused
+     verbatim, at the representative tuning and full-instance stages; the
+     provisional candidate is an approach, not a fixed source string. Use an
+     existing `solution.py` as-is for smoke, but the original file is never
+     overwritten in place by a stage rewrite; the only write to the original
+     file's path remains the explicit final save step. For search strategy,
+     `solver.parameters.num_workers` above 1 enables OR-Tools' portfolio,
+     which already includes automatic LNS and restarts. Do not draft a custom
+     fix-and-reoptimize LNS loop. Multiple workers trade reproducibility for
+     search power, so rerun every tier. Generate only CP-SAT modeling code: no
+     network access, no file writes or deletes, and no subprocesses unless the
+     user explicitly requested it.
+
+4. Create a tiny smoke instance and use it ONLY to reject structurally broken
+   candidates: `inspect_minizinc_model` then `check_minizinc_model` for each
+   MiniZinc candidate, and one short `run_cpsat_python` per CP-SAT candidate.
+   This step never ranks or selects a winner among the candidates that pass.
+
+5. Call `list_available_solvers` before any MiniZinc portfolio work.
+
+6. Create a SEPARATE, larger representative tuning instance that exercises
+   the problem's structure. Never rank or select using the smoke instance's
+   results. Reuse MiniZinc's fixed `.dzn` interface with larger values. Each
+   CP-SAT candidate is REWRITTEN with the representative tuning instance's
+   values hardcoded.
+
+7. Choose winners WITHIN a backend only; never merge candidates from both
+   backends into one race. Draft a checker whenever more than one candidate is
+   being compared, not only across backends: a checker is what stops an
+   incorrect formulation from winning the tuning-stage race. For a
+   cross-backend comparison, draft TWO backend-specific checkers that enforce
+   the same problem constraints. They are NOT interchangeable source:
+   MiniZinc uses inline MiniZinc solution-checker source; CP-SAT uses a Python
+   script that reads the solution as JSON from `sys.argv[1]`. Compare each
+   backend's final, checker-validated result across backends only when both
+   represent the SAME objective and objective sense. When the objectives or
+   senses don't match, ask the user which backend/result to keep instead of
+   picking one yourself. Checkers remain optional for a single-backend,
+   single-candidate run.
+
+8. Select the PROVISIONAL MiniZinc candidate by submitting ONE
+   `submit_portfolio_job` call PER smoke-surviving MiniZinc candidate (one
+   model, with any solver/seed variants). Attach the checker when comparing
+   candidates. Compare decisive, checker-accepted results across jobs: for an
+   OPTIMIZATION problem, rank by best `objective`, then elapsed time; for a
+   pure feasibility (`solve satisfy;`) problem there is no `objective`, so
+   rank by `status` instead (`satisfied` outranks `unsatisfiable`), then elapsed
+   time. NEVER race multiple candidate formulations inside one
+   `submit_portfolio_job` call: its `first-decisive-result` winner treats
+   `unsatisfiable` and `unbounded` as decisive, while the checker verdict is
+   observational. A buggy formulation could otherwise win. Never trust one
+   portfolio's `winner` across formulations.
+
+9. Select the PROVISIONAL CP-SAT candidate with ONE
+   `run_cpsat_python_experiment` call across the smoke-surviving CP-SAT
+   candidates. Attach the checker when comparing candidates. The tool accepts
+   only attempts with a present solution and, when supplied, an `"accepted"`
+   checker result, so it is NOT required to split into per-candidate calls.
+
+10. Do not present a provisional candidate as the answer, and do not use its
+    result as save-tool provenance.
+
+11. Re-check each provisional formulation on the FULL instance:
+    - MiniZinc: use a BOUNDED `solve_minizinc_model`/`solve_minizinc_files` call
+      with full `data`, a short `timeout_ms`, and the checker. Never
+      `check_minizinc_model`/`check_minizinc_files`: "`ok` means it compiles,
+      not that it is satisfiable."
+    - CP-SAT: REWRITE the provisional approach with the full instance's values
+      hardcoded, then use `submit_cpsat_python_job` with the checker and poll
+      `get_cpsat_python_job` until terminal. `run_cpsat_python` has no `checker`
+      parameter at all. Keep this exact full-instance `source` for the final
+      job and any save.
+    - Stop on MiniZinc's `unsatisfiable`/`error` or CP-SAT's
+      `infeasible`/`error`; CP-SAT's status vocabulary has no `unsatisfiable`
+      value. STOP and report the failure to the user instead of proceeding to
+      the final solve.
+    - A `timeout`/`unknown` re-check with NO incumbent solution is
+      INCONCLUSIVE: proceed to the final solve, but flag that the pre-check did
+      not confirm feasibility. MiniZinc returns a `checker.status` of
+      `no_solution`; CP-SAT sets `checker_skipped_reason` instead of running
+      `checker`. Do not apply the checker gate below to it.
+    This is a pass/fail gate, not the result presented to the user.
+
+12. Apply this checker gate to the re-check and final result whenever a
+    solution exists and a checker was attached: the checker outcome must be a
+    CLEAN pass to count as verified. MiniZinc requires a `checker.status` of
+    exactly `"completed"` (a portfolio attempt reports the same verdict as
+    `checker_status`); CP-SAT requires a `checker.status` of exactly
+    `"accepted"`. Anything short of `checker.status == "completed"` /
+    `checker.status == "accepted"` — a `violation`/`rejected` verdict, or a
+    checker `error`/`timeout` on a real solution — means correctness was NOT
+    confirmed: STOP. Once a solution exists, this gate has no inconclusive
+    middle ground.
+
+13. Submit the full-instance final solve:
+    - MiniZinc: use `submit_portfolio_job` if `portfolio_result` provenance
+      will be saved, even for one model/solver; otherwise use
+      `submit_solve_job` — its `SolveResult` carries no `portfolio_result`
+      field.
+    - CP-SAT: use the SYNCHRONOUS `run_cpsat_python_experiment` if
+      `experiment_result` provenance will be saved. If that cannot fit a
+      synchronous call, use `submit_cpsat_python_job` and save without
+      `experiment_result`; there is no background experiment tool.
+    Pass the relevant checker to the finalist call.
+
+14. Poll the matching tool: `submit_portfolio_job` polls with
+    `get_portfolio_job`; `submit_solve_job` polls with `get_solve_job`;
+    `submit_cpsat_python_job` polls with `get_cpsat_python_job`. Read a
+    synchronous experiment directly. Only this terminal result is presented.
+
+    Before presenting a solution, apply step 12. A portfolio winner's
+    `checker_status` is OBSERVATIONAL; `submit_solve_job`'s
+    `SolveResult.checker` and `submit_cpsat_python_job`'s `checker` are also
+    observational, so those tools may return an invalid solution. If the gate
+    fails, STOP and report the violation to the user instead of presenting the
+    result. A synchronous `run_cpsat_python_experiment` already filters
+    rejected attempts, so this check is automatically satisfied whenever that
+    path was used.
+
+    A terminal `timeout`/`unknown` without an incumbent has nothing for the
+    checker to check. MiniZinc reports `checker.status` of `no_solution`;
+    CP-SAT sets `checker_skipped_reason` instead of `checker`. Present that
+    result (flagged as unproven). Otherwise lead with the actual solve result,
+    explain it in the user's terms, and include the complete Statistics
+    section when present; do not narrate the workflow or tool names you used
+    unless the user asks for those implementation details.
+
+15. Save only when the user asks, using an explicit absolute `target_dir` and
+    the full-instance final run's result as provenance — never a smoke or
+    representative-tuning result.
+    `portfolio_result`/`experiment_result` are PROVENANCE ONLY; the save call
+    hash-verifies provenance against the exact artifact and re-verifies it. It
+    reaches checked verification only when the SAME `checker` you attached to
+    the finalist run is passed directly to the save call itself.
+    Dropping `checker` from the save call silently saves at a weaker level.
+    - MiniZinc: pass the exact model/data/solver/seed, the SAME `checker` (when
+      one was drafted for the finalist run), and the original problem text as
+      `problem`; plus `portfolio_result` ONLY when the final run used
+      `submit_portfolio_job`. A final run made through `submit_solve_job` has no
+      `portfolio_result` to pass.
+    - CP-SAT: pass the exact source/seed/config, the SAME `checker` (when one
+      was drafted for the finalist run), and the original problem text as
+      `problem`; plus `experiment_result` ONLY when the final run used the
+      synchronous `run_cpsat_python_experiment`. A final run made through
+      `submit_cpsat_python_job` has no `experiment_result` to pass.
+
+Boundaries: openconstraint-mcp calls no LLM, runs no agent loop, and makes no
+hidden network calls. Solving stays local; CP-SAT children are unsandboxed, so
+generate no network or file-mutating code unless the user explicitly asks.
 """

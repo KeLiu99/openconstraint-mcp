@@ -1474,7 +1474,7 @@ direct OR-Tools APIs.
 
 ## MCP prompts
 
-The stdio server exposes two MCP prompts for client-side LLMs:
+The stdio server exposes three MCP prompts for client-side LLMs:
 
 - **`solve_constraint_problem(problem: str)`** — a guided template for the
   MCP client's LLM. Given a natural-language constraint or optimization
@@ -1574,6 +1574,92 @@ The stdio server exposes two MCP prompts for client-side LLMs:
   The server makes no LLM call. The prompt structures how the *client's*
   LLM should write the script; the script is then executed locally by
   `run_cpsat_python`. `LLM writes, server executes locally.`
+
+- **`auto_tune_constraint_problem(problem: str)`** — client-side
+  orchestration for comparing *several* candidate formulations (MiniZinc
+  and/or CP-SAT Python) before presenting one winner, rather than solving a
+  single drafted model. A peer of `solve_constraint_problem` and
+  `solve_cpsat_python` — pick it when the user's own framing asks for
+  formulations to be compared ("try a few approaches", "which formulation is
+  fastest", "compare MiniZinc vs CP-SAT"), not as an automatic escalation
+  from a single hard-instance result. The prompt instructs the client's
+  model through a fixed THREE-tier workflow:
+
+  1. Identify decision variables, domains, constraints, and the objective;
+     ask clarifying questions only when required data is missing. Check for
+     an existing on-disk model (a MiniZinc `.mzn`/`.dzn` pair or a CP-SAT
+     `solution.py`) and, if found, review it and include it as one candidate
+     rather than ignoring it or treating it as the only candidate.
+  2. Draft a small set of MiniZinc and/or CP-SAT candidates, plus the
+     existing on-disk candidate when present. Every MiniZinc candidate fixes
+     one shared `.dzn` parameter interface up front — only the data *values*
+     scale up across stages, since `submit_portfolio_job` races multiple
+     `models` against exactly one shared `data`. Each CP-SAT candidate is
+     drafted with the smoke instance's tiny values hardcoded first and gets
+     REWRITTEN, not reused verbatim, at each later stage.
+  3. **Tiny smoke check** (`inspect_minizinc_model` + `check_minizinc_model`
+     per MiniZinc candidate, one short `run_cpsat_python` per CP-SAT
+     candidate) rejects only structurally broken candidates — it never ranks
+     or selects a winner, since a toy instance does not reliably predict
+     full-scale performance.
+  4. **Representative tuning race**, on a separate, larger instance sized to
+     actually exercise the problem's structure: select a PROVISIONAL
+     MiniZinc candidate with one `submit_portfolio_job` call *per*
+     smoke-surviving candidate (never multiple formulations raced inside one
+     call, since its `first-decisive-result` winner treats
+     `unsatisfiable`/`unbounded` as decisive and its checker verdict is only
+     observational), ranked by best `objective` then elapsed time for an
+     optimization problem, or by `status` then elapsed time for a pure
+     feasibility problem (no `objective` to compare); and a PROVISIONAL
+     CP-SAT candidate with a single `run_cpsat_python_experiment` call across
+     the smoke-surviving CP-SAT candidates (safe to race together, since that
+     tool's own acceptance gate already excludes an incorrect formulation). A
+     checker is required whenever more than one candidate is compared, and
+     two backend-specific checkers are required for cross-backend
+     comparison. Neither the smoke nor the tuning-stage result is ever
+     presented as the answer or used as save-tool provenance.
+  5. **Full-instance re-check**: a bounded `solve_minizinc_model`/
+     `solve_minizinc_files` call (never `check_minizinc_model`/
+     `check_minizinc_files`, which only compile) or a full-instance CP-SAT
+     rewrite run as a CHECKED `submit_cpsat_python_job` (never the plain
+     `run_cpsat_python`, which has no `checker` parameter). Stop and report
+     the failure on MiniZinc's `unsatisfiable`/`error`, CP-SAT's
+     `infeasible`/`error`, or — once a solution exists to check — any
+     checker outcome short of a clean pass (MiniZinc `"completed"`, CP-SAT
+     `"accepted"`; a genuine checker `error`/`timeout` on a real solution
+     also stops). A `timeout`/`unknown` result with NO incumbent is the one
+     inconclusive case: the checker naturally has nothing to check then
+     (MiniZinc `"no_solution"`, or a skipped CP-SAT checker) — that specific
+     combination proceeds to the final solve while flagging that the
+     pre-check did not confirm feasibility, rather than being treated as a
+     checker failure.
+  6. **Final solve** on the full instance: `submit_portfolio_job` (for
+     `portfolio_result` provenance) or `submit_solve_job` for MiniZinc; the
+     synchronous `run_cpsat_python_experiment` (for `experiment_result`
+     provenance) or `submit_cpsat_python_job` for CP-SAT. Poll the matching
+     `get_*_job` tool for whichever background tool was used. This
+     full-instance terminal result — never the smoke, tuning-stage, or
+     re-check result — is what gets presented to the user, but only after
+     checking its checker verdict: the finalist tools' checker fields are
+     all observational (a checker-violated result is never auto-refused), so
+     once a solution exists, anything short of a clean
+     `"completed"`/`"accepted"` pass there still means stop and report it
+     rather than presenting the result as the answer — except a terminal
+     `timeout`/`unknown` with no incumbent, where the checker naturally has
+     nothing to check and that result is still presented, flagged as
+     unproven.
+  7. Optionally — only when the user asks, with an explicit absolute
+     `target_dir` — save the full-instance winner with
+     `save_verified_minizinc_model`/`save_verified_cpsat_python`, passing
+     `portfolio_result`/`experiment_result` only when the final solve
+     actually used `submit_portfolio_job`/the synchronous
+     `run_cpsat_python_experiment`.
+
+  The server calls no LLM and embeds no agent framework anywhere in this
+  workflow; every check, race, and solve still runs through the same
+  deterministic local tools as the two single-backend prompts.
+  `LLM drafts and compares, openconstraint-mcp checks/executes/verifies each
+  candidate.`
 
 ## Example models
 
