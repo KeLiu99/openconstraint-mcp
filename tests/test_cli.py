@@ -1,7 +1,8 @@
 from __future__ import annotations
 
-import importlib
+import os
 import stat
+import subprocess
 import sys
 from pathlib import Path
 
@@ -63,6 +64,19 @@ def test_help_lists_all_commands() -> None:
         "list-solvers",
     ):
         assert cmd in result.stdout
+
+
+def test_stdio_command_delegates_to_server_run_stdio(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls = {"n": 0}
+
+    def _fake_run_stdio() -> None:
+        calls["n"] += 1
+
+    monkeypatch.setattr("openconstraint_mcp.server.run_stdio", _fake_run_stdio)
+
+    result = runner.invoke(app, ["stdio"])
+    assert result.exit_code == 0, result.output
+    assert calls["n"] == 1
 
 
 def test_list_solvers_handles_execution_failure_cleanly(
@@ -533,19 +547,74 @@ def test_configure_runtime_config_write_failure_surfaces_cleanly(
     assert str(target.resolve()) in flat
 
 
-def test_cli_module_does_not_import_httpx_eagerly() -> None:
-    saved = {
-        name: module
-        for name, module in sys.modules.items()
-        if name == "httpx" or name.startswith("openconstraint_mcp")
-    }
-    for name in saved:
-        sys.modules.pop(name, None)
-    try:
-        importlib.import_module("openconstraint_mcp.cli")
-        assert "httpx" not in sys.modules
-    finally:
-        for name in list(sys.modules):
-            if name == "httpx" or name.startswith("openconstraint_mcp"):
-                sys.modules.pop(name, None)
-        sys.modules.update(saved)
+# ---------------------------------------------------------------------------
+# Cold-import and entry-point subprocess tests
+#
+# These run in a fresh interpreter rather than evicting sys.modules in-process:
+# cached third-party intermediaries (e.g. mcp.server.fastmcp, already imported
+# by another test in this session) would otherwise satisfy a re-import without
+# re-importing httpx, making an in-process eviction check pass falsely.
+
+
+def _run_in_subprocess(
+    code: str, *, env: dict[str, str] | None = None
+) -> subprocess.CompletedProcess[str]:
+    merged_env = {**os.environ, **(env or {})}
+    return subprocess.run(
+        [sys.executable, "-c", code],
+        capture_output=True,
+        text=True,
+        env=merged_env,
+        timeout=30,
+    )
+
+
+def test_importing_package_does_not_import_cli_or_server() -> None:
+    result = _run_in_subprocess(
+        "import sys\n"
+        "import openconstraint_mcp\n"
+        "assert 'openconstraint_mcp.cli' not in sys.modules\n"
+        "assert 'openconstraint_mcp.server' not in sys.modules\n"
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+
+
+def test_importing_cli_does_not_import_httpx_or_server() -> None:
+    result = _run_in_subprocess(
+        "import sys\n"
+        "import openconstraint_mcp.cli\n"
+        "assert 'httpx' not in sys.modules\n"
+        "assert 'openconstraint_mcp.server' not in sys.modules\n"
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+
+
+def test_check_runtime_and_list_solvers_do_not_import_server(tmp_path: Path) -> None:
+    empty_runtime = tmp_path / "empty"
+    code = (
+        "import sys\n"
+        "from typer.testing import CliRunner\n"
+        "from openconstraint_mcp.cli import app\n"
+        "runner = CliRunner()\n"
+        "r1 = runner.invoke(app, ['check-runtime'])\n"
+        "r2 = runner.invoke(app, ['list-solvers'])\n"
+        "assert r1.exit_code == 1, r1.output\n"
+        "assert r2.exit_code == 1, r2.output\n"
+        "assert 'openconstraint_mcp.server' not in sys.modules\n"
+    )
+    result = _run_in_subprocess(code, env={"OPENCONSTRAINT_MCP_RUNTIME_DIR": str(empty_runtime)})
+    assert result.returncode == 0, result.stdout + result.stderr
+
+
+def test_main_entry_point_runs_via_subprocess() -> None:
+    """CliRunner(app) tests bypass main(); this proves the console entry point
+    (openconstraint_mcp:main) itself wires up and runs the CLI."""
+    code = (
+        "import sys\n"
+        "sys.argv = ['openconstraint-mcp', '--help']\n"
+        "import openconstraint_mcp\n"
+        "openconstraint_mcp.main()\n"
+    )
+    result = _run_in_subprocess(code)
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "stdio" in result.stdout

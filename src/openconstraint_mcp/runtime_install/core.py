@@ -7,7 +7,6 @@ import subprocess
 import sys
 import tempfile
 from pathlib import Path
-from typing import assert_never
 
 from rich.console import Console
 
@@ -163,7 +162,7 @@ def _prepare_staging_runtime(staging: Path, bundle: BundleSpec, console: Console
             elif kind == "nsis":
                 _install_nsis_bundle(archive_path, staging)
             else:
-                assert_never(kind)
+                raise RuntimeInstallError(f"unsupported MiniZinc bundle type: {kind}")
         # Match the resolver: it appends minizinc.exe on Windows (runtime.py).
         # core must not import runtime.py (it is right of runtime_install in the
         # layering), so the name is computed locally.

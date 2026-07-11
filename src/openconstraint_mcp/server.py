@@ -212,19 +212,21 @@ async def _report_status(
     """Send one status milestone to the client on both feedback channels.
 
     Emits ``notifications/progress`` (delivered only when the request carried
-    ``_meta.progressToken``; the SDK no-ops otherwise) and an ``info``-level
-    ``notifications/message`` log (delivered regardless of token), so clients
-    that never send a progress token still see activity state. ``total`` is
-    omitted by default on purpose: these are indeterminate stage counters, not
-    a solver completion percentage, and reporting a total would invite a
-    misleading percent-complete UI. Outside a real request the SDK raises
-    ``ValueError(_CONTEXT_UNAVAILABLE_MESSAGE)``; only that exact case is
-    swallowed — any other error from tool code still propagates.
+    ``_meta.progressToken`` — i.e. only reaches a client that registered a
+    progress callback for the call; the SDK no-ops otherwise) and an
+    ``info``-level ``notifications/message`` log (delivered regardless of
+    token), so clients that never registered a progress callback still see
+    activity state. ``total`` is omitted by default on purpose: these are
+    indeterminate stage counters, not a solver completion percentage, and
+    reporting a total would invite a misleading percent-complete UI. Outside a
+    real request the SDK raises ``ValueError(_CONTEXT_UNAVAILABLE_MESSAGE)``;
+    only that exact case is swallowed — any other error from tool code still
+    propagates.
     """
     if ctx is None:
         return
     try:
-        await ctx.report_progress(progress, total, message)
+        await ctx.report_progress(progress=progress, total=total, message=message)
         await ctx.info(message)
     except ValueError as exc:
         if str(exc) != _CONTEXT_UNAVAILABLE_MESSAGE:

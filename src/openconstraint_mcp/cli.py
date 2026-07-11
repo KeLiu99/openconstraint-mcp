@@ -10,7 +10,6 @@ from rich.table import Table
 
 from .minizinc.core import MiniZincExecutionError, list_solvers
 from .runtime import RuntimeMissingError, get_runtime_status, install_config_warning
-from .server import run_stdio
 
 app = typer.Typer(
     no_args_is_help=True,
@@ -36,8 +35,10 @@ def _warn_on_corrupt_install_config() -> None:
 @app.command()
 def stdio() -> None:
     """Run the MCP server over stdio."""
-    # CLI entry point used by MCP clients. The FastMCP app is built in
-    # server.create_mcp_server(), so importing the CLI does not register tools.
+    # Lazy-imported so metadata/runtime commands do not load the FastMCP server
+    # layer (and its httpx dependency) on the CLI's cold import path.
+    from .server import run_stdio
+
     run_stdio()
 
 
@@ -67,7 +68,7 @@ def install_runtime(
     Supported platforms: Linux x86_64, macOS arm64, Windows x86_64.
     """
     # Lazy-imported so httpx/rich.progress stay out of stdio/check-runtime/list-solvers
-    # cold paths. Enforced by test_cli_module_does_not_import_httpx_eagerly.
+    # cold paths. Enforced by the cold-import subprocess tests in tests/test_cli.py.
     from .runtime import get_runtime_dir, write_install_config
     from .runtime_install.core import (
         check_supported_platform,
