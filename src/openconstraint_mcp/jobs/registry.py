@@ -28,16 +28,15 @@ from subprocess import Popen
 from typing import cast
 from uuid import uuid4
 
-# jobs reuses core's internal solve helpers (validation, arg-building, process
-# teardown) rather than re-implementing them; they're package-internal, not a public API.
-# noinspection PyProtectedMember
+# jobs reuses core's solve helpers (validation, arg-building, process teardown)
+# rather than re-implementing them.
 from ..minizinc.core import (
     DEFAULT_SOLVE_TIMEOUT_MS,
     DEFAULT_SOLVER,
-    _enforce_solver_capabilities,
-    _solve_extra_args,
-    _validate_model_and_timeout,
+    build_solve_extra_args,
+    enforce_solver_capabilities,
     solve_model_cancellable,
+    validate_model_and_timeout,
 )
 
 # RESULT_BEARING_STATES/TERMINAL_STATES are imported, not re-declared: they are
@@ -144,10 +143,10 @@ class JobRegistry:
         without awaiting the solve; raises ``JobRejectedError`` when the bounded
         queue is full — no worker or subprocess is created in that case.
         """
-        _validate_model_and_timeout(model, timeout_ms)
+        validate_model_and_timeout(model, timeout_ms)
         # Validates the controls (parallel/num_solutions ranges + the solver-gated
         # -n); the args are rebuilt by the worker's solve, so they're discarded here.
-        _solve_extra_args(
+        build_solve_extra_args(
             solver=solver,
             free_search=free_search,
             parallel=parallel,
@@ -158,7 +157,7 @@ class JobRegistry:
         # Reject an unsupported -a/-f/-p/-r control at admission (one --solvers-json
         # at most, only when a gated control is set); the worker trusts this and
         # never re-resolves (D1/D2).
-        _enforce_solver_capabilities(
+        enforce_solver_capabilities(
             solver=solver,
             free_search=free_search,
             parallel=parallel,
@@ -200,8 +199,8 @@ class JobRegistry:
         cannot be evicted before the portfolio is polled to completion.
         """
         for request in requests:
-            _validate_model_and_timeout(request.model, request.timeout_ms)
-            _solve_extra_args(
+            validate_model_and_timeout(request.model, request.timeout_ms)
+            build_solve_extra_args(
                 solver=request.solver,
                 free_search=request.free_search,
                 parallel=request.parallel,

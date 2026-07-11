@@ -27,10 +27,9 @@ from typing import NamedTuple
 
 from pydantic import JsonValue
 
-# noinspection PyProtectedMember
 from ..minizinc.core import (
-    _resolve_capability_map,
-    _validate_solver_capabilities,
+    resolve_capability_map,
+    validate_solver_capabilities,
 )
 from ..schemas.diagnostics import Diagnostic
 from ..schemas.job_state import TERMINAL_STATES, JobState
@@ -335,12 +334,12 @@ def _validate_plan_capabilities(
     """
     if not (free_search or all_solutions or parallel is not None or seed_used):
         return
-    capability_map = _resolve_capability_map()
+    capability_map = resolve_capability_map()
     for solver in solvers:
         capabilities = capability_map.get(solver)
         if capabilities is None:
             continue
-        _validate_solver_capabilities(
+        validate_solver_capabilities(
             solver=solver,
             capabilities=capabilities,
             free_search=free_search,

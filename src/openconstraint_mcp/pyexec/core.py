@@ -94,7 +94,7 @@ CPSAT_RANDOM_SEED_MAX: int = 2_147_483_647
 # server never sets OR-Tools parameters itself — see CpsatPythonExperimentAttempt.
 CPSAT_CONFIG_ENV_VAR: str = "OPENCONSTRAINT_MCP_CPSAT_CONFIG"
 
-VERIFIED_STATUSES: frozenset[CpsatStatus] = frozenset({"optimal", "feasible"})
+VERIFIED_STATUSES: frozenset[CpsatStatus] = frozenset[CpsatStatus]({"optimal", "feasible"})
 
 # Statuses a script may legitimately report. "timeout" is executor-determined, so a
 # script claiming it is treated as a contract violation and normalized to "error".
@@ -346,7 +346,7 @@ def _classify_child_result(child: ChildExecutionResult) -> CpsatPythonResult:
 def _validate_script_path(script_path: Path) -> Path:
     """Resolve and validate a CP-SAT Python script path before any subprocess.
 
-    Mirrors the MiniZinc path tools' contract (``_validate_model_data_paths``):
+    Mirrors the MiniZinc path tools' contract (``validate_model_data_paths``):
     resolve to an absolute path (following a symlink the caller named), then
     reject a missing or non-regular file, and an empty/whitespace-only or
     non-UTF-8 script, with a clear ``ValueError`` naming the offending path. The
@@ -385,7 +385,7 @@ def run_cpsat_python(
     ``CpsatPythonResult`` with the parsed solution and execution metadata.
 
     Raises ``ValueError`` on a non-positive ``timeout_ms`` — matching the
-    MiniZinc path's ``_validate_model_and_timeout`` so a zero/negative cap is
+    MiniZinc path's ``validate_model_and_timeout`` so a zero/negative cap is
     rejected up front rather than spawning a child only to kill it immediately.
 
     When a ``tracker`` is supplied (the server's per-run child tracker), the live

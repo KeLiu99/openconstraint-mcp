@@ -245,7 +245,7 @@ def test_run_cpsat_python_timeout_kills_tree_and_sets_status() -> None:
 
 
 # (c1) a non-positive timeout is rejected before any child is spawned, matching
-# the MiniZinc path's _validate_model_and_timeout.
+# the MiniZinc path's validate_model_and_timeout.
 @pytest.mark.parametrize("timeout_ms", [0, -1])
 def test_run_cpsat_python_non_positive_timeout_raises(timeout_ms: int) -> None:
     with patch("openconstraint_mcp.pyexec.runner.popen_process_group") as fake_popen:
