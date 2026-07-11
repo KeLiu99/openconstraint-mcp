@@ -16,6 +16,9 @@ from pathlib import Path
 import pytest
 
 from openconstraint_mcp.minizinc.core import (
+    _build_solve_result,
+    _run_managed_minizinc,
+    _solve_extra_args,
     check_model,
     check_model_path,
     find_unsat_core,
@@ -26,6 +29,7 @@ from openconstraint_mcp.minizinc.core import (
     solve_model,
     solve_model_path,
 )
+from openconstraint_mcp.schemas.minizinc import SolveResult
 
 pytestmark = [pytest.mark.integration, pytest.mark.usefixtures("require_real_runtime")]
 
@@ -700,3 +704,111 @@ def test_save_verified_model_writes_project_end_to_end(tmp_path: Path) -> None:
     manifest = json.loads((target / ".openconstraint-model.json").read_text())
     assert manifest["managed_by"] == "openconstraint-mcp"
     assert manifest["verification"]["check_status"] == "ok"
+
+
+# --- Raw --json-stream status spellings --------------------------------------
+#
+# `solve_model()` returns normalized statuses only, so these probes drop one
+# level down: run the production solve transport (`_solve_extra_args` +
+# `_run_managed_minizinc`), read the raw `{"type": "status"}` objects straight
+# off the stream, and build the normalized result from the *same* execution via
+# `_build_solve_result`. Each probe asserts the exact raw spelling from
+# `_STATUS_MAP` together with its normalized mapping; a missing or unexpected
+# status object is a failure, never a skip, so a spelling regression in a
+# future runtime bump cannot pass silently.
+#
+# Statuses the pinned runtime cannot produce deterministically (SATISFIED,
+# UNBOUNDED, UNSAT_OR_UNBOUNDED) are intentionally unprobed; the attempted
+# models and observed outcomes are recorded in
+# docs/plans/2026-06-04-solve-deferred-and-not-done.md.
+
+
+def _probe_raw_statuses(
+    model: str,
+    *,
+    solver: str = "cp-sat",
+    timeout_ms: int = 60_000,
+    all_solutions: bool = False,
+    random_seed: int | None = None,
+) -> tuple[list[str], SolveResult]:
+    """Solve ``model`` once; return its raw stream statuses and normalized result."""
+    extra_args = _solve_extra_args(
+        solver=solver,
+        free_search=False,
+        parallel=None,
+        random_seed=random_seed,
+        all_solutions=all_solutions,
+        num_solutions=None,
+    )
+    outcome = _run_managed_minizinc(
+        model, solver=solver, timeout_ms=timeout_ms, extra_args=extra_args
+    )
+    raw_statuses: list[str] = []
+    for raw_line in outcome.stdout.splitlines():
+        line = raw_line.strip()
+        if not line:
+            continue
+        obj = json.loads(line)
+        if isinstance(obj, dict) and obj.get("type") == "status":
+            raw_statuses.append(obj["status"])
+    return raw_statuses, _build_solve_result(outcome, solver=solver)
+
+
+def test_raw_status_spelling_optimal_solution() -> None:
+    raw, result = _probe_raw_statuses("var 1..5: x;\nconstraint x > 2;\nsolve maximize x;\n")
+
+    assert raw == ["OPTIMAL_SOLUTION"]
+    assert result.status == "optimal"
+
+
+def test_raw_status_spelling_all_solutions() -> None:
+    raw, result = _probe_raw_statuses(_ALL_SOLUTIONS_MODEL, all_solutions=True)
+
+    assert raw == ["ALL_SOLUTIONS"]
+    assert result.status == "satisfied"
+
+
+def test_raw_status_spelling_unsatisfiable() -> None:
+    raw, result = _probe_raw_statuses("var 1..3: x;\nconstraint x > 5;\nsolve satisfy;\n")
+
+    assert raw == ["UNSATISFIABLE"]
+    assert result.status == "unsatisfiable"
+
+
+def test_raw_status_spelling_error() -> None:
+    # cp-sat rejects a negative seed at runtime. The runtime reports this as a
+    # real `{"type": "status", "status": "ERROR"}` verdict (with rc 1 and an
+    # `Illegal value ... fz_seed` line on stderr), not as a standalone
+    # `{"type": "error"}` diagnostic object — proving the `ERROR` entry in
+    # `_STATUS_MAP` is exercised by the status channel itself.
+    raw, result = _probe_raw_statuses(
+        "var 1..5: x;\nconstraint x > 2;\nsolve satisfy;\n", random_seed=-5
+    )
+
+    assert raw == ["ERROR"]
+    assert result.status == "error"
+
+
+# Pigeonhole (n items into n-1 slots) with the alldifferent *decomposed* into
+# binary disequalities: gecode's plain != propagators cannot detect the Hall-set
+# conflict, so proving UNSATISFIABLE needs an exponential search (~13! nodes at
+# n=14) that no realistic machine finishes in 500 ms — while the instance being
+# unsatisfiable means no solution can ever appear either. Both escape hatches
+# are closed, so the run deterministically ends with the solver giving up:
+# a raw UNKNOWN status. (The global `alldifferent` would presolve this away
+# instantly — cp-sat proves it UNSATISFIABLE — which is why the decomposition
+# and solver choice both matter here.)
+_PIGEONHOLE_MODEL = (
+    "int: n = 14;\n"
+    "array[1..n] of var 1..n-1: p;\n"
+    "constraint forall(i, j in 1..n where i < j)(p[i] != p[j]);\n"
+    "solve satisfy;\n"
+)
+
+
+def test_raw_status_spelling_unknown() -> None:
+    _skip_if_solver_absent("org.gecode.gecode")
+    raw, result = _probe_raw_statuses(_PIGEONHOLE_MODEL, solver="org.gecode.gecode", timeout_ms=500)
+
+    assert raw == ["UNKNOWN"]
+    assert result.status == "unknown"
