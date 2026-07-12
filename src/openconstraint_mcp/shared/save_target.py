@@ -1,7 +1,8 @@
 """Shared save-target validation, manifest I/O, and atomic staging-swap.
 
 Importable by both ``minizinc`` and ``pyexec`` without coupling those subtrees.
-Dependencies: stdlib + Pydantic + schemas only. Never imports minizinc.
+Dependencies: stdlib + Pydantic + schemas + ``shared.path_checks`` only. Never
+imports minizinc.
 """
 
 from __future__ import annotations
@@ -15,6 +16,8 @@ from importlib import metadata
 from pathlib import Path
 
 from ..schemas.artifacts import SavedModelArtifact
+from ..schemas.diagnostics import InvalidSaveTargetError
+from .path_checks import resolve_absolute_target
 
 # The manifest doubles as the managed-directory marker: only a directory whose
 # marker parses (see _prior_manifest_filenames) may ever be overwritten.
@@ -39,19 +42,14 @@ def text_sha256(text: str) -> str:
     """Return the sha256 hex digest of ``text``, encoded as UTF-8.
 
     Deliberately no newline normalization and no trimming — ``text`` is hashed
-    exactly as given. This is distinct from ``path_sha256``, which hashes file
-    bytes read back from disk; this helper hashes an in-memory string directly,
+    exactly as given. This is distinct from ``hashing.path_sha256``, which hashes
+    file bytes read back from disk; this helper hashes an in-memory string directly,
     so a caller that hashes a request's ``source``/``checker``/``problem`` text
     and a later save-path consistency check that hashes the same string are
     guaranteed to agree — a file write can alter line endings per platform, but
     this helper never touches a file.
     """
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
-
-
-def path_sha256(path: Path) -> str:
-    """Return the sha256 hex digest of the file at ``path``, read as bytes."""
-    return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
 def _prior_manifest_filenames(target: Path) -> list[str] | None:
@@ -89,22 +87,29 @@ def _prior_manifest_filenames(target: Path) -> list[str] | None:
 def validate_save_target(target_dir: Path, *, overwrite: bool) -> Path:
     """Resolve ``target_dir`` and enforce the save-target invariants.
 
-    Returns the resolved path. Raises ``ValueError`` when the path is not
-    absolute, exists as a non-directory, or has no existing parent directory,
-    and applies the marker-gated overwrite policy to a non-empty directory:
-    it must contain a readable prior save manifest, ``overwrite`` must be
-    True, and it must hold no files beyond that manifest's artifact list plus
-    the marker itself. A new path or an empty directory passes without
-    ``overwrite``. Runs before any subprocess, and again immediately before
-    commit — the directory may have changed while the subprocess ran.
+    Returns the resolved path. Raises ``InvalidSaveTargetError`` (a
+    ``ValueError`` subclass — existing ``except ValueError`` catches keep
+    working) when the path is not absolute, exists as a non-directory, or has
+    no existing parent directory, and applies the marker-gated overwrite
+    policy to a non-empty directory: it must contain a readable prior save
+    manifest, ``overwrite`` must be True, and it must hold no files beyond
+    that manifest's artifact list plus the marker itself. A new path or an
+    empty directory passes without ``overwrite``. Runs before any subprocess,
+    and again immediately before commit — the directory may have changed
+    while the subprocess ran.
+
+    The typed exception (rather than a classifiable message marker) is
+    deliberate: every message here embeds ``target`` — a caller-controlled
+    path — ahead of any fixed text, so no message-shaped marker could ever be
+    fully immune to a path that coincidentally contains it.
     """
-    if not target_dir.is_absolute():
-        raise ValueError(f"target_dir must be an absolute path: {target_dir}")
-    target = target_dir.resolve()
-    if target.exists() and not target.is_dir():
-        raise ValueError(f"target_dir exists but is not a directory: {target}")
-    if not target.parent.is_dir():
-        raise ValueError(f"target_dir parent directory does not exist: {target.parent}")
+    target = resolve_absolute_target(
+        target_dir,
+        arg_name="target_dir",
+        kind="directory",
+        is_valid_kind=Path.is_dir,
+        error_type=InvalidSaveTargetError,
+    )
     if not target.is_dir():
         return target
     existing = sorted(entry.name for entry in target.iterdir())
@@ -112,19 +117,19 @@ def validate_save_target(target_dir: Path, *, overwrite: bool) -> Path:
         return target
     tracked = _prior_manifest_filenames(target)
     if tracked is None:
-        raise ValueError(
+        raise InvalidSaveTargetError(
             f"refusing to write into {target}: the directory is not empty and does "
             f"not contain a readable prior save manifest ({MANIFEST_FILENAME}). "
             "Pick a new or empty directory."
         )
     if not overwrite:
-        raise ValueError(
+        raise InvalidSaveTargetError(
             f"refusing to overwrite the prior saved model at {target}; "
             "pass overwrite=true to replace it."
         )
     untracked = [name for name in existing if name != MANIFEST_FILENAME and name not in tracked]
     if untracked:
-        raise ValueError(
+        raise InvalidSaveTargetError(
             f"refusing to overwrite {target}: it contains files the prior save did "
             f"not write: {', '.join(untracked)}. Move them out or pick another directory."
         )

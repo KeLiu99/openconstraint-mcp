@@ -10,7 +10,7 @@ from pathlib import Path
 from typing import Any, NamedTuple
 
 from ..runtime import RuntimeMissingError, get_minizinc_binary, is_runtime_installed
-from ..schemas.diagnostics import Diagnostic
+from ..schemas.diagnostics import Diagnostic, UnsupportedFeatureError
 from ..schemas.minizinc import (
     CheckerReport,
     CheckerStatus,
@@ -816,7 +816,7 @@ def build_solve_extra_args(
     if num_solutions < 1:
         raise ValueError("num_solutions must be >= 1")
     if not solver_supports_num_solutions(solver):
-        raise ValueError(
+        raise UnsupportedFeatureError(
             f"solver '{solver}' does not support num_solutions (the -n flag). "
             "Retry with solver='org.chuffed.chuffed' or solver='org.gecode.gecode'."
         )
@@ -853,7 +853,7 @@ def validate_solver_capabilities(
     )
     for requested, supported, control, flag in checks:
         if requested and not supported:
-            raise ValueError(
+            raise UnsupportedFeatureError(
                 f"solver '{solver}' does not support {control} (the {flag} flag). "
                 "Call list_available_solvers to see each solver's capabilities, or "
                 f"choose a solver whose {control} capability is supported."

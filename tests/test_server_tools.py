@@ -3617,3 +3617,131 @@ async def test_save_verified_cpsat_python_tool_rejects_bool_seed(
             {"source": "print('x')", "target_dir": str(tmp_path / "s"), "seed": True},
         )
     assert not called
+
+
+# --- tabular I/O tools ---------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_load_tabular_data_tool_is_listed_with_its_pagination_inputs() -> None:
+    mcp = create_mcp_server()
+    tools = await mcp.list_tools()
+
+    tool = next(t for t in tools if t.name == "load_tabular_data")
+    properties = tool.inputSchema.get("properties", {})
+    assert {"path", "sheet", "has_header", "row_offset", "max_rows"} <= set(properties.keys())
+
+
+@pytest.mark.asyncio
+async def test_write_tabular_result_tool_is_listed_with_its_inputs() -> None:
+    mcp = create_mcp_server()
+    tools = await mcp.list_tools()
+
+    tool = next(t for t in tools if t.name == "write_tabular_result")
+    properties = tool.inputSchema.get("properties", {})
+    assert {"headers", "rows", "target_path", "overwrite"} <= set(properties.keys())
+
+
+@pytest.mark.asyncio
+async def test_load_tabular_data_returns_a_paginated_page(tmp_path: Path) -> None:
+    source = tmp_path / "data.csv"
+    source.write_text("name,qty\na,1\nb,2\nc,3\n", encoding="utf-8")
+
+    mcp = create_mcp_server()
+    result = await mcp.call_tool("load_tabular_data", {"path": str(source), "max_rows": 2})
+
+    structured = _structured(result)
+    assert structured["headers"] == ["name", "qty"]
+    assert structured["rows"] == [["a", "1"], ["b", "2"]]
+    assert structured["next_row_offset"] == 2
+    assert structured["truncation_reason"] == "max_rows"
+    assert structured["total_rows"] == 3
+
+
+@pytest.mark.asyncio
+async def test_load_tabular_data_text_content_does_not_duplicate_the_rows(
+    tmp_path: Path,
+) -> None:
+    # The low-level MCP SDK's default handling of a plain dict/model return
+    # would put the full page in content a second time (as indent=2 JSON) on
+    # top of structuredContent, doubling an already MAX_TABULAR_RESPONSE_BYTES
+    # -sized page on the wire. Row values must appear only in structuredContent.
+    source = tmp_path / "data.csv"
+    source.write_text("name,qty\nwidget,3\ngadget,10\n", encoding="utf-8")
+
+    mcp = create_mcp_server()
+    result = await mcp.call_tool("load_tabular_data", {"path": str(source)})
+
+    assert "widget" not in _content_text(result)
+    assert "gadget" not in _content_text(result)
+    assert _structured(result)["rows"] == [["widget", "3"], ["gadget", "10"]]
+
+
+@pytest.mark.asyncio
+async def test_load_tabular_data_next_row_offset_reaches_the_rest(tmp_path: Path) -> None:
+    source = tmp_path / "data.csv"
+    source.write_text("name,qty\na,1\nb,2\nc,3\n", encoding="utf-8")
+
+    mcp = create_mcp_server()
+    result = await mcp.call_tool(
+        "load_tabular_data", {"path": str(source), "row_offset": 2, "max_rows": 2}
+    )
+
+    structured = _structured(result)
+    assert structured["rows"] == [["c", "3"]]
+    assert structured["truncated"] is False
+    assert structured["next_row_offset"] is None
+
+
+@pytest.mark.asyncio
+async def test_write_tabular_result_writes_a_csv(tmp_path: Path) -> None:
+    target = tmp_path / "out.csv"
+
+    mcp = create_mcp_server()
+    result = await mcp.call_tool(
+        "write_tabular_result",
+        {"headers": ["task", "start"], "rows": [["a", 0], ["b", 3]], "target_path": str(target)},
+    )
+
+    structured = _structured(result)
+    assert structured["status"] == "written"
+    assert structured["format"] == "csv"
+    assert structured["rows_written"] == 2
+    assert target.read_text(encoding="utf-8").splitlines() == ["task,start", "a,0", "b,3"]
+
+
+@pytest.mark.asyncio
+async def test_write_tabular_result_writes_an_xlsx(tmp_path: Path) -> None:
+    target = tmp_path / "out.xlsx"
+
+    mcp = create_mcp_server()
+    result = await mcp.call_tool(
+        "write_tabular_result",
+        {"headers": ["task", "start"], "rows": [["a", 0]], "target_path": str(target)},
+    )
+
+    structured = _structured(result)
+    assert structured["format"] == "xlsx"
+    assert target.is_file()
+
+    # Round-trips through the reader with its scalar types intact.
+    page = await mcp.call_tool("load_tabular_data", {"path": str(target)})
+    assert _structured(page)["rows"] == [["a", 0]]
+
+
+@pytest.mark.asyncio
+async def test_write_tabular_result_rejects_a_nested_cell_before_touching_the_disk(
+    tmp_path: Path,
+) -> None:
+    # The scalar-only cell contract is enforced by the tool's own input schema,
+    # so a nested array never reaches the writer.
+    target = tmp_path / "out.csv"
+
+    mcp = create_mcp_server()
+    with pytest.raises(Exception):  # noqa: B017 - FastMCP wraps schema failures in its own type
+        await mcp.call_tool(
+            "write_tabular_result",
+            {"headers": ["a"], "rows": [[["nested"]]], "target_path": str(target)},
+        )
+
+    assert not target.exists()

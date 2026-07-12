@@ -23,11 +23,11 @@ from ..schemas.cpsat import (
     SaveVerifiedPythonResult,
 )
 from ..shared.childproc import ChildProcessTracker
+from ..shared.hashing import path_sha256
 from ..shared.save_target import (
     EXPERIMENT_LOG_FILENAME,
     MANIFEST_FILENAME,
     commit_staged_dir,
-    path_sha256,
     text_sha256,
     validate_save_target,
 )

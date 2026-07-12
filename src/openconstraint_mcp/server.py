@@ -56,6 +56,7 @@ from .protocol_text.descriptions import (
     LIST_CPSAT_PYTHON_JOBS_DESCRIPTION,
     LIST_PORTFOLIO_JOBS_DESCRIPTION,
     LIST_SOLVE_JOBS_DESCRIPTION,
+    LOAD_TABULAR_DATA_DESCRIPTION,
     MCP_SERVER_INSTRUCTIONS,
     RUN_CPSAT_PYTHON_DESCRIPTION,
     RUN_CPSAT_PYTHON_EXPERIMENT_DESCRIPTION,
@@ -70,6 +71,7 @@ from .protocol_text.descriptions import (
     SUBMIT_CPSAT_PYTHON_JOB_DESCRIPTION,
     SUBMIT_PORTFOLIO_JOB_DESCRIPTION,
     SUBMIT_SOLVE_JOB_DESCRIPTION,
+    WRITE_TABULAR_RESULT_DESCRIPTION,
 )
 from .protocol_text.prompts import (
     AUTO_TUNE_CONSTRAINT_PROBLEM_PROMPT,
@@ -81,6 +83,7 @@ from .protocol_text.results import (
     format_save_result_content,
     format_solve_result_content,
     format_solver_list_content,
+    format_tabular_data_content,
 )
 from .pyexec.core import (
     DEFAULT_PYEXEC_TIMEOUT_MS,
@@ -103,7 +106,7 @@ from .schemas.cpsat import (
     CpsatPythonResult,
     SaveVerifiedPythonResult,
 )
-from .schemas.diagnostics import Diagnostic
+from .schemas.diagnostics import Diagnostic, InvalidSaveTargetError, UnsupportedFeatureError
 from .schemas.minizinc import (
     CheckResult,
     ModelInspectionResult,
@@ -115,8 +118,10 @@ from .schemas.minizinc import (
 )
 from .schemas.portfolio import PortfolioJobStatus, PortfolioSolveResult
 from .schemas.runtime import RuntimeStatus
+from .schemas.tabular import TabularCell, TabularData, TabularWriteResult
 from .shared.childproc import ChildProcessTracker
 from .shared.job_errors import JobRejectedError
+from .shared.tabular_io import DEFAULT_MAX_ROWS, read_tabular_data, write_tabular_data
 
 _PACKAGE_NAME = "openconstraint-mcp"
 
@@ -197,6 +202,14 @@ def _wrap_solver_list(result: SolverList) -> CallToolResult:
     """Wrap a SolverList as a complete-inventory text block plus structured output."""
     return CallToolResult(
         content=[TextContent(type="text", text=format_solver_list_content(result))],
+        structuredContent=result.model_dump(mode="json"),
+    )
+
+
+def _wrap_tabular_data_result(result: TabularData) -> CallToolResult:
+    """Wrap a TabularData as a bounded summary plus the full structured page."""
+    return CallToolResult(
+        content=[TextContent(type="text", text=format_tabular_data_content(result))],
         structuredContent=result.model_dump(mode="json"),
     )
 
@@ -304,27 +317,39 @@ def _classify_domain_error(exc: Exception) -> Diagnostic | None:
     """Map a pre-result domain exception to a structured ``Diagnostic``, or None.
 
     Stage 2 gives clients a stable branch point for the errors raised *before*
-    any result model exists. Type wins where it can (``RuntimeMissingError`` ->
-    ``runtime_missing``); the remaining pre-result rejections are plain
-    ``ValueError``s, classified by stable message markers into the specific
-    ``unsupported_feature``/``invalid_save_target`` buckets, with every other
-    ``ValueError`` falling into the coarse ``invalid_request`` bucket (malformed
-    paths, invalid arguments, the experiment wall-clock budget rejection).
+    any result model exists. Classification is entirely by exception type, not
+    message content: ``RuntimeMissingError`` -> ``runtime_missing``,
+    ``UnsupportedFeatureError`` -> ``unsupported_feature``,
+    ``InvalidSaveTargetError`` -> ``invalid_save_target``, and every other
+    ``ValueError`` (both are ``ValueError`` subclasses, so this check must come
+    last) falls into the coarse ``invalid_request`` bucket — malformed paths,
+    invalid arguments, the experiment wall-clock budget rejection, and the
+    tabular write tools' plain file-exists overwrite refusal, which carries
+    none of ``save_target.py``'s manifest-gated directory semantics and so
+    deliberately stays a plain ``ValueError``, never ``InvalidSaveTargetError``.
+
+    A prior version of this function classified by message-substring/prefix
+    marker instead of type. That was fragile in a way type-checking is not:
+    every one of these messages embeds caller-controlled text (a solver id, a
+    filesystem path) ahead of the only fixed words in the message, so a path
+    or solver id that coincidentally contained a marker — even an anchored
+    prefix, for the messages where the interpolated text isn't first —
+    misclassified. See ``UnsupportedFeatureError``/``InvalidSaveTargetError``
+    in ``schemas.diagnostics`` for the full reasoning.
+
     Exceptions that are neither (``MiniZincExecutionError`` runtime corruption,
     ``JobRejectedError`` transient capacity) return None and pass through as a
     plain message, since they are not a client-repairable input state.
     """
     if isinstance(exc, RuntimeMissingError):
         return Diagnostic(category="runtime_missing", message=str(exc))
+    if isinstance(exc, UnsupportedFeatureError):
+        return Diagnostic(category="unsupported_feature", message=str(exc))
+    if isinstance(exc, InvalidSaveTargetError):
+        return Diagnostic(category="invalid_save_target", message=str(exc))
     if not isinstance(exc, ValueError):
         return None
-
-    text = str(exc)
-    if "does not support" in text:
-        return Diagnostic(category="unsupported_feature", message=text)
-    if "target_dir" in text or "refusing to overwrite" in text or "refusing to write into" in text:
-        return Diagnostic(category="invalid_save_target", message=text)
-    return Diagnostic(category="invalid_request", message=text)
+    return Diagnostic(category="invalid_request", message=str(exc))
 
 
 def _translated_error(exc: Exception) -> RuntimeError:
@@ -1046,6 +1071,48 @@ def create_mcp_server() -> FastMCP:
                 experiment_result=experiment_result,
                 tracker=child_tracker,
             ),
+        )
+
+    # The tabular tools take no solver and touch no managed runtime, so a
+    # ValueError is the only domain exception they raise (every rejection —
+    # bad path, non-scalar cell, refused to overwrite — is one).
+    @mcp.tool(name="load_tabular_data", description=LOAD_TABULAR_DATA_DESCRIPTION)
+    @_as_mcp_error(ValueError)
+    async def load_tabular_data(
+        path: str,
+        sheet: str | None = None,
+        has_header: bool = True,
+        row_offset: int = 0,
+        max_rows: int = DEFAULT_MAX_ROWS,
+    ) -> Annotated[CallToolResult, TabularData]:
+        result = await _run_blocking(
+            functools.partial(
+                read_tabular_data,
+                Path(path),
+                sheet=sheet,
+                has_header=has_header,
+                row_offset=row_offset,
+                max_rows=max_rows,
+            )
+        )
+        return _wrap_tabular_data_result(result)
+
+    @mcp.tool(name="write_tabular_result", description=WRITE_TABULAR_RESULT_DESCRIPTION)
+    @_as_mcp_error(ValueError)
+    async def write_tabular_result(
+        headers: list[str],
+        rows: list[list[TabularCell]],
+        target_path: str,
+        overwrite: bool = False,
+    ) -> TabularWriteResult:
+        return await _run_blocking(
+            functools.partial(
+                write_tabular_data,
+                headers,
+                rows,
+                Path(target_path),
+                overwrite=overwrite,
+            )
         )
 
     @mcp.prompt(

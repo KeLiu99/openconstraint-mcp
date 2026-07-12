@@ -10,10 +10,10 @@ from pathlib import Path
 import pytest
 
 from openconstraint_mcp.schemas.artifacts import SavedModelArtifact
+from openconstraint_mcp.shared.hashing import path_sha256
 from openconstraint_mcp.shared.save_target import (
     MANIFEST_FILENAME,
     commit_staged_dir,
-    path_sha256,
     text_sha256,
     validate_save_target,
 )

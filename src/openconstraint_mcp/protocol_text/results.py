@@ -18,6 +18,7 @@ if TYPE_CHECKING:
     from ..schemas.cpsat import CpsatPythonExperimentResult
     from ..schemas.diagnostics import Diagnostic
     from ..schemas.minizinc import SaveVerifiedModelResult, SolveResult, SolverList
+    from ..schemas.tabular import TabularData
 
 
 def _diagnostic_prefix(diagnostic: Diagnostic | None) -> str:
@@ -234,3 +235,55 @@ def format_solver_list_content(result: SolverList) -> str:
             SOLVER_RUNTIME_CONFIG_CAUTION,
         ]
     )
+
+
+# Caps a joined-name-list line's own size, independent of the row-data bound
+# above: a header-only page (or a workbook with many/long sheet names) can
+# sit right under MAX_TABULAR_RESPONSE_BYTES on the list alone, and joining
+# it here too would otherwise duplicate nearly all of it a second time in
+# TextContent.
+_MAX_JOINED_NAMES_SUMMARY_CHARS: int = 2000
+
+
+def _bounded_name_list(names: list[str], *, noun: str) -> str:
+    """Join ``names`` if the result stays short, else report only their count."""
+    joined = ", ".join(names)
+    if len(joined) <= _MAX_JOINED_NAMES_SUMMARY_CHARS:
+        return joined
+    return (
+        f"{len(names)} {noun} (names omitted here, over "
+        f"{_MAX_JOINED_NAMES_SUMMARY_CHARS} characters joined; see structuredContent)"
+    )
+
+
+def format_tabular_data_content(result: TabularData) -> str:
+    """Return a bounded summary of a tabular page — never the row data itself.
+
+    The low-level MCP SDK's default handling of a plain dict/model return
+    would otherwise put the full page in content TWICE — once as indent=2
+    JSON text, once as structuredContent — pushing a page already sized up to
+    ``tabular_io.MAX_TABULAR_RESPONSE_BYTES`` well past that ceiling on the
+    wire. Row values ride only in structuredContent, same as every other
+    large-payload result in this module (e.g. a solve's solutions).
+    """
+    if not result.headers:
+        columns_line = "Columns: (none)"
+    else:
+        columns_line = f"Columns: {_bounded_name_list(result.headers, noun='columns')}"
+    lines = [
+        columns_line,
+        f"Rows returned: {len(result.rows)} (offset {result.row_offset})",
+        f"Total data rows in file: {result.total_rows}",
+    ]
+    if result.sheet_name is not None:
+        lines.append(f"Sheet: {result.sheet_name}")
+    if result.available_sheets:
+        sheets = _bounded_name_list(result.available_sheets, noun="sheets")
+        lines.append(f"Available sheets: {sheets}")
+    if result.truncated:
+        lines.append(
+            f"Truncated: yes ({result.truncation_reason}); next_row_offset={result.next_row_offset}"
+        )
+    else:
+        lines.append("Truncated: no (this is the final page)")
+    return "\n".join(lines)

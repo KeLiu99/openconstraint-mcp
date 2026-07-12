@@ -78,6 +78,36 @@ class Diagnostic(BaseModel):
     details: dict[str, JsonValue] | None = None
 
 
+# --- pre-result exception types feeding the two message-shaped categories --
+#
+# ``server._classify_domain_error`` maps a pre-result exception to a
+# ``Diagnostic`` by type where it can, and only falls back to a plain
+# ``ValueError`` -> ``invalid_request`` for everything else. These two
+# categories cannot use a message-substring/prefix marker at all, unlike
+# ``runtime_missing`` (an actual type already): every message in both
+# categories embeds caller-controlled text (a solver id, a filesystem path)
+# ahead of the only fixed words in the message, so no marker — anchored or
+# not — can be 100% immune to a coincidental match. Raising a distinct type
+# at the source removes the whole class of collision rather than chasing it
+# with ever-narrower string matching.
+class UnsupportedFeatureError(ValueError):
+    """A pre-result rejection because the resolved solver lacks a requested feature.
+
+    Still a ``ValueError`` (existing ``except ValueError`` catches keep
+    working); distinct only so classification can key off type.
+    """
+
+
+class InvalidSaveTargetError(ValueError):
+    """A pre-result rejection of a managed, manifest-gated save/verification directory.
+
+    Still a ``ValueError`` for the same reason as ``UnsupportedFeatureError``.
+    A single output file (the tabular write tools) has no manifest and no
+    managed-directory policy, so it never raises this — only
+    ``shared.save_target.validate_save_target`` does.
+    """
+
+
 # --- generic, backend-agnostic classifiers ---------------------------------
 # Pure functions over primitive field values. Message/detail construction that
 # is backend-specific stays at the call sites; these cover the invariants shared

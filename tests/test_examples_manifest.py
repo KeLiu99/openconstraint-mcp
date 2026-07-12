@@ -15,7 +15,7 @@ from pathlib import Path
 
 import pytest
 
-from openconstraint_mcp.shared.save_target import path_sha256
+from openconstraint_mcp.shared.hashing import path_sha256
 
 _EXAMPLES_DIR = Path(__file__).parent.parent / "examples"
 _MANIFESTS = sorted(_EXAMPLES_DIR.rglob(".openconstraint-model.json"))

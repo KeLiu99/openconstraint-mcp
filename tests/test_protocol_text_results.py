@@ -6,12 +6,14 @@ from __future__ import annotations
 from openconstraint_mcp.protocol_text.results import (
     format_cpsat_experiment_content,
     format_solve_result_content,
+    format_tabular_data_content,
 )
 from openconstraint_mcp.schemas.cpsat import (
     CpsatPythonExperimentResult,
 )
 from openconstraint_mcp.schemas.diagnostics import Diagnostic
 from openconstraint_mcp.schemas.minizinc import SolveResult
+from openconstraint_mcp.schemas.tabular import TabularData
 
 
 def _solve(status: str, diagnostic: Diagnostic | None) -> SolveResult:
@@ -51,3 +53,46 @@ def test_experiment_text_leads_with_no_winner_diagnostic() -> None:
     )
     text = format_cpsat_experiment_content(result)
     assert text.startswith("Diagnostic: no_winner — no attempt was accepted\n\n")
+
+
+def _tabular(headers: list[str], available_sheets: list[str] | None = None) -> TabularData:
+    return TabularData(
+        headers=headers,
+        rows=[],
+        sheet_name=None,
+        available_sheets=available_sheets or [],
+        row_offset=0,
+        next_row_offset=None,
+        total_rows=0,
+        truncated=False,
+        truncation_reason=None,
+    )
+
+
+def test_tabular_columns_summary_lists_names_when_short() -> None:
+    text = format_tabular_data_content(_tabular(["name", "age"]))
+    assert "Columns: name, age" in text
+
+
+def test_tabular_columns_summary_is_bounded_for_many_long_headers() -> None:
+    # A header-only page can sit right under the structuredContent byte
+    # ceiling on many/long header names alone; joining every name here too
+    # would duplicate nearly all of it a second time in TextContent.
+    headers = [f"very_long_column_header_name_{i}" * 5 for i in range(200)]
+    text = format_tabular_data_content(_tabular(headers))
+    assert "Columns: 200 columns" in text
+    assert headers[0] not in text
+
+
+def test_tabular_sheets_summary_lists_names_when_short() -> None:
+    text = format_tabular_data_content(_tabular(["a"], available_sheets=["Sheet1", "Sheet2"]))
+    assert "Available sheets: Sheet1, Sheet2" in text
+
+
+def test_tabular_sheets_summary_is_bounded_for_many_sheets() -> None:
+    # Same duplication risk as the columns line, for a workbook with many
+    # (valid, 31-character) sheet names.
+    sheets = [f"very_long_sheet_name_number_{i:05d}"[:31] for i in range(20000)]
+    text = format_tabular_data_content(_tabular(["a"], available_sheets=sheets))
+    assert "Available sheets: 20000 sheets" in text
+    assert sheets[0] not in text

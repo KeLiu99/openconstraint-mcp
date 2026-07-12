@@ -914,3 +914,91 @@ LIST_CPSAT_PYTHON_JOBS_DESCRIPTION = (
     + " "
     + _NO_ARGS_LIST_TOOL
 )
+
+
+# --- Tabular (.xlsx/.csv) I/O -------------------------------------------------
+
+# The cell contract is identical in both directions, so state it once.
+_TABULAR_SCALAR_CONTRACT = (
+    "Cells are JSON SCALARS ONLY — string, number, boolean, or null. Nested "
+    "arrays/objects and non-finite numbers (NaN, Infinity) are rejected before "
+    "any file is touched. The server does mechanical I/O only: it never infers "
+    "what a column MEANS. Interpreting columns and building MiniZinc data or "
+    "CP-SAT structures is YOUR job."
+)
+
+_TABULAR_LOCAL_ONLY = (
+    "Runs locally: reads/writes only the named local file — no network, no LLM, "
+    "no telemetry, no subprocess, and no managed-runtime dependency."
+)
+
+LOAD_TABULAR_DATA_DESCRIPTION = (
+    "Read a page of rows from a LOCAL `.xlsx` or `.csv` file into "
+    "{`headers`, `rows`}. Use this to pull problem data (capacities, costs, "
+    "demands, shift requirements) out of a spreadsheet before modelling it. "
+    + _TABULAR_SCALAR_CONTRACT
+    + " "
+    "`path` is a local `.xlsx`/`.csv` file. `sheet` selects an XLSX worksheet "
+    "(default: the active one); the result reports `sheet_name` and every "
+    "`available_sheets` name, and a CSV rejects `sheet` since it has none. "
+    "`has_header=true` (default) treats row 1 as headers. "
+    "HEADERS ARE ALWAYS STRINGS: a date/time header becomes ISO-8601, another "
+    "non-string becomes its text form, and a BLANK header (empty or missing) "
+    "becomes the positional name `col_1`, `col_2`, … — as do all columns when "
+    "`has_header=false`. Duplicate header names are preserved as-is. "
+    "TYPES: XLSX date/time cells are converted to ISO-8601 strings, while "
+    "numeric and boolean cells keep their scalar types. A CSV is TEXTUAL — "
+    'every cell reads back as a string, so `"3"` must be converted client-side '
+    "before use as a number. CSV parsing uses one fixed dialect (comma-separated, "
+    '`"`-quoted, UTF-8); semicolon and other locale dialects are not detected. '
+    "PAGINATION: `row_offset` (default 0) is a zero-based offset among DATA rows "
+    "— the header is not a data row — and `max_rows` (default 1000) caps the page. "
+    "The structured page body ({`headers`, `rows`, and pagination metadata) is "
+    "additionally capped at 1 MiB, whichever bound binds first — the ceiling does "
+    "not cover the tool call's separate human-readable text summary. Only WHOLE "
+    "rows are ever returned, never a truncated row or cell. When "
+    "`truncated` is true, `truncation_reason` is `max_rows` or `max_bytes` and "
+    "`next_row_offset` is the offset to request next — pass it back to page "
+    "forward; at EOF both are null. `total_rows` always counts every data row in "
+    "the file. A single row (or the headers alone) too large for the 1 MiB ceiling "
+    "is an error naming the offending offset, not a silent truncation. "
+    "A formula cell reads as its CACHED result — the server never evaluates a "
+    "formula, so an uncalculated one reads as null — and a merged cell exposes its "
+    "value only in the top-left position. " + _TABULAR_LOCAL_ONLY
+)
+
+WRITE_TABULAR_RESULT_DESCRIPTION = (
+    "Write `headers` + `rows` to a LOCAL `.xlsx` or `.csv` file. Use this to hand "
+    "a solved schedule, assignment, or plan back to the user as a spreadsheet. "
+    + _TABULAR_SCALAR_CONTRACT
+    + " Every row must have exactly one cell per header. "
+    "`target_path` must be an EXPLICIT ABSOLUTE local path whose parent directory "
+    "exists and whose suffix is `.xlsx` or `.csv`; the server never opens a file "
+    "dialog — you supply the path. The write is ATOMIC and, by default, CANNOT "
+    "CLOBBER: with `overwrite=false` an existing target (even one created while "
+    "the write was in flight) wins and is left byte-for-byte untouched, and the "
+    "call is an error; pass `overwrite=true` to atomically replace exactly that "
+    "one file. A rejected write leaves the filesystem untouched. "
+    "FORMULA SAFETY: the server never emits executable spreadsheet code. XLSX "
+    'stores every string as an explicit string cell, so `"=1+1"` is written and '
+    "read back as the literal TEXT `=1+1`. A CSV field cannot say 'this is literal "
+    "text', so a CSV write REJECTS any string whose first non-whitespace character "
+    "is `=`, `+`, `-`, or `@`. Note this also rejects a NUMBER SENT AS A STRING: "
+    'send `-5` as the numeric cell `-5`, not the string `"-5"`, or write `.xlsx` '
+    "instead. CSV is textual on write too — a string is emitted unchanged, null "
+    "becomes an empty field, and other scalars take their normal text form, so a "
+    "type-preserving CSV round trip is NOT promised (use `.xlsx` when types "
+    "matter). An XLSX cell string is capped at 32,767 characters; a longer one is "
+    "rejected rather than silently truncated. XLSX writes a single sheet named "
+    "`Sheet1`. "
+    "XLSX ROUND-TRIP SAFETY: further writes are rejected rather than silently "
+    "corrupted or changed on the next read — an empty-string row cell (`\"\"`, "
+    "send `null` instead); a number needing more than 16 significant digits, or "
+    "whose int/float type would flip on read-back (send it as a string instead); "
+    "a string with a character XML cannot represent, e.g. a lone surrogate or "
+    "`U+FFFE`/`U+FFFF`; a zero-column table (`headers=[]`); and a string "
+    "containing a carriage return (`\\r`, alone or as `\\r\\n`) — XML normalizes "
+    "it to `\\n` on read, so use `\\n`, or write `.csv`, which preserves it. "
+    "Returns {`status`: 'written', `message`, `target_path`, `sha256` (of the "
+    "committed bytes), `format`, `rows_written`}. " + _TABULAR_LOCAL_ONLY
+)
