@@ -131,8 +131,11 @@ def test_experiment_runs_two_explicit_source_variants() -> None:
     assert all(attempt.accepted for attempt in result.attempts)
     names = {attempt.name for attempt in result.attempts}
     assert names == {"baseline", "redundant_constraint"}
-    # Both variants reach the same unique optimum; the earlier attempt order wins the tie.
-    assert result.winner_name == "baseline"
+    # Both variants reach the same unique optimum, so either may win the real
+    # subprocess timing tie-break; the tie-break precedence itself (status,
+    # then duration_ms, then attempt order) is unit-tested deterministically
+    # in test_experiment.py with mocked durations.
+    assert result.winner_name in {"baseline", "redundant_constraint"}
 
 
 @pytest.mark.integration
