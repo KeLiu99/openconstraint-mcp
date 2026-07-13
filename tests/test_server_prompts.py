@@ -1179,8 +1179,7 @@ async def test_auto_tune_constraint_problem_prompt_names_search_strategy_techniq
 
     # Search strategy (exploration order) is distinct from search-space size.
     assert (
-        "search strategy is a second, complementary axis, distinct from search "
-        "space size" in lower
+        "search strategy is a second, complementary axis, distinct from search space size" in lower
     )
     # MiniZinc: restart annotations paired with seed racing, solver-gated.
     assert "restart_luby" in lower

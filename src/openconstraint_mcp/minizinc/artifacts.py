@@ -22,11 +22,11 @@ from ..schemas.portfolio import (
     PortfolioAttempt,
     PortfolioSolveResult,
 )
+from ..shared.hashing import path_sha256
 from ..shared.save_target import (
     EXPERIMENT_LOG_FILENAME,
     MANIFEST_FILENAME,
     commit_staged_dir,
-    path_sha256,
 )
 from ..shared.save_target import (
     tool_version as _tool_version,

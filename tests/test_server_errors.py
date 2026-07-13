@@ -9,6 +9,7 @@ import pytest
 from openconstraint_mcp.minizinc.core import MiniZincExecutionError
 from openconstraint_mcp.runtime import RuntimeMissingError
 from openconstraint_mcp.schemas.cpsat import CpsatPythonExperimentAttempt
+from openconstraint_mcp.schemas.diagnostics import InvalidSaveTargetError, UnsupportedFeatureError
 
 # Tests deliberately white-box server internals, which are private by design.
 # noinspection PyProtectedMember
@@ -369,21 +370,25 @@ def test_classify_runtime_missing() -> None:
 
 def test_classify_unsupported_control() -> None:
     diag = _classify_domain_error(
-        ValueError("solver 'cp-sat' does not support free_search (the -f flag).")
+        UnsupportedFeatureError("solver 'cp-sat' does not support free_search (the -f flag).")
     )
     assert diag is not None
     assert diag.category == "unsupported_feature"
 
 
 def test_classify_invalid_save_target() -> None:
-    diag = _classify_domain_error(ValueError("target_dir must be an absolute path: rel"))
+    diag = _classify_domain_error(
+        InvalidSaveTargetError("target_dir must be an absolute path: rel")
+    )
     assert diag is not None
     assert diag.category == "invalid_save_target"
 
 
 def test_classify_refusing_to_overwrite_is_invalid_save_target() -> None:
     diag = _classify_domain_error(
-        ValueError("refusing to overwrite the prior saved model at /x; pass overwrite=true")
+        InvalidSaveTargetError(
+            "refusing to overwrite the prior saved model at /x; pass overwrite=true"
+        )
     )
     assert diag is not None
     assert diag.category == "invalid_save_target"
@@ -391,6 +396,35 @@ def test_classify_refusing_to_overwrite_is_invalid_save_target() -> None:
 
 def test_classify_generic_value_error_is_invalid_request() -> None:
     diag = _classify_domain_error(ValueError("model must not be empty"))
+    assert diag is not None
+    assert diag.category == "invalid_request"
+
+
+def test_classify_tabular_overwrite_refusal_is_invalid_request() -> None:
+    # tabular_io.py's plain file-exists refusal reuses the words "refusing to
+    # overwrite" in prose but is a plain ValueError, never
+    # InvalidSaveTargetError — classification is by type, so message content
+    # (however similar to save_target.py's prose) cannot collide.
+    diag = _classify_domain_error(
+        ValueError(
+            "refusing to overwrite the existing file at /x; pass overwrite=true to replace it."
+        )
+    )
+    assert diag is not None
+    assert diag.category == "invalid_request"
+
+
+def test_classify_value_error_containing_marker_prose_is_still_invalid_request() -> None:
+    # Classification is by exception type, not message content, so even a
+    # plain ValueError whose text happens to contain "target_dir" or "does
+    # not support" (e.g. because a user-chosen path embeds that text) cannot
+    # be misclassified the way the old message-marker classifier could.
+    diag = _classify_domain_error(
+        ValueError(
+            "target_path must be an absolute path: "
+            "does not support/target_dir/the prior save did not write/out.csv"
+        )
+    )
     assert diag is not None
     assert diag.category == "invalid_request"
 
@@ -475,3 +509,64 @@ async def test_tool_experiment_budget_exposes_invalid_request() -> None:
         await fn(attempts=[attempt], default_timeout_ms=10_000_000)
     assert str(exc_info.value).startswith("Diagnostic: invalid_request — ")
     assert "budget" in str(exc_info.value)
+
+
+# --- tabular I/O tools: every rejection reaches the client as an MCP error ------
+
+
+@pytest.mark.asyncio
+async def test_load_tabular_data_missing_file_is_an_invalid_request(tmp_path: Path) -> None:
+    fn = _tool_fn("load_tabular_data")
+    with pytest.raises(RuntimeError) as exc_info:
+        await fn(path=str(tmp_path / "absent.csv"))
+    assert str(exc_info.value).startswith("Diagnostic: invalid_request — ")
+    assert "does not exist" in str(exc_info.value)
+
+
+@pytest.mark.asyncio
+async def test_load_tabular_data_unsupported_suffix_is_an_invalid_request(tmp_path: Path) -> None:
+    source = tmp_path / "data.ods"
+    source.write_text("", encoding="utf-8")
+    fn = _tool_fn("load_tabular_data")
+    with pytest.raises(RuntimeError) as exc_info:
+        await fn(path=str(source))
+    assert "unsupported tabular file type" in str(exc_info.value)
+
+
+@pytest.mark.asyncio
+async def test_write_tabular_result_relative_path_is_an_invalid_request() -> None:
+    fn = _tool_fn("write_tabular_result")
+    with pytest.raises(RuntimeError) as exc_info:
+        await fn(headers=["a"], rows=[["1"]], target_path="out.csv")
+    assert str(exc_info.value).startswith("Diagnostic: invalid_request — ")
+    assert "absolute" in str(exc_info.value)
+
+
+@pytest.mark.asyncio
+async def test_write_tabular_result_refuses_to_clobber_an_existing_file(tmp_path: Path) -> None:
+    target = tmp_path / "out.csv"
+    target.write_text("keep me\n", encoding="utf-8")
+
+    fn = _tool_fn("write_tabular_result")
+    with pytest.raises(RuntimeError) as exc_info:
+        await fn(headers=["a"], rows=[["1"]], target_path=str(target))
+    assert str(exc_info.value).startswith("Diagnostic: invalid_request — ")
+    assert "refusing to overwrite" in str(exc_info.value)
+    assert target.read_text(encoding="utf-8") == "keep me\n"
+
+
+@pytest.mark.asyncio
+async def test_write_tabular_result_rejects_a_formula_string_for_csv(tmp_path: Path) -> None:
+    fn = _tool_fn("write_tabular_result")
+    with pytest.raises(RuntimeError) as exc_info:
+        await fn(headers=["a"], rows=[["=1+1"]], target_path=str(tmp_path / "out.csv"))
+    assert "formula" in str(exc_info.value)
+    assert not (tmp_path / "out.csv").exists()
+
+
+@pytest.mark.asyncio
+async def test_write_tabular_result_rejects_a_ragged_row(tmp_path: Path) -> None:
+    fn = _tool_fn("write_tabular_result")
+    with pytest.raises(RuntimeError) as exc_info:
+        await fn(headers=["a", "b"], rows=[["1"]], target_path=str(tmp_path / "out.csv"))
+    assert "every row must have exactly one cell per header" in str(exc_info.value)
