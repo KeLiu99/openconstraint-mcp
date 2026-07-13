@@ -42,15 +42,14 @@ docs/*
 # macOS
 .DS_Store
 ._*
-/examples/social_golfers/data_21.dzn
-/examples/social_golfers/data_24.dzn
-/examples/social_golfers/model_set.mzn
-/examples/social_golfers/model_table.mzn
-/examples/social_golfers/model_table_improved.mzn
-/examples/social_golfers/model_table_streamlined.mzn
-/examples/social_golfers/data_15.dzn
-/examples/social_golfers/data_18.dzn
-/examples/social_golfers/cpsat_24/.openconstraint-model.json
-/examples/social_golfers/cpsat_24/problem.txt
-/examples/social_golfers/cpsat_24/solution.py
-/examples/nonogram/python/
+
+# Retired placeholder examples (kept on disk locally, not tracked in git).
+# New example directories added under examples/ are NOT covered by this list
+# and will be tracked normally.
+/examples/australia_map_coloring/
+/examples/balanced_assignment/
+/examples/cpsat_python/
+/examples/golomb_ruler/
+/examples/knapsack/
+/examples/nonogram/
+/examples/social_golfers/

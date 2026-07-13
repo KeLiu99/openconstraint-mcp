@@ -1299,6 +1299,11 @@ result carries a usable incumbent (`status` of `optimal`, `feasible`, or
 echoes the effective `checker_timeout_ms` (the supplied value, else
 `timeout_ms`) so a polling client can pace the checker phase too.
 
+> **Note:** `examples/` is no longer tracked in this repository (see git
+> history for the last tracked snapshot); the `open(...)` calls below are
+> illustrative of the shape of the call, not a runnable snippet on a clean
+> checkout.
+
 ```python
 # Submit returns immediately with a job_id; poll until a terminal state,
 # then read the diagnostic checker verdict off the job status.
@@ -1352,6 +1357,11 @@ real sandbox. The **server wrapper** makes no network calls,
 but the executed child process is arbitrary code.
 
 ### Example scripts
+
+> **Note:** `examples/` is no longer tracked in this repository (see git
+> history for the last tracked snapshot). The paths below describe the
+> shape of the example scripts; real industrial examples will replace
+> them here.
 
 `examples/cpsat_python/` holds reference scripts with the canonical emit
 snippet:
@@ -1806,6 +1816,11 @@ The stdio server exposes three MCP prompts for client-side LLMs:
 
 ## Example models
 
+> **Note:** `examples/` is no longer tracked in this repository (see git
+> history for the last tracked snapshot). The paths below describe the
+> shape of the example models; real industrial examples will replace
+> them here.
+
 The `examples/` directory holds small, self-contained MiniZinc models you can
 point the path-based file tools at (or run by hand through the managed
 runtime). Each is a `model.mzn` — usually with a matching `data.dzn`, and one
@@ -1946,16 +1961,16 @@ listed, not that it is exhaustive.
 | `examples/balanced_assignment` | assignment/allocation | basic solve | `solve_minizinc_files` | `test_examples_integration.py::test_balanced_assignment_files_solve_to_a_feasible_assignment` | no checker/portfolio demo on this example |
 | `examples/social_golfers` | scheduling/rostering | infeasibility repair | `solve_minizinc_files`, `find_unsat_core_files` | `test_examples_integration.py::test_social_golfers_*` | the multiple-schedules (`num_solutions`) workflow described above has no dedicated test |
 | `examples/australia_map_coloring` | assignment/allocation | checker-backed solve (acceptance) | `solve_minizinc_files(checker_path=...)` | `test_examples_integration.py::test_australia_map_coloring_with_shipped_checker_completes_correct` | the shipped checker only demonstrates acceptance; see the CP-SAT checkers below for a violation demo |
-| `examples/golomb_ruler` | general CSP (no single roadmap domain) | reproducibility (save + file replay) | `save_verified_minizinc_model`, `solve_minizinc_files` | `test_examples_integration.py::test_golomb_ruler_files_reproduce_the_saved_optimum`, `test_examples_manifest.py` | none |
-| `examples/nonogram` | general CSP | reproducibility (satisfaction variant) | `save_verified_minizinc_model`, `solve_minizinc_files` | `test_examples_manifest.py` (manifest integrity only; replay verified manually, no dedicated integration test) | none |
-| `examples/nonogram/python` | general CSP | checked CP-SAT save for the same puzzle | `save_verified_cpsat_python` | `test_examples_manifest.py` | no live CP-SAT replay integration test |
+| `examples/golomb_ruler` | general CSP (no single roadmap domain) | reproducibility (save + file replay) | `save_verified_minizinc_model`, `solve_minizinc_files` | `test_examples_integration.py::test_golomb_ruler_files_reproduce_the_saved_optimum` (integration only, not part of default `just check`) | the `.openconstraint-model.json` manifest was dropped when `examples/` was untracked, so `test_examples_manifest.py` no longer covers this example |
+| `examples/nonogram` | general CSP | reproducibility (satisfaction variant) | `save_verified_minizinc_model`, `solve_minizinc_files` | none | no automated coverage: the manifest fixture was dropped when `examples/` was untracked and no integration test exists for this example |
+| `examples/nonogram/python` | general CSP | checked CP-SAT save for the same puzzle | `save_verified_cpsat_python` | none | no automated coverage: the manifest fixture was dropped when `examples/` was untracked, and there is no live CP-SAT replay integration test |
 | `examples/cpsat_python/assignment.py` | assignment/allocation | CP-SAT direct solve | `run_cpsat_python` | `tests/pyexec/test_core_integration.py::test_run_cpsat_python_solves_assignment_example` | none |
 | `examples/cpsat_python/scheduling.py` | scheduling/rostering | CP-SAT direct solve | `run_cpsat_python` | `tests/pyexec/test_core_integration.py::test_run_cpsat_python_solves_scheduling_example` | none |
 | `examples/cpsat_python/graph_coloring.py` + `graph_coloring_checker.py` | assignment/allocation | checker-backed solve, incl. a violation | `run_cpsat_python`, checker protocol | `tests/test_cpsat_python_examples.py::test_graph_coloring_checker_*` | none |
 | `examples/cpsat_python/clinic_roster_checker.py` | scheduling/rostering | checker rejecting a plausible-looking wrong answer | checker protocol | `tests/test_cpsat_python_examples.py::test_clinic_roster_checker_*` | exercised standalone against synthetic payloads; no paired `solution.py` producing a live solve |
-| `examples/golomb_ruler/cpsat_python` | general CSP | checked save (expectation + checker gates) | `save_verified_cpsat_python` | `test_examples_manifest.py`; re-verified live during this closeout (see `problem.txt`) | the saved objective is not exactly reproducible run to run (documented in `problem.txt`) — an expected CP-SAT property, not a bug |
+| `examples/golomb_ruler/cpsat_python` | general CSP | checked save (expectation + checker gates) | `save_verified_cpsat_python` | none (manually re-verified live during this closeout, see `problem.txt`) | the saved objective is not exactly reproducible run to run (documented in `problem.txt`) — an expected CP-SAT property, not a bug; the manifest fixture was also dropped when `examples/` was untracked, so `test_examples_manifest.py` no longer covers this example |
 | `examples/social_golfers/cpsat` + `cpsat_best` | scheduling/rostering | CP-SAT background job, saved artifact, and file-based replay | `submit_cpsat_python_file_job`, `get_cpsat_python_job`, `save_verified_cpsat_python` | `tests/pyexec/test_jobs_integration.py::test_submit_file_with_real_checker_reaches_optimal_and_accepted` | `cpsat/` (reported gate only, no checker) is superseded by `cpsat_best`; kept only for the reported-vs-checked contrast. `cpsat_best/replay-config.json` came from a `config`-only save, not an attached `experiment_result`, so this directory has no `experiment-log.json` — `RESULT.md` is a hand-written substitute for that provenance, not the generated artifact; see the explicit-experiment row below |
-| `examples/social_golfers/cpsat_24` | scheduling/rostering | CP-SAT saved artifact for the 8-3-11 boundary instance | `save_verified_cpsat_python` | `test_examples_manifest.py` | reported gate only; no checker or live replay integration test |
+| `examples/social_golfers/cpsat_24` | scheduling/rostering | CP-SAT saved artifact for the 8-3-11 boundary instance | `save_verified_cpsat_python` | none | reported gate only; no checker or live replay integration test; the manifest fixture was also dropped when `examples/` was untracked, so `test_examples_manifest.py` no longer covers this example |
 | *(no dedicated example file)* | — | CP-SAT explicit experiment (`run_cpsat_python_experiment`) with a durable `experiment-log.json` | `run_cpsat_python_experiment`, `save_verified_cpsat_python(experiment_result=...)` | `tests/pyexec/test_experiment_integration.py`; `tests/pyexec/test_save.py::test_save_with_matching_experiment_result_writes_experiment_log` | no shipped example directory pairs a real `examples/` script with a saved `experiment-log.json` — the integration test is a small self-contained fixture and the save-path test uses synthetic fixtures too; this is the one required workflow this closeout leaves undemonstrated on a real example rather than papering over |
 
 ## Managed runtime

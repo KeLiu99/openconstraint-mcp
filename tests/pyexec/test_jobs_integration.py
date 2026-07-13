@@ -129,7 +129,7 @@ def test_submit_file_real_child_reaches_succeeded(tmp_path: Path) -> None:
         registry.shutdown()
 
 
-_EXAMPLES = Path(__file__).parent.parent.parent / "examples" / "social_golfers" / "cpsat_best"
+_EXAMPLES = Path(__file__).parent.parent / "fixtures" / "cpsat_python" / "social_golfers_best"
 
 
 @pytest.mark.integration
