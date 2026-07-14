@@ -1,1 +1,0 @@
-Social Golfer Problem (7-3-10): schedule 21 golfers into 7 groups of 3 over 10 weeks so no two golfers share a group more than once. Saved CP-SAT winner from a local MCP configuration sweep of the compact Fano-plane formulation.

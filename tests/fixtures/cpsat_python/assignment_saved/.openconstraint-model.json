@@ -1,0 +1,24 @@
+{
+  "managed_by": "openconstraint-mcp",
+  "tool_version": "0.1.0",
+  "created_at": "2026-07-14T06:43:30.280860+00:00",
+  "backend": "cpsat_python",
+  "verification": {
+    "level": "expectation",
+    "reported_status": "optimal",
+    "objective": 3,
+    "timeout_ms": 30000,
+    "expectation": {
+      "objective_sense": "minimize",
+      "objective_threshold": 5.0,
+      "passed": true
+    }
+  },
+  "artifacts": [
+    {
+      "role": "model",
+      "path": "solution.py",
+      "sha256": "4f77914fd3ff82bad4986c1943cd78fe7b470e6dda553311e600f37afa91a67e"
+    }
+  ]
+}

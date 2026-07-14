@@ -8,7 +8,7 @@ from pathlib import Path
 
 import pytest
 
-_EXAMPLES = Path(__file__).parent.parent / "examples" / "cpsat_python"
+_EXAMPLES = Path(__file__).parent / "fixtures" / "cpsat_python"
 
 _VALID_CLINIC_ROSTER_SOLUTION: dict[str, object] = {
     "assignments": {

@@ -848,7 +848,7 @@ def test_save_verified_cpsat_python_integration(tmp_path: Path) -> None:
 
     from openconstraint_mcp.pyexec.save import save_verified_cpsat_python
 
-    examples = _Path(__file__).parent.parent.parent / "examples" / "cpsat_python"
+    examples = _Path(__file__).parent.parent / "fixtures" / "cpsat_python"
     source = (examples / "assignment.py").read_text()
     target = tmp_path / "assignment_save"
 

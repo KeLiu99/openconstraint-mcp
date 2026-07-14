@@ -1,1 +1,0 @@
-Find an optimal Golomb ruler with m = 5 marks: 0 = a1 < a2 < ... < a5, all pairwise differences distinct, minimizing the final mark a5. Symmetry is broken with a2 - a1 < a5 - a4. The known optimum for 5 marks is length 11, e.g. [0, 1, 4, 9, 11].

@@ -1,4 +1,4 @@
-"""Manifest integrity for every saved example under ``examples/``.
+"""Manifest integrity for every saved example under ``tests/fixtures``.
 
 Every ``.openconstraint-model.json`` in the repo is the output of
 ``save_verified_minizinc_model``/``save_verified_cpsat_python`` and lists its
@@ -17,8 +17,12 @@ import pytest
 
 from openconstraint_mcp.shared.hashing import path_sha256
 
-_EXAMPLES_DIR = Path(__file__).parent.parent / "examples"
-_MANIFESTS = sorted(_EXAMPLES_DIR.rglob(".openconstraint-model.json"))
+_FIXTURES_DIR = Path(__file__).parent / "fixtures"
+_MANIFESTS = sorted(_FIXTURES_DIR.rglob(".openconstraint-model.json"))
+
+
+def test_at_least_one_manifest_is_tracked() -> None:
+    assert _MANIFESTS, f"no .openconstraint-model.json found under {_FIXTURES_DIR}"
 
 
 @pytest.mark.parametrize("manifest_path", _MANIFESTS, ids=[str(p) for p in _MANIFESTS])

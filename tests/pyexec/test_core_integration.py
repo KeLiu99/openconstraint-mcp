@@ -12,7 +12,7 @@ from openconstraint_mcp.pyexec.core import (
     run_cpsat_python_file,
 )
 
-_EXAMPLES = Path(__file__).parent.parent.parent / "examples" / "cpsat_python"
+_EXAMPLES = Path(__file__).parent.parent / "fixtures" / "cpsat_python"
 
 
 @pytest.mark.integration

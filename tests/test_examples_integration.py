@@ -1,9 +1,12 @@
-"""Real-runtime smoke tests for the shipped MiniZinc examples in ``examples/``.
+"""Real-runtime smoke tests for the MiniZinc example fixtures.
 
 These prove the README's example inventory claims are actually true against
 the managed binary, not just plausible-sounding prose. Marked ``integration``
 and excluded from ``just check``; run with ``just integration`` on a machine
-where ``install-runtime`` has placed a runtime.
+where ``install-runtime`` has placed a runtime. The fixtures are tracked
+copies of ``examples/`` content (which is no longer shipped in the repo) so
+this suite passes on a clean checkout, not just a machine that happens to
+have a local ``examples/`` directory.
 """
 
 from __future__ import annotations
@@ -16,7 +19,7 @@ from openconstraint_mcp.minizinc.core import find_unsat_core_path, solve_model_p
 
 pytestmark = [pytest.mark.integration, pytest.mark.usefixtures("require_real_runtime")]
 
-_EXAMPLES_DIR = Path(__file__).parent.parent / "examples"
+_EXAMPLES_DIR = Path(__file__).parent / "fixtures" / "minizinc"
 
 
 def test_knapsack_files_solve_to_a_feasible_selection() -> None:
