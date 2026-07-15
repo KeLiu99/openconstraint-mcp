@@ -18,13 +18,13 @@ from typing import Any
 class FakeCompletedProcess:
     """Stand-in for the ``subprocess.Popen`` handle the MiniZinc runner drives.
 
-    ``_invoke_minizinc`` launches via ``subprocess.Popen`` and reads the result
-    through ``communicate``/``returncode`` (Popen rather than ``subprocess.run``
-    so the live child can be registered with the teardown tracker). Tests patch
-    ``core.subprocess.Popen`` to return one of these; it exposes exactly what the
-    runner touches: ``communicate`` (returning the captured ``stdout``/``stderr``),
-    ``returncode``, ``poll`` (non-``None`` so a tree-kill on this fake is a no-op),
-    ``pid``, and the context-manager protocol.
+    ``_invoke_minizinc`` launches via the shared ``popen_process_group`` launcher
+    and reads the result through ``communicate``/``returncode`` (a ``Popen`` handle
+    rather than ``subprocess.run`` so the live child can be registered with the
+    teardown tracker). Tests patch ``core.popen_process_group`` to return one of
+    these; it exposes exactly what the runner touches: ``communicate`` (returning
+    the captured ``stdout``/``stderr``), ``returncode``, ``poll`` (non-``None`` so
+    a tree-kill on this fake is a no-op), ``pid``, and the context-manager protocol.
 
     With ``timeout=True`` the first ``communicate`` raises ``TimeoutExpired`` (the
     runner then tree-kills and drains a second ``communicate``, which returns the

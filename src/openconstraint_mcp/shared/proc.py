@@ -59,8 +59,8 @@ def popen_process_group(cmd: list[str], **kwargs: Any) -> subprocess.Popen[Any]:
     platform so callers do not duplicate the platform-dispatch logic.
     Extra keyword arguments are forwarded to ``subprocess.Popen``. The return
     type is ``Popen[Any]`` because the forwarded ``**kwargs`` decide the stream
-    text/bytes mode (the sole caller routes stdout/stderr to files, so the
-    handle carries no readable streams) and matches ``terminate_process_tree``.
+    text/bytes mode (the CP-SAT runner routes stdout/stderr to files; the
+    MiniZinc runner pipes text streams) and matches ``terminate_process_tree``.
     """
     return subprocess.Popen(
         cmd,

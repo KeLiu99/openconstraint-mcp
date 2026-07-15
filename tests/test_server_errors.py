@@ -180,7 +180,7 @@ async def test_string_tools_translate_value_error_with_cause(
     # An empty model raises ValueError before the runtime gate; the default caught
     # set must convert it to a plain RuntimeError with the cause preserved. The
     # direct call passes no ctx, so the async wrappers must default it to None.
-    monkeypatch.setattr("openconstraint_mcp.minizinc.core.subprocess.Popen", _no_subprocess)
+    monkeypatch.setattr("openconstraint_mcp.minizinc.core.popen_process_group", _no_subprocess)
     fn = _tool_fn(tool_name)
 
     with pytest.raises(RuntimeError) as exc_info:
@@ -206,7 +206,7 @@ async def test_file_tools_translate_value_error_with_cause(
 ) -> None:
     # A missing model path raises ValueError before the runtime gate; same
     # translation invariant on the path-based tools.
-    monkeypatch.setattr("openconstraint_mcp.minizinc.core.subprocess.Popen", _no_subprocess)
+    monkeypatch.setattr("openconstraint_mcp.minizinc.core.popen_process_group", _no_subprocess)
     missing = tmp_path / "nope.mzn"
     fn = _tool_fn(tool_name)
 
@@ -225,7 +225,7 @@ async def test_save_tool_translates_target_value_error_with_cause(
     # A relative target_dir raises ValueError ahead of the runtime gate and any
     # subprocess; the default caught set converts it to a plain RuntimeError
     # whose message tells the client how to fix the call.
-    monkeypatch.setattr("openconstraint_mcp.minizinc.core.subprocess.Popen", _no_subprocess)
+    monkeypatch.setattr("openconstraint_mcp.minizinc.core.popen_process_group", _no_subprocess)
     fn = _tool_fn("save_verified_minizinc_model")
 
     with pytest.raises(RuntimeError) as exc_info:
@@ -319,7 +319,7 @@ def test_submit_solve_job_translates_value_error_with_cause(
 ) -> None:
     # An empty model raises ValueError in submit's up-front validation, before any
     # job or subprocess; the default caught set converts it to a plain RuntimeError.
-    monkeypatch.setattr("openconstraint_mcp.minizinc.core.subprocess.Popen", _no_subprocess)
+    monkeypatch.setattr("openconstraint_mcp.minizinc.core.popen_process_group", _no_subprocess)
     fn = _tool_fn("submit_solve_job")
 
     with pytest.raises(RuntimeError) as exc_info:
@@ -477,7 +477,7 @@ async def test_tool_malformed_model_path_exposes_invalid_request(tmp_path: Path)
 async def test_tool_relative_target_dir_exposes_invalid_save_target(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setattr("openconstraint_mcp.minizinc.core.subprocess.Popen", _no_subprocess)
+    monkeypatch.setattr("openconstraint_mcp.minizinc.core.popen_process_group", _no_subprocess)
     fn = _tool_fn("save_verified_minizinc_model")
     with pytest.raises(RuntimeError) as exc_info:
         await fn(model="solve satisfy;", target_dir="relative/project")
