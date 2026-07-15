@@ -29,12 +29,7 @@ from ..schemas.minizinc import (
 )
 from ..schemas.portfolio import PortfolioSolveResult
 from ..shared.childproc import ChildProcessTracker
-from ..shared.proc import (
-    CREATION_FLAGS as _CREATION_FLAGS,
-)
-from ..shared.proc import (
-    START_NEW_SESSION as _START_NEW_SESSION,
-)
+from ..shared.proc import popen_process_group
 from ..shared.proc import (
     terminate_process_tree as _terminate_process_tree,
 )
@@ -235,7 +230,7 @@ def _run_minizinc_popen(
     subprocess_timeout = (timeout_ms / 1000) + 5
     start = time.monotonic()
     try:
-        proc = subprocess.Popen(
+        proc: subprocess.Popen[str] = popen_process_group(
             list(cmd),
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
@@ -243,8 +238,6 @@ def _run_minizinc_popen(
             encoding="utf-8",
             errors="replace",
             cwd=cwd,
-            start_new_session=_START_NEW_SESSION,
-            creationflags=_CREATION_FLAGS,
         )
     except OSError as exc:
         raise MiniZincExecutionError(

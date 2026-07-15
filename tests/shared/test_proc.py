@@ -45,6 +45,38 @@ class _FakePopen:
         self.terminate_calls += 1
 
 
+def test_popen_process_group_launches_leader_with_platform_flags(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # The whole-tree-killable launch contract, asserted where the flags are owned:
+    # POSIX children get start_new_session=True (a new session leader, killable via
+    # os.killpg); Windows children get CREATE_NEW_PROCESS_GROUP. Consumers (the
+    # MiniZinc and CP-SAT runners) patch popen_process_group itself, so the raw
+    # values are pinned independently here, alongside the caller kwarg forwarding.
+    calls: list[dict[str, Any]] = []
+    handle = _FakePopen()
+
+    def _fake_popen(cmd: Any, **kwargs: Any) -> Any:
+        calls.append({"cmd": cmd, "kwargs": kwargs})
+        return handle
+
+    monkeypatch.setattr("openconstraint_mcp.shared.proc.subprocess.Popen", _fake_popen)
+
+    returned = popen_process_group(["some-binary", "--flag"], cwd="/work", text=True)
+
+    assert returned is handle
+    assert calls[0]["cmd"] == ["some-binary", "--flag"]
+    kwargs = calls[0]["kwargs"]
+    assert kwargs["cwd"] == "/work"
+    assert kwargs["text"] is True
+    if sys.platform == "win32":
+        assert kwargs["start_new_session"] is False
+        assert kwargs["creationflags"] == subprocess.CREATE_NEW_PROCESS_GROUP
+    else:
+        assert kwargs["start_new_session"] is True
+        assert kwargs["creationflags"] == 0
+
+
 def test_process_tree_terminate_worst_case_ms_accounts_for_two_waits() -> None:
     assert process_tree_terminate_worst_case_ms() == 2 * PROCESS_TREE_TERMINATE_GRACE_MS
 
