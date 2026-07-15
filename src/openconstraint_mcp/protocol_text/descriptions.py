@@ -992,7 +992,7 @@ WRITE_TABULAR_RESULT_DESCRIPTION = (
     "rejected rather than silently truncated. XLSX writes a single sheet named "
     "`Sheet1`. "
     "XLSX ROUND-TRIP SAFETY: further writes are rejected rather than silently "
-    "corrupted or changed on the next read — an empty-string row cell (`\"\"`, "
+    'corrupted or changed on the next read — an empty-string row cell (`""`, '
     "send `null` instead); a number needing more than 16 significant digits, or "
     "whose int/float type would flip on read-back (send it as a string instead); "
     "a string with a character XML cannot represent, e.g. a lone surrogate or "
