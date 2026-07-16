@@ -297,10 +297,13 @@ class JobRegistry:
                 with self._lock:
                     self._finalize(record, "cancelled", None, "Cancelled at shutdown")
         with self._lock:
+            # A terminal record can still own a leader that termination could not
+            # reap. Its None returncode is the teardown-retry signal.
             handles = [
                 cast("Popen[str]", r.handle)
                 for r in self._records.values()
-                if r.handle is not None and r.state not in TERMINAL_STATES
+                if r.handle is not None
+                and (r.state not in TERMINAL_STATES or getattr(r.handle, "returncode", 0) is None)
             ]
         for handle in handles:
             _terminate_process_tree(handle)

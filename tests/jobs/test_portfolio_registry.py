@@ -41,8 +41,18 @@ def _solve_result(status: str = "satisfied", *, solver: str = "cp-sat") -> Solve
 
 
 class _FakeProc:
-    def poll(self) -> int:
-        return 0
+    """Opaque handle stand-in; no ``pid``, so real termination must stay patched."""
+
+
+@pytest.fixture(autouse=True)
+def _never_terminate_for_real(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Every proc in this file is a ``_FakeProc``; the real group-aware
+    terminate would probe ``os.getpgid``/``os.killpg`` on it.
+    """
+    monkeypatch.setattr(
+        "openconstraint_mcp.jobs.registry._terminate_process_tree",
+        lambda proc, **kwargs: None,
+    )
 
 
 def _patch_solve(monkeypatch: pytest.MonkeyPatch, fake: Any) -> None:

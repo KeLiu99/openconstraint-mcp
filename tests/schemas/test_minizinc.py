@@ -7,6 +7,7 @@ from openconstraint_mcp.schemas.artifacts import SavedModelArtifact
 from openconstraint_mcp.schemas.minizinc import (
     CheckerReport,
     CheckResult,
+    ModelInspectionResult,
     SaveVerifiedModelResult,
     SolutionCheck,
     SolveJobStatus,
@@ -44,6 +45,8 @@ def test_solve_result_round_trips() -> None:
         "solver": "cp-sat",
         "return_code": 0,
         "timed_out": False,
+        # Additive field; a normal (un-truncated) solve renders it as False.
+        "truncated": False,
         "stdout": "x=0 y=1 total=2\nx=2 y=10 total=22\n",
         "stderr": "",
         "elapsed_ms": 42,
@@ -81,6 +84,50 @@ def test_solve_result_round_trips_satisfaction_has_null_objective() -> None:
     assert dumped["status"] == "satisfied"
 
 
+def test_solve_result_truncated_defaults_false_and_round_trips_true() -> None:
+    # The additive `truncated` field defaults to False (existing callers omit it)
+    # and round-trips True for an output-cap kill.
+    assert (
+        SolveResult(
+            status="unknown",
+            solver="cp-sat",
+            return_code=0,
+            timed_out=False,
+            stdout="",
+            stderr="",
+            elapsed_ms=1,
+        ).truncated
+        is False
+    )
+    truncated = SolveResult(
+        status="satisfied",
+        solver="org.gecode.gecode",
+        return_code=None,
+        timed_out=False,
+        truncated=True,
+        stdout="x=1\n",
+        stderr="output exceeded the 1 MiB cap; process stopped\n",
+        elapsed_ms=7,
+        solution={"x": 1},
+        solutions=[{"x": 1}],
+    )
+    assert truncated.model_dump()["truncated"] is True
+    assert truncated.return_code is None
+
+
+def test_analysis_results_truncated_defaults_false() -> None:
+    # The additive `truncated` field on the analysis results defaults to False,
+    # so existing callers that omit it are unchanged.
+    check = CheckResult(status="ok", solver="cp-sat", stdout="", stderr="", elapsed_ms=1)
+    inspection = ModelInspectionResult(
+        status="ok", solver="cp-sat", stdout="", stderr="", elapsed_ms=1
+    )
+    core = UnsatCoreResult(
+        status="no_core", core=[], message="", stdout="", stderr="", elapsed_ms=1
+    )
+    assert (check.truncated, inspection.truncated, core.truncated) == (False, False, False)
+
+
 def test_solve_result_rejects_unknown_status() -> None:
     with pytest.raises(ValidationError):
         SolveResult(
@@ -106,6 +153,8 @@ def test_check_result_round_trips() -> None:
     assert dumped == {
         "status": "ok",
         "solver": "cp-sat",
+        # Additive field; a normal (un-truncated) check renders it as False.
+        "truncated": False,
         "stdout": "",
         "stderr": "",
         "elapsed_ms": 12,
@@ -154,6 +203,8 @@ def test_unsat_core_result_round_trips() -> None:
             }
         ],
         "message": "findMUS reported a minimal unsatisfiable subset.",
+        # Additive field; a normal (un-truncated) run renders it as False.
+        "truncated": False,
         "stdout": "MUS: 1 2\n",
         "stderr": "",
         "elapsed_ms": 7,

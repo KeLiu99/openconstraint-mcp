@@ -12,7 +12,6 @@ from openconstraint_mcp.pyexec.jobs import (
     _CpsatJobRecord,
     _CpsatJobRequest,
 )
-from openconstraint_mcp.pyexec.runner import ChildExecutionResult
 from openconstraint_mcp.schemas.cpsat import (
     CpsatCheckerReport,
     CpsatPythonExperimentAttemptResult,
@@ -20,6 +19,7 @@ from openconstraint_mcp.schemas.cpsat import (
     CpsatPythonResult,
     CpsatStatus,
 )
+from openconstraint_mcp.shared.childrun import ChildExecutionResult
 
 
 def _result(

@@ -3,9 +3,7 @@ from __future__ import annotations
 import json
 import subprocess
 import tempfile
-import time
-from collections.abc import Callable, Iterator, Sequence
-from contextlib import AbstractContextManager, contextmanager
+from collections.abc import Callable, Sequence
 from pathlib import Path
 from typing import Any, NamedTuple
 
@@ -29,10 +27,7 @@ from ..schemas.minizinc import (
 )
 from ..schemas.portfolio import PortfolioSolveResult
 from ..shared.childproc import ChildProcessTracker
-from ..shared.proc import popen_process_group
-from ..shared.proc import (
-    terminate_process_tree as _terminate_process_tree,
-)
+from ..shared.childrun import ChildExecutionResult, execute_child
 from ..shared.save_target import text_sha256, validate_save_target
 from .artifacts import write_verified_model_dir
 from .checker import _parse_checker_stream
@@ -95,14 +90,6 @@ _SOLVE_STREAM_ARGS: tuple[str, ...] = (
 
 class MiniZincExecutionError(RuntimeError):
     """Raised when the managed MiniZinc binary fails to produce a usable result."""
-
-
-def _coerce_to_text(payload: str | bytes | None) -> str:
-    if payload is None:
-        return ""
-    if isinstance(payload, bytes):
-        return payload.decode("utf-8", errors="replace")
-    return payload
 
 
 def _format_unsat_core_message(core: Sequence[UnsatCoreConstraint]) -> str:
@@ -197,47 +184,49 @@ class _RunOutcome(NamedTuple):
     stdout: str
     stderr: str
     elapsed_ms: int
+    truncated: bool = False
+    truncation_killed: bool = False  # cap branch requested termination; child last seen running
 
 
-def _run_minizinc_popen(
+# Fixed line appended to a truncated run's stderr so the raw stderr text itself
+# records the output-cap overrun, alongside the structured ``truncated`` field and
+# ``output_truncated`` diagnostic every result schema carries.
+_OUTPUT_CAP_STDERR_LINE: str = "output exceeded the 1 MiB cap; process stopped"
+
+# Outer wall-clock grace (ms) added on top of MiniZinc's own ``--time-limit`` so
+# the binary normally stops itself first and we capture its partial output; only a
+# child that overruns this grace is tree-killed. Matches the pre-executor 5 s grace.
+_MINIZINC_OUTPUT_GRACE_MS: int = 5000
+
+
+def _execute_minizinc_child(
     cmd: Sequence[str],
     *,
     timeout_ms: int,
     cwd: str,
-    manage_handle: Callable[[subprocess.Popen[str]], AbstractContextManager[None]],
-) -> _RunOutcome:
-    """Launch ``cmd`` as a process-group leader, run it under the wall-clock cap,
-    and capture the raw outcome.
+    tracker: ChildProcessTracker | None = None,
+    on_start: Callable[[subprocess.Popen[str]], None] | None = None,
+) -> ChildExecutionResult:
+    """Run a fully-built MiniZinc ``cmd`` through the shared capped executor.
 
-    The single launch-and-timeout body shared by the blocking runner
-    (``_invoke_minizinc``) and the cancellable runner
-    (``_run_managed_minizinc_cancellable``). The only thing that differs between
-    them is how the live handle is exposed for teardown, supplied as
-    ``manage_handle``: a context manager bracketing the run — register/unregister
-    with the server's child tracker, or publish-for-cancellation. ``Popen`` rather
-    than ``subprocess.run`` so that handle can be observed while the child runs.
-
-    The child is launched as the leader of its own process group/session (so the
-    whole tree can be signalled at once) and gets a wall-clock cap of
-    ``(timeout_ms / 1000) + 5`` seconds — a few seconds past MiniZinc's own
-    ``--time-limit`` so the binary normally stops itself first, and we capture its
-    partial output. A ``TimeoutExpired`` from ``communicate`` terminates the tree
-    and becomes a ``timed_out`` outcome; an external termination of the handle
-    makes ``communicate`` return normally (the caller then classifies the run). An
-    ``OSError`` on launch (binary missing/not executable) is wrapped as
-    ``MiniZincExecutionError`` keyed on ``cmd[0]``.
+    The single launch point for both runners. The child is launched as a
+    process-group leader with combined stdout+stderr capped at ``MAX_OUTPUT_BYTES``
+    (1 MiB) and tree-killed on overrun — the executor's contract, now shared with
+    CP-SAT. It gets the outer ``timeout_ms + _MINIZINC_OUTPUT_GRACE_MS`` wall-clock
+    cap so MiniZinc's own ``--time-limit`` normally fires first and we keep its
+    partial output. ``tracker`` registers the live child for server-teardown
+    termination; ``on_start`` publishes the handle for targeted cancellation — the
+    executor supports both lifecycles natively. A launch ``OSError`` (binary
+    missing/not executable) is wrapped as ``MiniZincExecutionError`` keyed on
+    ``cmd[0]``.
     """
-    subprocess_timeout = (timeout_ms / 1000) + 5
-    start = time.monotonic()
     try:
-        proc: subprocess.Popen[str] = popen_process_group(
+        return execute_child(
             list(cmd),
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-            cwd=cwd,
+            Path(cwd),
+            timeout_ms=timeout_ms + _MINIZINC_OUTPUT_GRACE_MS,
+            tracker=tracker,
+            on_start=on_start,
         )
     except OSError as exc:
         raise MiniZincExecutionError(
@@ -245,28 +234,40 @@ def _run_minizinc_popen(
             "The runtime may be corrupt — try reinstalling with "
             "`openconstraint-mcp install-runtime`."
         ) from exc
-    with manage_handle(proc):
-        try:
-            stdout, stderr = proc.communicate(timeout=subprocess_timeout)
-        except subprocess.TimeoutExpired:
-            _terminate_process_tree(proc)
-            stdout, stderr = proc.communicate()  # drain after the tree is gone
-            elapsed_ms = max(int((time.monotonic() - start) * 1000), 0)
-            return _RunOutcome(
-                timed_out=True,
-                returncode=-1,  # sentinel: never read while timed_out is True
-                stdout=_coerce_to_text(stdout),
-                stderr=_coerce_to_text(stderr),
-                elapsed_ms=elapsed_ms,
-            )
-        elapsed_ms = max(int((time.monotonic() - start) * 1000), 0)
+
+
+def _outcome_from_child(child: ChildExecutionResult) -> _RunOutcome:
+    """Adapt a raw ``ChildExecutionResult`` into MiniZinc's ``_RunOutcome``.
+
+    Preserves the pre-executor contract: a timeout yields ``timed_out=True`` with
+    the ``-1`` returncode sentinel (never read while timed out); a normal run
+    carries the child's real exit code. ``truncated`` rides along on both branches,
+    and when set the fixed cap-notice line is appended to ``stderr`` so the raw
+    stderr text records the overrun alongside the structured flag.
+    """
+    stderr = child.stderr
+    if child.truncated:
+        base = stderr if stderr == "" or stderr.endswith("\n") else stderr + "\n"
+        stderr = base + _OUTPUT_CAP_STDERR_LINE + "\n"
+    if child.timed_out:
         return _RunOutcome(
-            timed_out=False,
-            returncode=proc.returncode,
-            stdout=_coerce_to_text(stdout),
-            stderr=_coerce_to_text(stderr),
-            elapsed_ms=elapsed_ms,
+            timed_out=True,
+            returncode=-1,  # sentinel: never read while timed_out is True
+            stdout=child.stdout,
+            stderr=stderr,
+            elapsed_ms=child.duration_ms,
+            truncated=child.truncated,
+            truncation_killed=child.truncation_killed,
         )
+    return _RunOutcome(
+        timed_out=False,
+        returncode=child.return_code if child.return_code is not None else -1,
+        stdout=child.stdout,
+        stderr=stderr,
+        elapsed_ms=child.duration_ms,
+        truncated=child.truncated,
+        truncation_killed=child.truncation_killed,
+    )
 
 
 def _invoke_minizinc(
@@ -279,25 +280,17 @@ def _invoke_minizinc(
     """Run a fully-built MiniZinc ``cmd`` (blocking) and capture the raw outcome.
 
     Shared by the inline runner (``cwd`` is a private temp dir) and the path-based
-    runner (``cwd`` is the model's own directory). Delegates the launch and
-    wall-clock cap to ``_run_minizinc_popen``; its only specialization is the
-    handle lifecycle: while the child runs it is registered with ``tracker`` (the
-    server's per-run child tracker) so an abrupt server teardown terminates this
-    in-flight child instead of orphaning it, and it is unregistered on every exit
-    path. With no ``tracker`` the behaviour is identical, just untracked.
+    runner (``cwd`` is the model's own directory). Delegates launch, the output
+    cap, and the wall-clock cap to the shared executor via ``_execute_minizinc_child``;
+    while the child runs it is registered with ``tracker`` (the server's per-run
+    child tracker) so an abrupt server teardown terminates this in-flight child
+    instead of orphaning it. A reaped leader is unregistered; one that survives
+    termination stays registered for teardown to retry. With no ``tracker`` the
+    behaviour is identical, just untracked.
     """
-
-    @contextmanager
-    def _track(proc: subprocess.Popen[str]) -> Iterator[None]:
-        if tracker is not None:
-            tracker.register(proc)
-        try:
-            yield
-        finally:
-            if tracker is not None:
-                tracker.unregister(proc)
-
-    return _run_minizinc_popen(cmd, timeout_ms=timeout_ms, cwd=cwd, manage_handle=_track)
+    return _outcome_from_child(
+        _execute_minizinc_child(cmd, timeout_ms=timeout_ms, cwd=cwd, tracker=tracker)
+    )
 
 
 def _build_minizinc_cmd(
@@ -450,22 +443,17 @@ def _run_managed_minizinc_cancellable(
     checker: str | None = None,
     on_start: Callable[[subprocess.Popen[str]], None],
 ) -> _RunOutcome:
-    """Cancellable mirror of ``_run_managed_minizinc`` (Popen-based, terminable).
+    """Cancellable mirror of ``_run_managed_minizinc`` (terminable).
 
     Same temp-dir / model-data-checker file contract (via ``_build_inline_cmd``)
-    and same wall-clock cap as the blocking runner, but launched through
-    ``_run_minizinc_popen`` with a ``manage_handle`` that publishes the live
-    process handle via ``on_start``, so the caller can terminate the whole tree to
+    and same output/wall-clock caps as the blocking runner, but launched through
+    ``_execute_minizinc_child`` with ``on_start``, which the shared executor calls
+    with the live process handle so the caller can terminate the whole tree to
     cancel. Returns the same ``_RunOutcome``, so ``_build_solve_result`` consumes
     it unchanged.
     """
     validate_model_and_timeout(model, timeout_ms)
     binary = _require_minizinc_binary()
-
-    @contextmanager
-    def _publish(proc: subprocess.Popen[str]) -> Iterator[None]:
-        on_start(proc)
-        yield
 
     with tempfile.TemporaryDirectory(prefix="openconstraint-mcp-") as tmp:
         tmp_dir = Path(tmp)
@@ -479,9 +467,10 @@ def _run_managed_minizinc_cancellable(
             data=data,
             checker=checker,
         )
-        return _run_minizinc_popen(
-            cmd, timeout_ms=timeout_ms, cwd=str(tmp_dir), manage_handle=_publish
+        child = _execute_minizinc_child(
+            cmd, timeout_ms=timeout_ms, cwd=str(tmp_dir), on_start=on_start
         )
+        return _outcome_from_child(child)
 
 
 def _merge_stderr(real_stderr: str, messages: Sequence[str]) -> str:
@@ -528,12 +517,14 @@ def _build_solve_result(outcome: _RunOutcome, *, solver: str) -> SolveResult:
     if outcome.timed_out:
         # The outer subprocess cap fired: keep whatever the partial stream gave,
         # but the verdict is "timeout" and there is no real return code (expose
-        # None, not the internal -1 sentinel).
+        # None, not the internal -1 sentinel). A burst overrun can flag `truncated`
+        # even here (the deadline is checked before the size cap), so it rides along.
         return SolveResult(
             status="timeout",
             solver=solver,
             return_code=None,
             timed_out=True,
+            truncated=outcome.truncated,
             stdout=parsed.stdout,
             stderr=stderr,
             elapsed_ms=outcome.elapsed_ms,
@@ -542,14 +533,27 @@ def _build_solve_result(outcome: _RunOutcome, *, solver: str) -> SolveResult:
             solutions=parsed.solutions,
             objective=parsed.objective,
         )
+    # When the cap branch requested tree termination (the child was last seen
+    # running), its exit code may be the executor's artifact rather than the
+    # model's, so mask it: expose return_code=None (matching the timeout contract)
+    # and force the status resolver's return-code input to 0 so the rc-derived
+    # "error" fallback never wins — the stream's own verdict is used when present,
+    # else "satisfied" if partial solutions survived, else "unknown". This keys off
+    # ``truncation_killed``, NOT ``truncated``: a burst writer that overran the cap
+    # but exited BEFORE the loop observed it carries its genuine exit code, and
+    # masking that would turn a real rc=1 failure into "unknown". (The signal is not
+    # proven to have caused the exit — see childrun's accepted residual race — but
+    # masking a possibly-executor-owned code is the right policy for a truncated run.)
+    effective_returncode = 0 if outcome.truncation_killed else outcome.returncode
     status = _resolve_status(
-        parsed.status, has_solution=bool(parsed.solutions), returncode=outcome.returncode
+        parsed.status, has_solution=bool(parsed.solutions), returncode=effective_returncode
     )
     return SolveResult(
         status=status,
         solver=solver,
-        return_code=outcome.returncode,
+        return_code=None if outcome.truncation_killed else outcome.returncode,
         timed_out=False,
+        truncated=outcome.truncated,
         stdout=parsed.stdout,
         stderr=stderr,
         elapsed_ms=outcome.elapsed_ms,
@@ -563,12 +567,17 @@ def _build_solve_result(outcome: _RunOutcome, *, solver: str) -> SolveResult:
 def _build_check_result(outcome: _RunOutcome, *, solver: str) -> CheckResult:
     # A pure `-c` compile emits no status object, so the process return code is
     # the whole signal here — unlike solve, which classifies from the stream.
+    # Deliberately NO `truncation_killed` masking (unlike solve/unsat-core):
+    # masking would report `ok` for a compile the server killed mid-run — a false
+    # success, and CheckResult gates `save_verified_model`. A killed check fails
+    # closed as `error`; the `output_truncated` diagnostic names the real cause.
     status: CheckStatus = (
         "timeout" if outcome.timed_out else ("ok" if outcome.returncode == 0 else "error")
     )
     result = CheckResult(
         status=status,
         solver=solver,
+        truncated=outcome.truncated,
         stdout=outcome.stdout,
         stderr=outcome.stderr,
         elapsed_ms=outcome.elapsed_ms,
@@ -580,8 +589,11 @@ def _build_check_result(outcome: _RunOutcome, *, solver: str) -> CheckResult:
 def _build_inspection_result(outcome: _RunOutcome, *, solver: str) -> ModelInspectionResult:
     """Classify a ``--model-interface-only`` run into a ModelInspectionResult.
 
-    Mirrors ``_build_check_result``'s rc-driven contract — timeout -> ``timeout``,
-    a non-zero exit -> ``error`` with the diagnostic on stderr and no parse — then
+    Mirrors ``_build_check_result``'s rc-driven contract (including its
+    deliberate lack of ``truncation_killed`` masking — a killed run fails closed
+    as ``error`` rather than claiming an interface was extracted) — timeout ->
+    ``timeout``, a non-zero exit -> ``error`` with the diagnostic on stderr and no
+    parse — then
     on a clean exit parses the single interface object. An unparseable interface on
     rc 0 degrades to ``error`` (with the parse failure folded into stderr) rather
     than mis-reporting a partial interface. ``interface`` is populated only on ``ok``.
@@ -598,6 +610,7 @@ def _classify_inspection_outcome(outcome: _RunOutcome, *, solver: str) -> ModelI
             status="timeout",
             solver=solver,
             interface=None,
+            truncated=outcome.truncated,
             stdout=outcome.stdout,
             stderr=outcome.stderr,
             elapsed_ms=outcome.elapsed_ms,
@@ -607,6 +620,7 @@ def _classify_inspection_outcome(outcome: _RunOutcome, *, solver: str) -> ModelI
             status="error",
             solver=solver,
             interface=None,
+            truncated=outcome.truncated,
             stdout=outcome.stdout,
             stderr=outcome.stderr,
             elapsed_ms=outcome.elapsed_ms,
@@ -618,6 +632,7 @@ def _classify_inspection_outcome(outcome: _RunOutcome, *, solver: str) -> ModelI
             status="error",
             solver=solver,
             interface=None,
+            truncated=outcome.truncated,
             stdout=outcome.stdout,
             stderr=_merge_stderr(outcome.stderr, [f"interface parse failed: {exc}"]),
             elapsed_ms=outcome.elapsed_ms,
@@ -626,6 +641,7 @@ def _classify_inspection_outcome(outcome: _RunOutcome, *, solver: str) -> ModelI
         status="ok",
         solver=solver,
         interface=interface,
+        truncated=outcome.truncated,
         stdout=outcome.stdout,
         stderr=outcome.stderr,
         elapsed_ms=outcome.elapsed_ms,
@@ -648,6 +664,7 @@ def _classify_unsat_core_outcome(
             status="timeout",
             core=[],
             message="findMUS timed out before reporting a result.",
+            truncated=outcome.truncated,
             stdout=outcome.stdout,
             stderr=outcome.stderr,
             elapsed_ms=outcome.elapsed_ms,
@@ -659,25 +676,39 @@ def _classify_unsat_core_outcome(
             status="mus_found",
             core=core,
             message=_format_unsat_core_message(core),
+            truncated=outcome.truncated,
             stdout=outcome.stdout,
             stderr=outcome.stderr,
             elapsed_ms=outcome.elapsed_ms,
         )
 
-    if outcome.returncode != 0:
+    # A cap tree-kill's exit code is the executor's artifact, not findMUS's
+    # verdict, so mask it (same policy as `_build_solve_result`): the run falls
+    # through to `no_core` — "no MUS reported", which the schema already defines
+    # as a no-verdict status — with the `output_truncated` diagnostic naming the
+    # real cause. Only `error` from findMUS's OWN nonzero exit survives.
+    if outcome.returncode != 0 and not outcome.truncation_killed:
         return UnsatCoreResult(
             status="error",
             core=[],
             message="findMUS did not complete successfully; see stderr.",
+            truncated=outcome.truncated,
             stdout=outcome.stdout,
             stderr=outcome.stderr,
             elapsed_ms=outcome.elapsed_ms,
         )
 
+    message = (
+        "findMUS was stopped at the 1 MiB output cap before reporting a "
+        "minimal unsatisfiable subset."
+        if outcome.truncation_killed
+        else "findMUS completed without reporting a minimal unsatisfiable subset."
+    )
     return UnsatCoreResult(
         status="no_core",
         core=[],
-        message="findMUS completed without reporting a minimal unsatisfiable subset.",
+        message=message,
+        truncated=outcome.truncated,
         stdout=outcome.stdout,
         stderr=outcome.stderr,
         elapsed_ms=outcome.elapsed_ms,
@@ -1086,15 +1117,20 @@ def _save_gate_diagnostic(gate_diagnostic: Diagnostic | None) -> Diagnostic:
 def _verification_failure(solve: SolveResult, *, checker_supplied: bool) -> str | None:
     """Explain why a solve fails the save gate, or ``None`` when it verifies.
 
-    The gate accepts only ``satisfied``/``optimal`` with no subprocess timeout
-    and a clean exit; when a checker was supplied, the nested report must be
-    ``completed`` (the checker ran for every solution with no machine-readable
-    violation — it does NOT prove optimality). Ordered most-specific-first:
-    a timed-out run is named as such (its ``return_code`` is ``None``), then
-    the status verdict, then the exit code, then the checker verdict.
+    The gate accepts only ``satisfied``/``optimal`` with no subprocess timeout,
+    untruncated output, and a clean exit; when a checker was supplied, the
+    nested report must be ``completed`` (the checker ran for every solution
+    with no machine-readable violation — it does NOT prove optimality).
+    Ordered most-specific-first: a timed-out run is named as such (its
+    ``return_code`` is ``None``), then a truncated run (a cap-terminated one also
+    has ``return_code`` ``None``, so the rc check alone would report a useless
+    "exited with code None"), then the status verdict, then the exit code,
+    then the checker verdict.
     """
     if solve.timed_out:
         return "Solve timed out"
+    if solve.truncated:
+        return "Solve output exceeded the 1 MiB cap and was truncated"
     if solve.status not in ("satisfied", "optimal"):
         return f"Solve did not verify (status: {solve.status})"
     if solve.return_code != 0:

@@ -12,12 +12,14 @@ from openconstraint_mcp.minizinc.core import (
 from openconstraint_mcp.minizinc.diagnostics import (
     check_diagnostic,
     classify_minizinc_stderr,
+    inspection_diagnostic,
     solve_diagnostic,
     unsat_core_diagnostic,
 )
 from openconstraint_mcp.schemas.minizinc import (
     CheckerReport,
     CheckResult,
+    ModelInspectionResult,
     SolveResult,
     UnsatCoreResult,
 )
@@ -122,6 +124,56 @@ def test_solve_unknown_status_maps_to_unknown() -> None:
     assert solve_diagnostic(_solve("unknown")).category == "unknown"  # type: ignore[union-attr]
 
 
+def test_solve_truncated_with_solutions_maps_to_output_truncated() -> None:
+    # Truncation is surfaced even on a status that would otherwise be a clean None,
+    # so a partial enumeration is never reported as a plain success.
+    diag = solve_diagnostic(
+        _solve(
+            "satisfied",
+            solution={"x": 1},
+            solutions=[{"x": 1}],
+            return_code=None,
+            truncated=True,
+        )
+    )
+    assert diag is not None
+    assert diag.category == "output_truncated"
+    assert diag.details == {"truncated": True, "solver": "cp-sat", "return_code": None}
+
+
+def test_solve_truncated_without_solutions_maps_to_output_truncated() -> None:
+    diag = solve_diagnostic(_solve("unknown", return_code=None, truncated=True))
+    assert diag is not None
+    assert diag.category == "output_truncated"
+
+
+def test_solve_timeout_wins_over_truncation() -> None:
+    # Both flags can be true (a burst overrun after a deadline kill); the timeout
+    # category keeps precedence, mirroring the pyexec output-cap ordering.
+    diag = solve_diagnostic(
+        _solve("timeout", timed_out=True, solutions=[{"x": 1}], return_code=None, truncated=True)
+    )
+    assert diag is not None
+    assert diag.category == "timeout_with_incumbent"
+
+
+def test_checker_error_does_not_mask_output_truncated() -> None:
+    # A truncated run commonly breaks the checker transcript too (its status
+    # degrades to "error"); the output cap — not the checker echo — is the honest
+    # signal, so truncation keeps precedence just below timeout.
+    result = _solve(
+        "satisfied",
+        solution={"x": 1},
+        solutions=[{"x": 1}],
+        return_code=None,
+        truncated=True,
+    )
+    result.checker = CheckerReport(status="error", checks=[], transcript="")
+    diag = solve_diagnostic(result)
+    assert diag is not None
+    assert diag.category == "output_truncated"
+
+
 def test_checker_violation_on_a_solved_model_elevates_to_checker_failed() -> None:
     result = _solve("satisfied", solution={"x": 1}, solutions=[{"x": 1}])
     result.checker = CheckerReport(status="violation", checks=[], transcript="")
@@ -188,6 +240,81 @@ def test_unsat_core_timeout_is_timeout_no_incumbent() -> None:
     assert diag.category == "timeout_no_incumbent"
 
 
+# --- output-cap truncation on the analysis paths ----------------------------
+
+
+def test_check_truncated_maps_to_output_truncated() -> None:
+    # A burst writer can overrun the 1 MiB cap and still exit 0, so the rc-driven
+    # "ok" verdict stands — but the capped output must not read as a plain success.
+    diag = check_diagnostic(
+        CheckResult(
+            status="ok", solver="cp-sat", stdout="", stderr="", elapsed_ms=1, truncated=True
+        )
+    )
+    assert diag is not None
+    assert diag.category == "output_truncated"
+    assert diag.details == {"truncated": True, "solver": "cp-sat"}
+
+
+def test_check_timeout_wins_over_truncation() -> None:
+    diag = check_diagnostic(
+        CheckResult(
+            status="timeout", solver="cp-sat", stdout="", stderr="", elapsed_ms=1, truncated=True
+        )
+    )
+    assert diag is not None
+    assert diag.category == "timeout_no_incumbent"
+
+
+def test_check_truncation_wins_over_stderr_classification() -> None:
+    # A truncation tree-kill exits nonzero (status "error"); the cap — not the
+    # stderr classifier's generic compile-error guess — is the honest diagnostic.
+    diag = check_diagnostic(
+        CheckResult(
+            status="error",
+            solver="cp-sat",
+            stdout="",
+            stderr="output exceeded the 1 MiB cap; process stopped\n",
+            elapsed_ms=1,
+            truncated=True,
+        )
+    )
+    assert diag is not None
+    assert diag.category == "output_truncated"
+
+
+def test_inspection_truncated_maps_to_output_truncated() -> None:
+    diag = inspection_diagnostic(
+        ModelInspectionResult(
+            status="ok", solver="cp-sat", stdout="", stderr="", elapsed_ms=1, truncated=True
+        )
+    )
+    assert diag is not None
+    assert diag.category == "output_truncated"
+
+
+def test_unsat_core_truncated_no_core_maps_to_output_truncated() -> None:
+    # A truncated findMUS transcript may have lost the MUS lines beyond the cap,
+    # so this no_core must not read as a completed "no MUS reported" verdict.
+    result = UnsatCoreResult(
+        status="no_core", core=[], message="", stdout="", stderr="", elapsed_ms=1, truncated=True
+    )
+    diag = unsat_core_diagnostic(result)
+    assert diag is not None
+    assert diag.category == "output_truncated"
+
+
+def test_unsat_core_truncated_mus_found_is_flagged() -> None:
+    # Even a MUS parsed from capped output may be missing members; the cap wins
+    # over mus_found's clean None.
+    result = UnsatCoreResult(
+        status="mus_found", core=[], message="", stdout="", stderr="", elapsed_ms=1, truncated=True
+    )
+    diag = unsat_core_diagnostic(result)
+    assert diag is not None
+    assert diag.category == "output_truncated"
+
+
 # --- builders wire the diagnostic onto the result ---------------------------
 
 
@@ -231,3 +358,50 @@ def test_build_unsat_core_result_timeout_sets_diagnostic() -> None:
     assert result.status == "timeout"
     assert result.diagnostic is not None
     assert result.diagnostic.category == "timeout_no_incumbent"
+
+
+def test_build_check_result_propagates_clean_exit_truncation() -> None:
+    # Clean exit (rc 0) with the cap overrun: "ok" stands (the verdict is
+    # rc-driven), but truncated rides onto the result and drives the diagnostic.
+    outcome = _RunOutcome(
+        timed_out=False, returncode=0, stdout="", stderr="", elapsed_ms=3, truncated=True
+    )
+    result = _build_check_result(outcome, solver="cp-sat")
+    assert result.status == "ok"
+    assert result.truncated is True
+    assert result.diagnostic is not None
+    assert result.diagnostic.category == "output_truncated"
+
+
+def test_build_inspection_result_propagates_truncation() -> None:
+    # rc 0 with a complete interface object (a stderr flood caused the cap): the
+    # parsed interface is kept and the cap still surfaces as the diagnostic.
+    interface_json = (
+        '{"type": "interface", "input": {}, "output": {}, "method": "sat", '
+        '"has_output_item": false, "included_files": [], "globals": []}'
+    )
+    outcome = _RunOutcome(
+        timed_out=False,
+        returncode=0,
+        stdout=interface_json,
+        stderr="",
+        elapsed_ms=2,
+        truncated=True,
+    )
+    result = _build_inspection_result(outcome, solver="cp-sat")
+    assert result.status == "ok"
+    assert result.interface is not None
+    assert result.truncated is True
+    assert result.diagnostic is not None
+    assert result.diagnostic.category == "output_truncated"
+
+
+def test_build_unsat_core_result_propagates_truncation() -> None:
+    outcome = _RunOutcome(
+        timed_out=False, returncode=0, stdout="", stderr="", elapsed_ms=2, truncated=True
+    )
+    result = _build_unsat_core_result(outcome, "constraint false;")
+    assert result.status == "no_core"
+    assert result.truncated is True
+    assert result.diagnostic is not None
+    assert result.diagnostic.category == "output_truncated"

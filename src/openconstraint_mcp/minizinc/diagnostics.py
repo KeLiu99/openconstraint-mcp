@@ -13,6 +13,8 @@ schemas leaf whose helpers must stay on primitives to avoid an import cycle.
 
 from __future__ import annotations
 
+from pydantic import JsonValue
+
 from ..schemas.diagnostics import (
     Diagnostic,
     DiagnosticCategory,
@@ -87,11 +89,48 @@ def _error_diagnostic(stderr: str, *, solver: str, return_code: int | None) -> D
     )
 
 
+def _analysis_truncation_diagnostic(*, solver: str | None = None) -> Diagnostic:
+    """The output-cap diagnostic for the check/inspect/unsat-core paths.
+
+    Ranked below timeout but above everything else (mirroring the solve
+    precedence): a truncated run's verdict is parsed from capped output, so
+    neither a clean status nor the stderr classifier's compile-error guess is
+    the honest signal.
+    """
+    details: dict[str, JsonValue] = {"truncated": True}
+    if solver is not None:
+        details["solver"] = solver
+    return Diagnostic(
+        category="output_truncated",
+        message=(
+            "the MiniZinc child's output exceeded the 1 MiB cap and was truncated; "
+            "verdicts parsed from the capped output may be incomplete — see stderr"
+        ),
+        details=details,
+    )
+
+
 def _base_solve_diagnostic(result: SolveResult) -> Diagnostic | None:
     """Diagnose a solve from status/timeout/return code alone (no checker)."""
     if result.timed_out or result.status == "timeout":
         return timeout_diagnostic(
             has_incumbent=bool(result.solutions), details={"solver": result.solver}
+        )
+    if result.truncated:
+        # Timeout keeps precedence (checked above); truncation wins over the plain
+        # error/success classification below. Mirrors pyexec's output_truncated.
+        return Diagnostic(
+            category="output_truncated",
+            message=(
+                "the MiniZinc child's output exceeded the 1 MiB cap and was truncated; "
+                "re-run with num_solutions on org.gecode.gecode/org.chuffed.chuffed to page "
+                "solutions, or reduce the model's output"
+            ),
+            details={
+                "truncated": True,
+                "solver": result.solver,
+                "return_code": result.return_code,
+            },
         )
     if result.status == "error" or (
         isinstance(result.return_code, int) and result.return_code != 0
@@ -131,13 +170,19 @@ def solve_diagnostic(result: SolveResult) -> Diagnostic | None:
     """Diagnose a built ``SolveResult``, folding in an attached checker verdict.
 
     A supplied checker that did not pass elevates the diagnostic to
-    ``checker_failed`` — but not over a solve timeout, and only when the solve
+    ``checker_failed`` — but not over a solve timeout or an output-cap
+    truncation (a truncated transcript routinely breaks the checker parse, so
+    its ``error`` verdict would just echo the cap), and only when the solve
     actually produced a solution to check. With no solutions a checker's
     ``no_solution`` verdict just echoes the base ``infeasible`` /
     ``timeout_no_incumbent``, which is the more useful category and is kept.
     """
     base = _base_solve_diagnostic(result)
-    if base is not None and base.category in ("timeout_no_incumbent", "timeout_with_incumbent"):
+    if base is not None and base.category in (
+        "timeout_no_incumbent",
+        "timeout_with_incumbent",
+        "output_truncated",
+    ):
         return base
     if result.checker is not None and result.solutions:
         checker_diag = checker_diagnostic(
@@ -149,18 +194,29 @@ def solve_diagnostic(result: SolveResult) -> Diagnostic | None:
 
 
 def check_diagnostic(result: CheckResult) -> Diagnostic | None:
-    """Diagnose a compile-check result (``ok`` is clean)."""
+    """Diagnose a compile-check result (``ok`` is clean).
+
+    Truncation ranks below timeout but above the error classifier: a truncated
+    run's output is partial, so the honest signal is ``output_truncated``.
+    """
     if result.status == "timeout":
         return timeout_diagnostic(has_incumbent=False, details={"solver": result.solver})
+    if result.truncated:
+        return _analysis_truncation_diagnostic(solver=result.solver)
     if result.status == "error":
         return _error_diagnostic(result.stderr, solver=result.solver, return_code=None)
     return None
 
 
 def inspection_diagnostic(result: ModelInspectionResult) -> Diagnostic | None:
-    """Diagnose a model-interface inspection (``ok`` is clean)."""
+    """Diagnose a model-interface inspection (``ok`` is clean).
+
+    Truncation precedence matches ``check_diagnostic``.
+    """
     if result.status == "timeout":
         return timeout_diagnostic(has_incumbent=False, details={"solver": result.solver})
+    if result.truncated:
+        return _analysis_truncation_diagnostic(solver=result.solver)
     if result.status == "error":
         return _error_diagnostic(result.stderr, solver=result.solver, return_code=None)
     return None
@@ -173,11 +229,15 @@ def unsat_core_diagnostic(result: UnsatCoreResult) -> Diagnostic | None:
     ``timeout_no_incumbent`` (findMUS has no incumbent notion). ``no_core`` is
     ``unknown`` — NOT ``infeasible`` — because no MUS was reported (a tight time
     limit can also surface here). ``error`` runs through the stderr classifier.
+    Truncation ranks below timeout but above everything else — including
+    ``mus_found``, whose parsed core may be missing members lost beyond the cap.
     """
-    if result.status == "mus_found":
-        return None
     if result.status == "timeout":
         return timeout_diagnostic(has_incumbent=False)
+    if result.truncated:
+        return _analysis_truncation_diagnostic()
+    if result.status == "mus_found":
+        return None
     if result.status == "error":
         return _error_diagnostic(result.stderr, solver="org.minizinc.findmus", return_code=None)
     return Diagnostic(

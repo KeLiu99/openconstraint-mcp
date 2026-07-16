@@ -60,10 +60,19 @@ def _solve_result(
 
 
 class _FakeProc:
-    """Opaque handle stand-in: ``poll`` reports it already exited (terminate no-op)."""
+    """Opaque handle stand-in; no ``pid``, so real termination must stay patched."""
 
-    def poll(self) -> int:
-        return 0
+
+@pytest.fixture(autouse=True)
+def _never_terminate_for_real(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Every proc in this file is a ``_FakeProc``; the real group-aware
+    terminate would probe ``os.getpgid``/``os.killpg`` on it. Tests that
+    assert termination re-patch a recorder over this.
+    """
+    monkeypatch.setattr(
+        "openconstraint_mcp.jobs.registry._terminate_process_tree",
+        lambda proc, **kwargs: None,
+    )
 
 
 def _patch_solve(monkeypatch: pytest.MonkeyPatch, fake: Any) -> None:

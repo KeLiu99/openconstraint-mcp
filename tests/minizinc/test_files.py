@@ -26,10 +26,11 @@ from openconstraint_mcp.schemas.minizinc import (
     SolverList,
     UnsatCoreResult,
 )
+from openconstraint_mcp.shared.childrun import ChildExecutionResult
 from tests.minizinc.helpers import (
-    FakeCompletedProcess,
     checker_pass,
     checker_violation,
+    child_result,
     solution_obj,
     stream,
 )
@@ -77,31 +78,44 @@ _UNSAT_CORE_MODEL = (
 
 
 def _record_run(
-    monkeypatch: pytest.MonkeyPatch, completed: FakeCompletedProcess
+    monkeypatch: pytest.MonkeyPatch, completed: ChildExecutionResult
 ) -> list[dict[str, Any]]:
-    """Patch subprocess.run to record the model/data args and cwd at call time.
+    """Patch ``minizinc.core.execute_child`` to record the model/data args and cwd.
 
     File tools run the real on-disk model, so the recorded model/data args are
     the caller's resolved positional paths. A checker path may also end in
-    ``.mzn`` but lives in the flags slot, before the model/data positionals.
+    ``.mzn`` but lives in the flags slot, before the model/data positionals. The
+    ``kwargs['cwd']`` key mirrors the old popen-record shape so cwd assertions read
+    unchanged; the executor receives the run directory as its second positional.
     """
     calls: list[dict[str, Any]] = []
 
-    def _fake_run(*args: Any, **kwargs: Any) -> FakeCompletedProcess:
-        cmd = args[0]
+    def _fake_run(
+        argv: list[str],
+        cwd: Any,
+        *,
+        timeout_ms: int,
+        tracker: Any = None,
+        on_start: Any = None,
+    ) -> ChildExecutionResult:
+        cmd = list(argv)
         data_arg = cmd[-1] if str(cmd[-1]).endswith(".dzn") else None
         model_arg = cmd[-2] if data_arg is not None else cmd[-1]
         calls.append(
             {
-                "cmd": list(cmd),
-                "kwargs": kwargs,
+                "cmd": cmd,
+                "kwargs": {"cwd": str(cwd)},
+                "cwd": str(cwd),
+                "timeout_ms": timeout_ms,
+                "tracker": tracker,
+                "on_start": on_start,
                 "model_arg": str(model_arg),
                 "data_arg": str(data_arg) if data_arg is not None else None,
             }
         )
         return completed
 
-    monkeypatch.setattr("openconstraint_mcp.minizinc.core.popen_process_group", _fake_run)
+    monkeypatch.setattr("openconstraint_mcp.minizinc.core.execute_child", _fake_run)
     return calls
 
 
@@ -109,7 +123,7 @@ def _fail_if_run_called(monkeypatch: pytest.MonkeyPatch) -> None:
     def _fail(*args: Any, **kwargs: Any) -> Any:
         raise AssertionError("subprocess.run must not be invoked")
 
-    monkeypatch.setattr("openconstraint_mcp.minizinc.core.popen_process_group", _fail)
+    monkeypatch.setattr("openconstraint_mcp.minizinc.core.execute_child", _fail)
 
 
 # --- CLI-style execution (real path, cwd = model's parent) -----------------
@@ -123,7 +137,7 @@ def test_solve_runs_real_path_from_parent(
     model_path = tmp_path / "entry.mzn"
     model_path.write_text(_MODEL_SRC)
     calls = _record_run(
-        monkeypatch, FakeCompletedProcess(stdout=_SOLVE_STREAM_SAMPLE, stderr="", returncode=0)
+        monkeypatch, child_result(stdout=_SOLVE_STREAM_SAMPLE, stderr="", returncode=0)
     )
 
     result = solve_model_path(model_path)
@@ -153,7 +167,7 @@ def test_relative_input_is_resolved_without_double_counting(
     (sub / "model.mzn").write_text(_MODEL_SRC)
     monkeypatch.chdir(tmp_path)
     calls = _record_run(
-        monkeypatch, FakeCompletedProcess(stdout=_SOLVE_STREAM_SAMPLE, stderr="", returncode=0)
+        monkeypatch, child_result(stdout=_SOLVE_STREAM_SAMPLE, stderr="", returncode=0)
     )
 
     # Relative input: cwd=parent + relative argv would make the subprocess look
@@ -175,7 +189,7 @@ def test_data_is_positional_after_model(
     data_path = tmp_path / "params.dzn"
     data_path.write_text("n = 3;\n")
     calls = _record_run(
-        monkeypatch, FakeCompletedProcess(stdout=_SOLVE_STREAM_SAMPLE, stderr="", returncode=0)
+        monkeypatch, child_result(stdout=_SOLVE_STREAM_SAMPLE, stderr="", returncode=0)
     )
 
     solve_model_path(model_path, data_path=data_path)
@@ -192,7 +206,7 @@ def test_check_passes_compile_flag_on_real_path(
 ) -> None:
     model_path = tmp_path / "entry.mzn"
     model_path.write_text(_MODEL_SRC)
-    calls = _record_run(monkeypatch, FakeCompletedProcess(stdout="", stderr="", returncode=0))
+    calls = _record_run(monkeypatch, child_result(stdout="", stderr="", returncode=0))
 
     result = check_model_path(model_path)
 
@@ -212,9 +226,7 @@ def test_inspect_passes_interface_flag_on_real_path(
 ) -> None:
     model_path = tmp_path / "entry.mzn"
     model_path.write_text(_MODEL_SRC)
-    calls = _record_run(
-        monkeypatch, FakeCompletedProcess(stdout=_INSPECT_STDOUT, stderr="", returncode=0)
-    )
+    calls = _record_run(monkeypatch, child_result(stdout=_INSPECT_STDOUT, stderr="", returncode=0))
 
     result = inspect_model_path(model_path)
 
@@ -246,9 +258,7 @@ def test_inspect_data_is_positional_after_model(
         '{"type": "interface", "input": {}, "output": {"x": {"type": "int"}}, '
         '"method": "sat", "has_output_item": false}'
     )
-    calls = _record_run(
-        monkeypatch, FakeCompletedProcess(stdout=empty_interface, stderr="", returncode=0)
-    )
+    calls = _record_run(monkeypatch, child_result(stdout=empty_interface, stderr="", returncode=0))
 
     result = inspect_model_path(model_path, data_path=data_path)
 
@@ -273,7 +283,7 @@ def test_find_unsat_core_filters_by_real_basename(
     stdout = (
         "MUS: 1 2\nTraces: nurses.mzn|4|12|4|20|;nurses.mzn|5|12|5|20|;helpers.mzn|10|1|10|5|\n"
     )
-    calls = _record_run(monkeypatch, FakeCompletedProcess(stdout=stdout, stderr="", returncode=0))
+    calls = _record_run(monkeypatch, child_result(stdout=stdout, stderr="", returncode=0))
 
     result = find_unsat_core_path(model_path)
 
@@ -306,7 +316,7 @@ def test_find_unsat_core_duplicate_basename_is_known_limitation(
     model_path.write_text(_UNSAT_CORE_MODEL)
     (tmp_path / "b" / "model.mzn").write_text(_UNSAT_CORE_MODEL)
     stdout = "MUS: 1\nTraces: model.mzn|4|12|4|20|\n"
-    _record_run(monkeypatch, FakeCompletedProcess(stdout=stdout, stderr="", returncode=0))
+    _record_run(monkeypatch, child_result(stdout=stdout, stderr="", returncode=0))
 
     result = find_unsat_core_path(model_path)
 
@@ -324,7 +334,7 @@ def test_compile_error_returns_structured_error(
     model_path = tmp_path / "entry.mzn"
     model_path.write_text('include "missing.mzn";\nvar 1..5: x;\nsolve satisfy;\n')
     diagnostic = "Error: cannot open included file 'missing.mzn'\n"
-    _record_run(monkeypatch, FakeCompletedProcess(stdout="", stderr=diagnostic, returncode=1))
+    _record_run(monkeypatch, child_result(stdout="", stderr=diagnostic, returncode=1))
 
     result = solve_model_path(model_path)
 
@@ -344,7 +354,7 @@ def test_solve_model_path_num_solutions_adds_valued_n_flag(
     model_path = tmp_path / "entry.mzn"
     model_path.write_text(_MODEL_SRC)
     calls = _record_run(
-        monkeypatch, FakeCompletedProcess(stdout=_SOLVE_STREAM_SAMPLE, stderr="", returncode=0)
+        monkeypatch, child_result(stdout=_SOLVE_STREAM_SAMPLE, stderr="", returncode=0)
     )
 
     solve_model_path(model_path, num_solutions=2, solver="org.chuffed.chuffed")
@@ -540,7 +550,7 @@ def test_oserror_wraps_as_execution_error(
     def _fake_run(*args: Any, **kwargs: Any) -> Any:
         raise OSError(8, "Exec format error")
 
-    monkeypatch.setattr("openconstraint_mcp.minizinc.core.popen_process_group", _fake_run)
+    monkeypatch.setattr("openconstraint_mcp.minizinc.core.execute_child", _fake_run)
 
     with pytest.raises(MiniZincExecutionError) as exc_info:
         solve_model_path(model_path)
@@ -577,7 +587,7 @@ def test_solve_model_path_with_checker_adds_solution_checker_flag_on_real_path(
         solution_obj("x=1 y=2\n", {"x": 1, "y": 2}),
         {"type": "status", "status": "SATISFIED"},
     )
-    calls = _record_run(monkeypatch, FakeCompletedProcess(stdout=stdout, stderr="", returncode=0))
+    calls = _record_run(monkeypatch, child_result(stdout=stdout, stderr="", returncode=0))
 
     solve_model_path(model_path, checker_path=checker_path)
 
@@ -604,7 +614,7 @@ def test_solve_model_path_with_checker_completed_when_no_violation(
         solution_obj("x=1 y=2\n", {"x": 1, "y": 2}),
         {"type": "status", "status": "SATISFIED"},
     )
-    _record_run(monkeypatch, FakeCompletedProcess(stdout=stdout, stderr="", returncode=0))
+    _record_run(monkeypatch, child_result(stdout=stdout, stderr="", returncode=0))
 
     result = solve_model_path(model_path, checker_path=checker_path)
 
@@ -631,7 +641,7 @@ def test_solve_model_path_with_checker_incorrect_text_is_not_a_violation(
         solution_obj("x=3 y=1\n", {"x": 3, "y": 1}),
         {"type": "status", "status": "SATISFIED"},
     )
-    _record_run(monkeypatch, FakeCompletedProcess(stdout=stdout, stderr="", returncode=0))
+    _record_run(monkeypatch, child_result(stdout=stdout, stderr="", returncode=0))
 
     result = solve_model_path(model_path, checker_path=checker_path)
 
@@ -655,7 +665,7 @@ def test_solve_model_path_with_checker_violation_keeps_rejected_solution(
         solution_obj("x=1 y=2\n", {"x": 1, "y": 2}),
         {"type": "status", "status": "SATISFIED"},
     )
-    _record_run(monkeypatch, FakeCompletedProcess(stdout=stdout, stderr="", returncode=0))
+    _record_run(monkeypatch, child_result(stdout=stdout, stderr="", returncode=0))
 
     result = solve_model_path(model_path, checker_path=checker_path)
 
@@ -678,7 +688,7 @@ def test_solve_model_path_with_checker_missing_checker_verdict_is_error(
         solution_obj("x=1 y=2\n", {"x": 1, "y": 2}),
         {"type": "status", "status": "SATISFIED"},
     )
-    _record_run(monkeypatch, FakeCompletedProcess(stdout=stdout, stderr="", returncode=0))
+    _record_run(monkeypatch, child_result(stdout=stdout, stderr="", returncode=0))
 
     result = solve_model_path(model_path, checker_path=checker_path)
 
@@ -696,7 +706,7 @@ def test_solve_model_path_with_checker_stream_error_with_zero_rc_is_error(
     # solver error is never hidden behind "no solution produced".
     model_path, checker_path = _write_model_and_checker(tmp_path)
     stdout = stream({"type": "status", "status": "ERROR"})
-    _record_run(monkeypatch, FakeCompletedProcess(stdout=stdout, stderr="", returncode=0))
+    _record_run(monkeypatch, child_result(stdout=stdout, stderr="", returncode=0))
 
     result = solve_model_path(model_path, checker_path=checker_path)
 
@@ -718,7 +728,7 @@ def test_solve_model_path_with_checker_nonzero_rc_is_error(
         checker_pass("CORRECT\n"),
         solution_obj("x=1 y=2\n", {"x": 1, "y": 2}),
     )
-    _record_run(monkeypatch, FakeCompletedProcess(stdout=stdout, stderr="boom", returncode=1))
+    _record_run(monkeypatch, child_result(stdout=stdout, stderr="boom", returncode=1))
 
     result = solve_model_path(model_path, checker_path=checker_path)
 
@@ -736,7 +746,7 @@ def test_solve_model_path_with_checker_no_solution_status(
     # `solve.status`.
     model_path, checker_path = _write_model_and_checker(tmp_path)
     stdout = stream({"type": "status", "status": "UNSATISFIABLE"})
-    _record_run(monkeypatch, FakeCompletedProcess(stdout=stdout, stderr="", returncode=0))
+    _record_run(monkeypatch, child_result(stdout=stdout, stderr="", returncode=0))
 
     result = solve_model_path(model_path, checker_path=checker_path)
 
@@ -752,10 +762,10 @@ def test_solve_model_path_with_checker_timeout_status(
 ) -> None:
     model_path, checker_path = _write_model_and_checker(tmp_path)
 
-    def _fake_run(*args: Any, **kwargs: Any) -> FakeCompletedProcess:
-        return FakeCompletedProcess(stdout="", stderr="", returncode=0, timeout=True)
+    def _fake_run(*args: Any, **kwargs: Any) -> ChildExecutionResult:
+        return child_result(stdout="", stderr="", returncode=0, timed_out=True)
 
-    monkeypatch.setattr("openconstraint_mcp.minizinc.core.popen_process_group", _fake_run)
+    monkeypatch.setattr("openconstraint_mcp.minizinc.core.execute_child", _fake_run)
 
     result = solve_model_path(model_path, checker_path=checker_path)
 
@@ -778,7 +788,7 @@ def test_solve_model_path_with_checker_transcript_is_raw_transcript(
         checker_pass("CORRECT\n"),
         solution_obj("x=1 y=2\n", {"x": 1, "y": 2}),
     )
-    _record_run(monkeypatch, FakeCompletedProcess(stdout=stdout, stderr="", returncode=0))
+    _record_run(monkeypatch, child_result(stdout=stdout, stderr="", returncode=0))
 
     result = solve_model_path(model_path, checker_path=checker_path)
 

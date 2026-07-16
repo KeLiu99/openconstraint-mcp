@@ -15,6 +15,7 @@ import os
 import signal
 import subprocess
 import sys
+import time
 from typing import Any
 
 # Launch the cancellable child as the leader of its own process group/session so
@@ -59,8 +60,7 @@ def popen_process_group(cmd: list[str], **kwargs: Any) -> subprocess.Popen[Any]:
     platform so callers do not duplicate the platform-dispatch logic.
     Extra keyword arguments are forwarded to ``subprocess.Popen``. The return
     type is ``Popen[Any]`` because the forwarded ``**kwargs`` decide the stream
-    text/bytes mode (the CP-SAT runner routes stdout/stderr to files; the
-    MiniZinc runner pipes text streams) and matches ``terminate_process_tree``.
+    text/bytes mode and matches ``terminate_process_tree``.
     """
     return subprocess.Popen(
         cmd,
@@ -83,34 +83,81 @@ def terminate_process_tree(
 
     The parent process must have been launched as a process-group leader (via
     ``popen_process_group`` or equivalent) so the whole tree can be signalled.
-    A handle that has already exited is a no-op.
 
-    POSIX: SIGTERM the group, then escalate to SIGKILL after ``grace_seconds`` if
-    the leader is still alive. Windows: ``taskkill /T /F`` to tear down the whole
-    tree while it is still intact, falling back to ``proc.terminate()`` if taskkill
-    is unavailable — best-effort; guaranteed child cleanup may NOT match POSIX.
+    POSIX: a no-op only once the whole GROUP is gone — a leader that already
+    exited (even reaped) can leave live descendants in its group, and those must
+    still be swept. SIGTERM the group, then escalate to SIGKILL after
+    ``grace_seconds`` if any group member (leader OR descendant) is still alive —
+    a SIGTERM-resistant descendant must not survive its leader's quick exit.
+    Windows: a handle that has already exited is a no-op; otherwise
+    ``taskkill /T /F`` to tear down the whole tree while it is still intact,
+    falling back to ``proc.terminate()`` if taskkill is unavailable —
+    best-effort; guaranteed child cleanup may NOT match POSIX.
     """
-    if proc.poll() is not None:
-        return
     if sys.platform == "win32":
+        if proc.poll() is not None:
+            return
         terminate_process_tree_windows(proc, grace_seconds=grace_seconds)
     else:
         terminate_process_tree_posix(proc, grace_seconds=grace_seconds)
 
 
 def terminate_process_tree_posix(proc: subprocess.Popen[Any], *, grace_seconds: float) -> None:
-    try:
-        pgid = os.getpgid(proc.pid)
-    except ProcessLookupError:
-        return  # already reaped — idempotent no-op
-    _killpg(pgid, signal.SIGTERM)
-    try:
-        proc.wait(timeout=grace_seconds)
+    # popen_process_group launched the child as its own session leader, so
+    # proc.pid IS the group id for the group's whole lifetime — POSIX keeps it
+    # reserved while any member survives. Never query os.getpgid for it: once
+    # the leader is reaped its pid can be recycled, and getpgid on the recycled
+    # pid would resolve an UNRELATED process's group and aim our signals at it.
+    #
+    # KNOWN, ACCEPTED residual race — do not "fix" without a genuinely better
+    # design: if the whole group is already dead, the leader reaped (Popen.poll()
+    # is the reaper), and the kernel recycles that exact pid as a NEW group
+    # leader in the milliseconds before our killpg, the recycled group gets our
+    # signals. The liveness probe below cannot tell that group from ours, and a
+    # pidfd cannot help (pidfds signal single processes; Linux has no group
+    # pidfd). The only real fix is deferring the reap — observing exit via
+    # os.waitid(WNOWAIT) so the zombie leader keeps the pid reserved through the
+    # sweep — which means reimplementing Popen's reaping for a window that
+    # sequential pid allocation already makes practically unhittable.
+    pgid = proc.pid
+    if proc.poll() is not None and not _process_group_alive(pgid):
+        # leader reaped and group empty — nothing left to signal
         return
-    except subprocess.TimeoutExpired:
-        _killpg(pgid, signal.SIGKILL)
+    _killpg(pgid, signal.SIGTERM)
+    # The leader exiting does not prove the tree is gone: a SIGTERM-resistant
+    # descendant stays alive in the group, so escalation must check the GROUP,
+    # not just the leader.
+    if _group_exits_within(proc, pgid, grace_seconds):
+        return
+    _killpg(pgid, signal.SIGKILL)
     with contextlib.suppress(subprocess.TimeoutExpired):
         proc.wait(timeout=grace_seconds)
+
+
+_GROUP_POLL_INTERVAL_S: float = 0.05
+
+
+def _group_exits_within(proc: subprocess.Popen[Any], pgid: int, grace_seconds: float) -> bool:
+    """True if the leader was reaped AND the whole group vanished within the grace."""
+    deadline = time.monotonic() + grace_seconds
+    while True:
+        if proc.poll() is not None and not _process_group_alive(pgid):
+            return True
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            return False
+        time.sleep(min(_GROUP_POLL_INTERVAL_S, remaining))
+
+
+def _process_group_alive(pgid: int) -> bool:
+    """Whether any member of the process group still exists (zombies included)."""
+    try:
+        os.killpg(pgid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True  # exists but owned by someone else — still alive
+    return True
 
 
 def terminate_process_tree_windows(proc: subprocess.Popen[Any], *, grace_seconds: float) -> None:

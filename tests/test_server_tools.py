@@ -27,13 +27,14 @@ from openconstraint_mcp.server import (
     _run_blocking,
     create_mcp_server,
 )
+from openconstraint_mcp.shared.childrun import ChildExecutionResult
 from openconstraint_mcp.shared.job_errors import JobRejectedError
 from tests.minizinc.helpers import (
     UNSAT_CORE_MODEL,
     UNSAT_CORE_STDOUT,
-    FakeCompletedProcess,
     checker_pass,
     checker_violation,
+    child_result,
     solution_obj,
     solution_obj_json_only,
     stream,
@@ -115,7 +116,7 @@ def _content_text(result: Any) -> str:
 
 
 def _record_data_run(
-    monkeypatch: pytest.MonkeyPatch, completed: FakeCompletedProcess
+    monkeypatch: pytest.MonkeyPatch, completed: ChildExecutionResult
 ) -> list[dict[str, Any]]:
     """Patch subprocess.run to capture the inline-data file contents at call time.
 
@@ -124,7 +125,7 @@ def _record_data_run(
     """
     calls: list[dict[str, Any]] = []
 
-    def _fake_run(*args: Any, **kwargs: Any) -> FakeCompletedProcess:
+    def _fake_run(*args: Any, **kwargs: Any) -> ChildExecutionResult:
         cmd = args[0]
         data_contents: str | None = None
         data_path = next((Path(arg) for arg in cmd if str(arg).endswith(".dzn")), None)
@@ -133,7 +134,7 @@ def _record_data_run(
         calls.append({"data_contents": data_contents})
         return completed
 
-    monkeypatch.setattr("openconstraint_mcp.minizinc.core.popen_process_group", _fake_run)
+    monkeypatch.setattr("openconstraint_mcp.minizinc.core.execute_child", _fake_run)
     return calls
 
 
@@ -161,8 +162,8 @@ async def test_list_available_solvers_surfaces_capabilities(
         ]
     )
 
-    def _fake_run(*args: object, **kwargs: object) -> FakeCompletedProcess:
-        return FakeCompletedProcess(stdout=payload, stderr="", returncode=0)
+    def _fake_run(*args: object, **kwargs: object) -> ChildExecutionResult:
+        return child_result(stdout=payload, stderr="", returncode=0)
 
     monkeypatch.setattr("openconstraint_mcp.minizinc.core.subprocess.run", _fake_run)
 
@@ -206,8 +207,8 @@ _LIST_SOLVERS_PAYLOAD = json.dumps(
 def _patch_list_solvers_run(
     monkeypatch: pytest.MonkeyPatch, payload: str = _LIST_SOLVERS_PAYLOAD
 ) -> None:
-    def _fake_run(*args: object, **kwargs: object) -> FakeCompletedProcess:
-        return FakeCompletedProcess(stdout=payload, stderr="", returncode=0)
+    def _fake_run(*args: object, **kwargs: object) -> ChildExecutionResult:
+        return child_result(stdout=payload, stderr="", returncode=0)
 
     monkeypatch.setattr("openconstraint_mcp.minizinc.core.subprocess.run", _fake_run)
 
@@ -342,8 +343,8 @@ async def test_solve_minizinc_model_happy_path(
     fake_minizinc_binary: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    def _fake_run(*args: object, **kwargs: object) -> FakeCompletedProcess:
-        return FakeCompletedProcess(
+    def _fake_run(*args: object, **kwargs: object) -> ChildExecutionResult:
+        return child_result(
             stdout=stream(
                 solution_obj("x = 3;\n", {"x": 3}),
                 {"type": "statistics", "statistics": {"solveTime": 0.01}},
@@ -352,7 +353,7 @@ async def test_solve_minizinc_model_happy_path(
             returncode=0,
         )
 
-    monkeypatch.setattr("openconstraint_mcp.minizinc.core.popen_process_group", _fake_run)
+    monkeypatch.setattr("openconstraint_mcp.minizinc.core.execute_child", _fake_run)
 
     mcp = create_mcp_server()
     result = await mcp.call_tool(
@@ -390,13 +391,47 @@ async def test_solve_minizinc_model_happy_path(
 
 
 @pytest.mark.asyncio
+async def test_solve_minizinc_model_output_cap_truncates_and_surfaces_diagnostic(
+    fake_minizinc_binary: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # An output-cap tree-kill flows all the way to the MCP structured result:
+    # partial solutions are kept, return_code is null, status is the stream verdict
+    # (satisfied), and the diagnostic is output_truncated.
+    def _fake_run(*args: object, **kwargs: object) -> ChildExecutionResult:
+        return child_result(
+            stdout=stream(solution_obj("x = 3;\n", {"x": 3})),
+            stderr="",
+            returncode=-15,
+            truncated=True,
+            truncation_killed=True,
+        )
+
+    monkeypatch.setattr("openconstraint_mcp.minizinc.core.execute_child", _fake_run)
+
+    mcp = create_mcp_server()
+    result = await mcp.call_tool(
+        "solve_minizinc_model",
+        {"model": "var 1..5: x;\nsolve satisfy;"},
+    )
+
+    structured = _structured(result)
+    assert structured["truncated"] is True
+    assert structured["status"] == "satisfied"
+    assert structured["return_code"] is None
+    assert structured["timed_out"] is False
+    assert structured["solution"] == {"x": 3}
+    assert structured["diagnostic"]["category"] == "output_truncated"
+
+
+@pytest.mark.asyncio
 async def test_solve_minizinc_model_accepts_inline_checker(
     fake_minizinc_binary: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr(
-        "openconstraint_mcp.minizinc.core.popen_process_group",
-        lambda *args, **kwargs: FakeCompletedProcess(
+        "openconstraint_mcp.minizinc.core.execute_child",
+        lambda *args, **kwargs: child_result(
             stdout=stream(
                 checker_pass("CORRECT\n"),
                 solution_obj("x = 1; y = 2;\n", {"x": 1, "y": 2}),
@@ -435,14 +470,14 @@ async def test_solve_minizinc_model_shows_solution_when_model_has_no_output_item
     # A model with no explicit `output` item streams only the json section. The
     # MCP-visible text must still carry a human solution block (not just status and
     # statistics), so the solution never disappears from the model-visible content.
-    def _fake_run(*args: object, **kwargs: object) -> FakeCompletedProcess:
-        return FakeCompletedProcess(
+    def _fake_run(*args: object, **kwargs: object) -> ChildExecutionResult:
+        return child_result(
             stdout=stream(solution_obj_json_only({"x": 5, "_objective": 5})),
             stderr="",
             returncode=0,
         )
 
-    monkeypatch.setattr("openconstraint_mcp.minizinc.core.popen_process_group", _fake_run)
+    monkeypatch.setattr("openconstraint_mcp.minizinc.core.execute_child", _fake_run)
 
     mcp = create_mcp_server()
     result = await mcp.call_tool(
@@ -463,9 +498,7 @@ async def test_solve_minizinc_model_threads_inline_data_to_runtime(
 ) -> None:
     calls = _record_data_run(
         monkeypatch,
-        FakeCompletedProcess(
-            stdout=stream(solution_obj("x = 3;\n", {"x": 3})), stderr="", returncode=0
-        ),
+        child_result(stdout=stream(solution_obj("x = 3;\n", {"x": 3})), stderr="", returncode=0),
     )
 
     mcp = create_mcp_server()
@@ -483,12 +516,12 @@ async def test_solve_minizinc_model_omits_visible_statistics_when_empty(
     fake_minizinc_binary: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    def _fake_run(*args: object, **kwargs: object) -> FakeCompletedProcess:
-        return FakeCompletedProcess(
+    def _fake_run(*args: object, **kwargs: object) -> ChildExecutionResult:
+        return child_result(
             stdout=stream(solution_obj("x = 3;\n", {"x": 3})), stderr="", returncode=0
         )
 
-    monkeypatch.setattr("openconstraint_mcp.minizinc.core.popen_process_group", _fake_run)
+    monkeypatch.setattr("openconstraint_mcp.minizinc.core.execute_child", _fake_run)
 
     mcp = create_mcp_server()
     result = await mcp.call_tool(
@@ -521,7 +554,7 @@ async def test_solve_minizinc_model_empty_model_surfaces_actionable_error(
     def _fail_if_called(*args: object, **kwargs: object) -> None:
         raise AssertionError("subprocess.run must not be invoked for empty model")
 
-    monkeypatch.setattr("openconstraint_mcp.minizinc.core.popen_process_group", _fail_if_called)
+    monkeypatch.setattr("openconstraint_mcp.minizinc.core.execute_child", _fail_if_called)
 
     mcp = create_mcp_server()
     with pytest.raises(Exception) as exc_info:
@@ -536,7 +569,7 @@ async def test_solve_minizinc_model_non_positive_timeout_surfaces_actionable_err
     def _fail_if_called(*args: object, **kwargs: object) -> None:
         raise AssertionError("subprocess.run must not be invoked for bad timeout")
 
-    monkeypatch.setattr("openconstraint_mcp.minizinc.core.popen_process_group", _fail_if_called)
+    monkeypatch.setattr("openconstraint_mcp.minizinc.core.execute_child", _fail_if_called)
 
     mcp = create_mcp_server()
     with pytest.raises(Exception) as exc_info:
@@ -552,14 +585,14 @@ async def test_solve_minizinc_model_compile_error_returns_structured_result(
     fake_minizinc_binary: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    def _fake_run(*args: object, **kwargs: object) -> FakeCompletedProcess:
-        return FakeCompletedProcess(
+    def _fake_run(*args: object, **kwargs: object) -> ChildExecutionResult:
+        return child_result(
             stdout="",
             stderr="MiniZinc: type error: undefined identifier 'xz'\n",
             returncode=1,
         )
 
-    monkeypatch.setattr("openconstraint_mcp.minizinc.core.popen_process_group", _fake_run)
+    monkeypatch.setattr("openconstraint_mcp.minizinc.core.execute_child", _fake_run)
 
     mcp = create_mcp_server()
     result = await mcp.call_tool(
@@ -580,9 +613,7 @@ async def test_solve_minizinc_model_forwards_search_flags_to_runtime(
     _patch_full_capabilities(monkeypatch, "cp-sat")
     calls = _record_run_capturing_cwd(
         monkeypatch,
-        FakeCompletedProcess(
-            stdout=stream(solution_obj("x = 3\n", {"x": 3})), stderr="", returncode=0
-        ),
+        child_result(stdout=stream(solution_obj("x = 3\n", {"x": 3})), stderr="", returncode=0),
     )
 
     mcp = create_mcp_server()
@@ -610,7 +641,7 @@ async def test_solve_minizinc_model_invalid_parallel_surfaces_actionable_error(
     def _fail_if_called(*args: object, **kwargs: object) -> None:
         raise AssertionError("subprocess.run must not be invoked for bad parallel")
 
-    monkeypatch.setattr("openconstraint_mcp.minizinc.core.popen_process_group", _fail_if_called)
+    monkeypatch.setattr("openconstraint_mcp.minizinc.core.execute_child", _fail_if_called)
 
     mcp = create_mcp_server()
     with pytest.raises(Exception) as exc_info:
@@ -633,7 +664,7 @@ async def test_solve_minizinc_model_unsupported_control_surfaces_mcp_error(
     def _fail_if_called(*args: object, **kwargs: object) -> None:
         raise AssertionError("solve subprocess must not run for an unsupported control")
 
-    monkeypatch.setattr("openconstraint_mcp.minizinc.core.popen_process_group", _fail_if_called)
+    monkeypatch.setattr("openconstraint_mcp.minizinc.core.execute_child", _fail_if_called)
 
     mcp = create_mcp_server()
     with pytest.raises(Exception) as exc_info:
@@ -675,9 +706,7 @@ async def test_solve_minizinc_model_num_solutions_forwards_n_flag_for_supported_
 ) -> None:
     calls = _record_run_capturing_cwd(
         monkeypatch,
-        FakeCompletedProcess(
-            stdout=stream(solution_obj("x = 3\n", {"x": 3})), stderr="", returncode=0
-        ),
+        child_result(stdout=stream(solution_obj("x = 3\n", {"x": 3})), stderr="", returncode=0),
     )
 
     mcp = create_mcp_server()
@@ -702,7 +731,7 @@ async def test_solve_minizinc_model_num_solutions_rejected_for_default_solver(
     def _fail_if_called(*args: object, **kwargs: object) -> None:
         raise AssertionError("subprocess.run must not be invoked for cp-sat + num_solutions")
 
-    monkeypatch.setattr("openconstraint_mcp.minizinc.core.popen_process_group", _fail_if_called)
+    monkeypatch.setattr("openconstraint_mcp.minizinc.core.execute_child", _fail_if_called)
 
     mcp = create_mcp_server()
     with pytest.raises(Exception) as exc_info:
@@ -734,10 +763,10 @@ async def test_check_minizinc_model_happy_path(
     fake_minizinc_binary: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    def _fake_run(*args: object, **kwargs: object) -> FakeCompletedProcess:
-        return FakeCompletedProcess(stdout="", stderr="", returncode=0)
+    def _fake_run(*args: object, **kwargs: object) -> ChildExecutionResult:
+        return child_result(stdout="", stderr="", returncode=0)
 
-    monkeypatch.setattr("openconstraint_mcp.minizinc.core.popen_process_group", _fake_run)
+    monkeypatch.setattr("openconstraint_mcp.minizinc.core.execute_child", _fake_run)
 
     mcp = create_mcp_server()
     result = await mcp.call_tool(
@@ -755,7 +784,7 @@ async def test_check_minizinc_model_threads_inline_data_to_runtime(
     fake_minizinc_binary: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    calls = _record_data_run(monkeypatch, FakeCompletedProcess(stdout="", stderr="", returncode=0))
+    calls = _record_data_run(monkeypatch, child_result(stdout="", stderr="", returncode=0))
 
     mcp = create_mcp_server()
     result = await mcp.call_tool(
@@ -772,14 +801,14 @@ async def test_check_minizinc_model_compile_error_returns_structured_result(
     fake_minizinc_binary: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    def _fake_run(*args: object, **kwargs: object) -> FakeCompletedProcess:
-        return FakeCompletedProcess(
+    def _fake_run(*args: object, **kwargs: object) -> ChildExecutionResult:
+        return child_result(
             stdout="",
             stderr="Error: type error: undefined identifier 'xz'\n",
             returncode=1,
         )
 
-    monkeypatch.setattr("openconstraint_mcp.minizinc.core.popen_process_group", _fake_run)
+    monkeypatch.setattr("openconstraint_mcp.minizinc.core.execute_child", _fake_run)
 
     mcp = create_mcp_server()
     result = await mcp.call_tool(
@@ -812,7 +841,7 @@ async def test_check_minizinc_model_empty_model_surfaces_actionable_error(
     def _fail_if_called(*args: object, **kwargs: object) -> None:
         raise AssertionError("subprocess.run must not be invoked for empty model")
 
-    monkeypatch.setattr("openconstraint_mcp.minizinc.core.popen_process_group", _fail_if_called)
+    monkeypatch.setattr("openconstraint_mcp.minizinc.core.execute_child", _fail_if_called)
 
     mcp = create_mcp_server()
     with pytest.raises(Exception) as exc_info:
@@ -883,10 +912,10 @@ async def test_inspect_minizinc_model_happy_path(
     fake_minizinc_binary: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    def _fake_run(*args: object, **kwargs: object) -> FakeCompletedProcess:
-        return FakeCompletedProcess(stdout=_INSPECT_STDOUT, stderr="", returncode=0)
+    def _fake_run(*args: object, **kwargs: object) -> ChildExecutionResult:
+        return child_result(stdout=_INSPECT_STDOUT, stderr="", returncode=0)
 
-    monkeypatch.setattr("openconstraint_mcp.minizinc.core.popen_process_group", _fake_run)
+    monkeypatch.setattr("openconstraint_mcp.minizinc.core.execute_child", _fake_run)
 
     mcp = create_mcp_server()
     result = await mcp.call_tool(
@@ -928,7 +957,7 @@ async def test_inspect_minizinc_model_empty_model_surfaces_actionable_error(
     def _fail_if_called(*args: object, **kwargs: object) -> None:
         raise AssertionError("subprocess.run must not be invoked for empty model")
 
-    monkeypatch.setattr("openconstraint_mcp.minizinc.core.popen_process_group", _fail_if_called)
+    monkeypatch.setattr("openconstraint_mcp.minizinc.core.execute_child", _fail_if_called)
 
     mcp = create_mcp_server()
     with pytest.raises(Exception) as exc_info:
@@ -955,14 +984,14 @@ async def test_find_unsat_core_happy_path(
     fake_minizinc_binary: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    def _fake_run(*args: object, **kwargs: object) -> FakeCompletedProcess:
-        return FakeCompletedProcess(
+    def _fake_run(*args: object, **kwargs: object) -> ChildExecutionResult:
+        return child_result(
             stdout=UNSAT_CORE_STDOUT,
             stderr="",
             returncode=0,
         )
 
-    monkeypatch.setattr("openconstraint_mcp.minizinc.core.popen_process_group", _fake_run)
+    monkeypatch.setattr("openconstraint_mcp.minizinc.core.execute_child", _fake_run)
 
     mcp = create_mcp_server()
     result = await mcp.call_tool("find_unsat_core", {"model": UNSAT_CORE_MODEL})
@@ -979,7 +1008,7 @@ async def test_find_unsat_core_threads_inline_data_to_runtime(
 ) -> None:
     calls = _record_data_run(
         monkeypatch,
-        FakeCompletedProcess(stdout=UNSAT_CORE_STDOUT, stderr="", returncode=0),
+        child_result(stdout=UNSAT_CORE_STDOUT, stderr="", returncode=0),
     )
 
     mcp = create_mcp_server()
@@ -1012,7 +1041,7 @@ async def test_find_unsat_core_empty_model_surfaces_actionable_error(
     def _fail_if_called(*args: object, **kwargs: object) -> None:
         raise AssertionError("subprocess.run must not be invoked for empty model")
 
-    monkeypatch.setattr("openconstraint_mcp.minizinc.core.popen_process_group", _fail_if_called)
+    monkeypatch.setattr("openconstraint_mcp.minizinc.core.execute_child", _fail_if_called)
 
     mcp = create_mcp_server()
     with pytest.raises(Exception) as exc_info:
@@ -1027,7 +1056,7 @@ async def test_find_unsat_core_non_positive_timeout_surfaces_actionable_error(
     def _fail_if_called(*args: object, **kwargs: object) -> None:
         raise AssertionError("subprocess.run must not be invoked for bad timeout")
 
-    monkeypatch.setattr("openconstraint_mcp.minizinc.core.popen_process_group", _fail_if_called)
+    monkeypatch.setattr("openconstraint_mcp.minizinc.core.execute_child", _fail_if_called)
 
     mcp = create_mcp_server()
     with pytest.raises(Exception) as exc_info:
@@ -1044,15 +1073,15 @@ _FILE_MODEL_SRC = "var 1..5: x;\nconstraint x > 2;\nsolve satisfy;\n"
 
 
 def _record_run_capturing_cwd(
-    monkeypatch: pytest.MonkeyPatch, completed: FakeCompletedProcess
+    monkeypatch: pytest.MonkeyPatch, completed: ChildExecutionResult
 ) -> list[dict[str, Any]]:
     calls: list[dict[str, Any]] = []
 
-    def _fake_run(*args: Any, **kwargs: Any) -> FakeCompletedProcess:
-        calls.append({"cmd": list(args[0]), "cwd": kwargs.get("cwd")})
+    def _fake_run(*args: Any, **kwargs: Any) -> ChildExecutionResult:
+        calls.append({"cmd": list(args[0]), "cwd": str(args[1])})
         return completed
 
-    monkeypatch.setattr("openconstraint_mcp.minizinc.core.popen_process_group", _fake_run)
+    monkeypatch.setattr("openconstraint_mcp.minizinc.core.execute_child", _fake_run)
     return calls
 
 
@@ -1098,9 +1127,7 @@ async def test_solve_minizinc_files_happy_path(
     model_path.write_text(_FILE_MODEL_SRC)
     _record_run_capturing_cwd(
         monkeypatch,
-        FakeCompletedProcess(
-            stdout=stream(solution_obj("x = 3;\n", {"x": 3})), stderr="", returncode=0
-        ),
+        child_result(stdout=stream(solution_obj("x = 3;\n", {"x": 3})), stderr="", returncode=0),
     )
 
     mcp = create_mcp_server()
@@ -1129,7 +1156,7 @@ async def test_solve_minizinc_files_visible_content_includes_statistics(
     model_path.write_text(_FILE_MODEL_SRC)
     _record_run_capturing_cwd(
         monkeypatch,
-        FakeCompletedProcess(
+        child_result(
             stdout=stream(
                 solution_obj("x = 3;\n", {"x": 3}),
                 {"type": "statistics", "statistics": {"failures": 2}},
@@ -1165,9 +1192,7 @@ async def test_solve_minizinc_files_forwards_search_flags_to_runtime(
     _patch_full_capabilities(monkeypatch, "cp-sat")
     calls = _record_run_capturing_cwd(
         monkeypatch,
-        FakeCompletedProcess(
-            stdout=stream(solution_obj("x = 3\n", {"x": 3})), stderr="", returncode=0
-        ),
+        child_result(stdout=stream(solution_obj("x = 3\n", {"x": 3})), stderr="", returncode=0),
     )
 
     mcp = create_mcp_server()
@@ -1191,9 +1216,7 @@ async def test_solve_minizinc_files_num_solutions_forwards_n_flag_for_supported_
     model_path.write_text(_FILE_MODEL_SRC)
     calls = _record_run_capturing_cwd(
         monkeypatch,
-        FakeCompletedProcess(
-            stdout=stream(solution_obj("x = 3\n", {"x": 3})), stderr="", returncode=0
-        ),
+        child_result(stdout=stream(solution_obj("x = 3\n", {"x": 3})), stderr="", returncode=0),
     )
 
     mcp = create_mcp_server()
@@ -1219,7 +1242,7 @@ async def test_solve_minizinc_files_num_solutions_rejected_for_default_solver(
     def _fail_if_called(*args: object, **kwargs: object) -> None:
         raise AssertionError("subprocess.run must not be invoked for cp-sat + num_solutions")
 
-    monkeypatch.setattr("openconstraint_mcp.minizinc.core.popen_process_group", _fail_if_called)
+    monkeypatch.setattr("openconstraint_mcp.minizinc.core.execute_child", _fail_if_called)
 
     mcp = create_mcp_server()
     with pytest.raises(Exception) as exc_info:
@@ -1247,7 +1270,7 @@ async def test_solve_minizinc_files_unsupported_control_surfaces_mcp_error(
     def _fail_if_called(*args: object, **kwargs: object) -> None:
         raise AssertionError("solve subprocess must not run for an unsupported control")
 
-    monkeypatch.setattr("openconstraint_mcp.minizinc.core.popen_process_group", _fail_if_called)
+    monkeypatch.setattr("openconstraint_mcp.minizinc.core.execute_child", _fail_if_called)
 
     mcp = create_mcp_server()
     with pytest.raises(Exception) as exc_info:
@@ -1268,7 +1291,7 @@ async def test_check_minizinc_files_happy_path(
 ) -> None:
     model_path = tmp_path / "model.mzn"
     model_path.write_text(_FILE_MODEL_SRC)
-    _record_run_capturing_cwd(monkeypatch, FakeCompletedProcess(stdout="", stderr="", returncode=0))
+    _record_run_capturing_cwd(monkeypatch, child_result(stdout="", stderr="", returncode=0))
 
     mcp = create_mcp_server()
     result = await mcp.call_tool("check_minizinc_files", {"model_path": str(model_path)})
@@ -1285,7 +1308,7 @@ async def test_find_unsat_core_files_happy_path(
     model_path = tmp_path / "model.mzn"
     model_path.write_text(UNSAT_CORE_MODEL)
     _record_run_capturing_cwd(
-        monkeypatch, FakeCompletedProcess(stdout=UNSAT_CORE_STDOUT, stderr="", returncode=0)
+        monkeypatch, child_result(stdout=UNSAT_CORE_STDOUT, stderr="", returncode=0)
     )
 
     mcp = create_mcp_server()
@@ -1306,9 +1329,7 @@ async def test_solve_minizinc_files_runs_from_model_parent(
     model_path.write_text(_FILE_MODEL_SRC)
     calls = _record_run_capturing_cwd(
         monkeypatch,
-        FakeCompletedProcess(
-            stdout=stream(solution_obj("x = 3;\n", {"x": 3})), stderr="", returncode=0
-        ),
+        child_result(stdout=stream(solution_obj("x = 3;\n", {"x": 3})), stderr="", returncode=0),
     )
 
     mcp = create_mcp_server()
@@ -1325,7 +1346,7 @@ async def test_solve_minizinc_files_path_not_found_surfaces_actionable_error(
     def _fail_if_called(*args: object, **kwargs: object) -> None:
         raise AssertionError("subprocess.run must not be invoked for a missing path")
 
-    monkeypatch.setattr("openconstraint_mcp.minizinc.core.popen_process_group", _fail_if_called)
+    monkeypatch.setattr("openconstraint_mcp.minizinc.core.execute_child", _fail_if_called)
     missing = tmp_path / "nope.mzn"
 
     mcp = create_mcp_server()
@@ -1393,7 +1414,7 @@ async def test_solve_minizinc_files_with_checker_happy_path(
     model_path, checker_path = _write_solve_and_check_inputs(tmp_path)
     _record_run_capturing_cwd(
         monkeypatch,
-        FakeCompletedProcess(
+        child_result(
             stdout=stream(
                 checker_pass("CORRECT\n"),
                 solution_obj("x = 1; y = 2;\n", {"x": 1, "y": 2}),
@@ -1434,7 +1455,7 @@ async def test_solve_minizinc_files_with_checker_text_notes_author_text_not_adju
     model_path, checker_path = _write_solve_and_check_inputs(tmp_path)
     _record_run_capturing_cwd(
         monkeypatch,
-        FakeCompletedProcess(
+        child_result(
             stdout=stream(
                 checker_pass("INCORRECT\n"),
                 solution_obj("x = 3; y = 1;\n", {"x": 3, "y": 1}),
@@ -1468,7 +1489,7 @@ async def test_solve_minizinc_files_with_checker_visible_content_includes_statis
     model_path, checker_path = _write_solve_and_check_inputs(tmp_path)
     _record_run_capturing_cwd(
         monkeypatch,
-        FakeCompletedProcess(
+        child_result(
             stdout=stream(
                 checker_pass("CORRECT\n"),
                 solution_obj("x = 1; y = 2;\n", {"x": 1, "y": 2}),
@@ -1502,7 +1523,7 @@ async def test_solve_minizinc_files_with_checker_omits_statistics_when_empty(
     model_path, checker_path = _write_solve_and_check_inputs(tmp_path)
     _record_run_capturing_cwd(
         monkeypatch,
-        FakeCompletedProcess(
+        child_result(
             stdout=stream(
                 checker_pass("CORRECT\n"),
                 solution_obj("x = 1; y = 2;\n", {"x": 1, "y": 2}),
@@ -1532,7 +1553,7 @@ async def test_solve_minizinc_files_with_checker_violation_surfaces_in_structure
     model_path, checker_path = _write_solve_and_check_inputs(tmp_path)
     _record_run_capturing_cwd(
         monkeypatch,
-        FakeCompletedProcess(
+        child_result(
             stdout=stream(
                 checker_violation(),
                 solution_obj("x = 1; y = 2;\n", {"x": 1, "y": 2}),
@@ -1565,7 +1586,7 @@ async def test_solve_minizinc_files_with_checker_runs_from_model_parent_with_che
     model_path, checker_path = _write_solve_and_check_inputs(tmp_path)
     calls = _record_run_capturing_cwd(
         monkeypatch,
-        FakeCompletedProcess(
+        child_result(
             stdout=stream(
                 checker_pass("CORRECT\n"), solution_obj("x = 1; y = 2;\n", {"x": 1, "y": 2})
             ),
@@ -1599,7 +1620,7 @@ async def test_solve_minizinc_files_bad_checker_suffix_surfaces_actionable_error
     def _fail_if_called(*args: object, **kwargs: object) -> None:
         raise AssertionError("subprocess.run must not be invoked for a bad checker suffix")
 
-    monkeypatch.setattr("openconstraint_mcp.minizinc.core.popen_process_group", _fail_if_called)
+    monkeypatch.setattr("openconstraint_mcp.minizinc.core.execute_child", _fail_if_called)
 
     mcp = create_mcp_server()
     with pytest.raises(Exception) as exc_info:
@@ -1729,12 +1750,12 @@ async def test_solve_minizinc_model_reports_stage_schedule(
     fake_minizinc_binary: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    def _fake_run(*args: object, **kwargs: object) -> FakeCompletedProcess:
-        return FakeCompletedProcess(
+    def _fake_run(*args: object, **kwargs: object) -> ChildExecutionResult:
+        return child_result(
             stdout=stream(solution_obj("x = 3;\n", {"x": 3})), stderr="", returncode=0
         )
 
-    monkeypatch.setattr("openconstraint_mcp.minizinc.core.popen_process_group", _fake_run)
+    monkeypatch.setattr("openconstraint_mcp.minizinc.core.execute_child", _fake_run)
     mcp = create_mcp_server()
     ctx = _FakeStatusContext()
 
@@ -1751,14 +1772,14 @@ async def test_solve_minizinc_model_with_checker_reports_checker_stage_messages(
     fake_minizinc_binary: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    def _fake_run(*args: object, **kwargs: object) -> FakeCompletedProcess:
-        return FakeCompletedProcess(
+    def _fake_run(*args: object, **kwargs: object) -> ChildExecutionResult:
+        return child_result(
             stdout=stream(checker_pass("CORRECT\n"), solution_obj("x = 3;\n", {"x": 3})),
             stderr="",
             returncode=0,
         )
 
-    monkeypatch.setattr("openconstraint_mcp.minizinc.core.popen_process_group", _fake_run)
+    monkeypatch.setattr("openconstraint_mcp.minizinc.core.execute_child", _fake_run)
     mcp = create_mcp_server()
     ctx = _FakeStatusContext()
 
@@ -1778,8 +1799,8 @@ async def test_check_minizinc_model_reports_stage_schedule(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr(
-        "openconstraint_mcp.minizinc.core.popen_process_group",
-        lambda *a, **k: FakeCompletedProcess(stdout="", stderr="", returncode=0),
+        "openconstraint_mcp.minizinc.core.execute_child",
+        lambda *a, **k: child_result(stdout="", stderr="", returncode=0),
     )
     mcp = create_mcp_server()
     ctx = _FakeStatusContext()
@@ -1795,8 +1816,8 @@ async def test_inspect_minizinc_model_reports_stage_schedule(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr(
-        "openconstraint_mcp.minizinc.core.popen_process_group",
-        lambda *a, **k: FakeCompletedProcess(stdout=_INSPECT_STDOUT, stderr="", returncode=0),
+        "openconstraint_mcp.minizinc.core.execute_child",
+        lambda *a, **k: child_result(stdout=_INSPECT_STDOUT, stderr="", returncode=0),
     )
     mcp = create_mcp_server()
     ctx = _FakeStatusContext()
@@ -1812,8 +1833,8 @@ async def test_find_unsat_core_reports_stage_schedule(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr(
-        "openconstraint_mcp.minizinc.core.popen_process_group",
-        lambda *a, **k: FakeCompletedProcess(stdout=UNSAT_CORE_STDOUT, stderr="", returncode=0),
+        "openconstraint_mcp.minizinc.core.execute_child",
+        lambda *a, **k: child_result(stdout=UNSAT_CORE_STDOUT, stderr="", returncode=0),
     )
     mcp = create_mcp_server()
     ctx = _FakeStatusContext()
@@ -1832,8 +1853,8 @@ async def test_check_minizinc_files_reports_stage_schedule(
     model_path = tmp_path / "model.mzn"
     model_path.write_text("solve satisfy;")
     monkeypatch.setattr(
-        "openconstraint_mcp.minizinc.core.popen_process_group",
-        lambda *a, **k: FakeCompletedProcess(stdout="", stderr="", returncode=0),
+        "openconstraint_mcp.minizinc.core.execute_child",
+        lambda *a, **k: child_result(stdout="", stderr="", returncode=0),
     )
     mcp = create_mcp_server()
     ctx = _FakeStatusContext()
@@ -1854,7 +1875,7 @@ async def test_check_minizinc_files_missing_path_still_raises_after_early_stages
     def _fail_if_called(*args: object, **kwargs: object) -> None:
         raise AssertionError("subprocess.run must not be invoked for a missing path")
 
-    monkeypatch.setattr("openconstraint_mcp.minizinc.core.popen_process_group", _fail_if_called)
+    monkeypatch.setattr("openconstraint_mcp.minizinc.core.execute_child", _fail_if_called)
     mcp = create_mcp_server()
     ctx = _FakeStatusContext()
 
@@ -1873,8 +1894,8 @@ async def test_check_minizinc_model_compile_error_still_reports_final_stage(
     # A compile error is a normal structured result, so the client still gets
     # the closing milestone before the response.
     monkeypatch.setattr(
-        "openconstraint_mcp.minizinc.core.popen_process_group",
-        lambda *a, **k: FakeCompletedProcess(
+        "openconstraint_mcp.minizinc.core.execute_child",
+        lambda *a, **k: child_result(
             stdout="", stderr="Error: type error: undefined identifier 'xz'\n", returncode=1
         ),
     )
@@ -1915,16 +1936,16 @@ _SAVE_TOOL_MODEL = "var 1..5: x;\nconstraint x > 2;\nsolve satisfy;\n"
 def _fake_save_subprocess(
     monkeypatch: pytest.MonkeyPatch,
     *,
-    check: FakeCompletedProcess,
-    solve: FakeCompletedProcess,
+    check: ChildExecutionResult,
+    solve: ChildExecutionResult,
 ) -> None:
     """Route the save tool's two managed runs: `-c` → ``check``, else ``solve``."""
 
-    def _fake_run(*args: Any, **kwargs: Any) -> FakeCompletedProcess:
+    def _fake_run(*args: Any, **kwargs: Any) -> ChildExecutionResult:
         cmd = [str(part) for part in args[0]]
         return check if "-c" in cmd else solve
 
-    monkeypatch.setattr("openconstraint_mcp.minizinc.core.popen_process_group", _fake_run)
+    monkeypatch.setattr("openconstraint_mcp.minizinc.core.execute_child", _fake_run)
 
 
 @pytest.mark.asyncio
@@ -1963,10 +1984,8 @@ async def test_save_verified_minizinc_model_happy_path_saves(
 ) -> None:
     _fake_save_subprocess(
         monkeypatch,
-        check=FakeCompletedProcess(stdout="", stderr="", returncode=0),
-        solve=FakeCompletedProcess(
-            stdout=stream(solution_obj("x=3\n", {"x": 3})), stderr="", returncode=0
-        ),
+        check=child_result(stdout="", stderr="", returncode=0),
+        solve=child_result(stdout=stream(solution_obj("x=3\n", {"x": 3})), stderr="", returncode=0),
     )
     target = tmp_path / "saved-project"
 
@@ -2001,10 +2020,10 @@ async def test_save_verified_minizinc_model_not_verified_is_normal_result(
     # about — a normal tool result, not an MCP exception.
     _fake_save_subprocess(
         monkeypatch,
-        check=FakeCompletedProcess(
+        check=child_result(
             stdout="", stderr="Error: type error: undefined identifier 'xz'\n", returncode=1
         ),
-        solve=FakeCompletedProcess(stdout="", stderr="", returncode=0),
+        solve=child_result(stdout="", stderr="", returncode=0),
     )
     target = tmp_path / "saved-project"
 
@@ -2039,10 +2058,8 @@ async def test_save_verified_minizinc_model_with_portfolio_result_writes_experim
 
     _fake_save_subprocess(
         monkeypatch,
-        check=FakeCompletedProcess(stdout="", stderr="", returncode=0),
-        solve=FakeCompletedProcess(
-            stdout=stream(solution_obj("x=3\n", {"x": 3})), stderr="", returncode=0
-        ),
+        check=child_result(stdout="", stderr="", returncode=0),
+        solve=child_result(stdout=stream(solution_obj("x=3\n", {"x": 3})), stderr="", returncode=0),
     )
     target = tmp_path / "saved-project-portfolio"
     winner_solve = SolveResult(
@@ -2526,10 +2543,8 @@ async def test_background_portfolio_provenance_threads_to_save(
 
     _fake_save_subprocess(
         monkeypatch,
-        check=FakeCompletedProcess(stdout="", stderr="", returncode=0),
-        solve=FakeCompletedProcess(
-            stdout=stream(solution_obj("x=3\n", {"x": 3})), stderr="", returncode=0
-        ),
+        check=child_result(stdout="", stderr="", returncode=0),
+        solve=child_result(stdout=stream(solution_obj("x=3\n", {"x": 3})), stderr="", returncode=0),
     )
     target = tmp_path / "portfolio-provenance-save"
     save_result = _structured(

@@ -55,11 +55,11 @@ Plans must preserve explicit user requirements. If a plan intentionally deviates
 ```
 cli  ──►  server  ──►  minizinc  ──►  runtime  ──►  schemas
  │                 │
- │                 └──►  pyexec  (subprocess executor; imports shared.proc, shared.save_target, shared.hashing, shared.childproc, schemas; never minizinc/runtime)
+ │                 └──►  pyexec  (subprocess executor; imports shared.childrun, shared.proc, shared.save_target, shared.hashing, shared.childproc, schemas; never minizinc/runtime)
  └─────►  runtime_install   (install-time only; imports no internal modules)
 ```
 
-A module may import any module to its right. Imports never flow leftward or between same-layer modules. The `pyexec` subtree is a parallel path from `server`: it executes user/LLM-provided OR-Tools CP-SAT Python in a child process (`sys.executable`), importing only the `shared` package's dependency-light leaves `shared.proc` (process-group launch + tree-kill), `shared.save_target` (manifest-gated save policy), `shared.hashing` (file-content sha256), `shared.childproc` (the `ChildProcessTracker` type), and `schemas` (the `CpsatPythonResult`/`CpsatStatus` return contract), never `minizinc` or `runtime`. `runtime_install` is a leaf used only by `cli` (lazily, so its `httpx`/`rich.progress` deps stay off the cold paths); it imports no internal modules, so it sits outside the left-to-right chain.
+A module may import any module to its right. Imports never flow leftward or between same-layer modules. The `pyexec` subtree is a parallel path from `server`: it executes user/LLM-provided OR-Tools CP-SAT Python in a child process (`sys.executable`), importing only the `shared` package's dependency-light leaves `shared.childrun` (the capped timeout/output-cap/tree-kill child executor, shared with `minizinc`), `shared.proc` (process-group launch + tree-kill), `shared.save_target` (manifest-gated save policy), `shared.hashing` (file-content sha256), `shared.childproc` (the `ChildProcessTracker` type), and `schemas` (the `CpsatPythonResult`/`CpsatStatus` return contract), never `minizinc` or `runtime`. `shared.childrun` itself imports only `shared.proc` + `shared.childproc` (plus stdlib). `runtime_install` is a leaf used only by `cli` (lazily, so its `httpx`/`rich.progress` deps stay off the cold paths); it imports no internal modules, so it sits outside the left-to-right chain.
 
 ## Before You Run Commands
 

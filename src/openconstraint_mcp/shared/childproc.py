@@ -95,9 +95,10 @@ class ChildProcessTracker:
         the closed flag and self-terminates, never slipping between the two — then
         terminates outside the lock so a slow tree-kill cannot block a worker thread
         trying to unregister. ``terminate_process_tree`` is idempotent and a no-op
-        on an already-exited handle, so a child that races to completion here is
-        harmless. ``_terminator`` is injectable for tests only; production always
-        uses the real tree-kill.
+        once a handle's whole process group is gone, so a child that races to
+        completion here is harmless (and any descendants it left get swept).
+        ``_terminator`` is injectable for tests only; production always uses the
+        real tree-kill.
         """
         with self._lock:
             self._closed = True

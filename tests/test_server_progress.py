@@ -30,7 +30,7 @@ from mcp.client.stdio import StdioServerParameters, stdio_client
 from mcp.shared.memory import create_connected_server_and_client_session
 
 from openconstraint_mcp.server import create_mcp_server
-from tests.minizinc.helpers import FakeCompletedProcess
+from tests.minizinc.helpers import child_result
 
 _MODEL = "var 1..5: x;\nconstraint x > 2;\nsolve satisfy;"
 
@@ -63,8 +63,8 @@ async def _call_check_over_protocol(
     callback — so callback delivery itself proves the token echo.
     """
     monkeypatch.setattr(
-        "openconstraint_mcp.minizinc.core.popen_process_group",
-        lambda *a, **k: FakeCompletedProcess(stdout="", stderr="", returncode=0),
+        "openconstraint_mcp.minizinc.core.execute_child",
+        lambda *a, **k: child_result(stdout="", stderr="", returncode=0),
     )
 
     routed: list[tuple[float, float | None, str | None]] = []

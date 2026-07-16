@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import json
 import math
-import subprocess
 import sys
 from pathlib import Path
 from typing import Any
@@ -23,8 +22,8 @@ from openconstraint_mcp.pyexec.core import (
 from openconstraint_mcp.pyexec.core import (
     normalize_objective as _normalize_objective,
 )
-from openconstraint_mcp.pyexec.runner import MAX_OUTPUT_BYTES, _read_capped
 from openconstraint_mcp.schemas.cpsat import CpsatPythonResult
+from openconstraint_mcp.shared.childrun import MAX_OUTPUT_BYTES
 
 _VALID_SOLUTION = {"x": 3, "y": 7}
 _VALID_STDOUT = json.dumps({"status": "optimal", "objective": 10, "solution": _VALID_SOLUTION})
@@ -126,10 +125,10 @@ def _run_with_mocked_proc(
 
     with (
         patch(
-            "openconstraint_mcp.pyexec.runner.popen_process_group",
+            "openconstraint_mcp.shared.childrun.popen_process_group",
             side_effect=_fake_popen_group,
         ),
-        patch("openconstraint_mcp.pyexec.runner.terminate_process_tree") as mock_kill,
+        patch("openconstraint_mcp.shared.childrun.terminate_process_tree") as mock_kill,
     ):
         result = run_cpsat_python(source, timeout_ms=timeout_ms, tracker=tracker)
     result._mock_kill = mock_kill  # type: ignore[attr-defined]
@@ -193,25 +192,6 @@ def test_validate_cpsat_random_seed_rejects_out_of_signed_int32_range(seed: int)
         validate_cpsat_random_seed(seed)
 
 
-def test_run_cpsat_python_registers_then_unregisters_child_with_tracker() -> None:
-    tracker = _SpyTracker()
-
-    _run_with_mocked_proc(tracker=tracker)
-
-    assert [name for name, _ in tracker.events] == ["register", "unregister"]
-    assert tracker.events[0][1] is tracker.events[1][1]  # same handle both times
-
-
-def test_run_cpsat_python_unregisters_child_after_timeout_kill() -> None:
-    tracker = _SpyTracker()
-
-    _run_with_mocked_proc(timeout=True, timeout_ms=100, tracker=tracker)
-
-    # Even on the timeout path the killed child must leave the live set so the
-    # lifespan never re-terminates a process that is already gone.
-    assert [name for name, _ in tracker.events] == ["register", "unregister"]
-
-
 # (a) valid JSON → parsed status/solution
 def test_run_cpsat_python_parses_valid_solution() -> None:
     result = _run_with_mocked_proc(stdout_content=_VALID_STDOUT)
@@ -248,7 +228,7 @@ def test_run_cpsat_python_timeout_kills_tree_and_sets_status() -> None:
 # the MiniZinc path's validate_model_and_timeout.
 @pytest.mark.parametrize("timeout_ms", [0, -1])
 def test_run_cpsat_python_non_positive_timeout_raises(timeout_ms: int) -> None:
-    with patch("openconstraint_mcp.pyexec.runner.popen_process_group") as fake_popen:
+    with patch("openconstraint_mcp.shared.childrun.popen_process_group") as fake_popen:
         with pytest.raises(ValueError, match="timeout_ms must be positive"):
             run_cpsat_python("print('x')", timeout_ms=timeout_ms)
     fake_popen.assert_not_called()
@@ -274,46 +254,16 @@ def test_run_cpsat_python_launches_child_unbuffered() -> None:
 
     with (
         patch(
-            "openconstraint_mcp.pyexec.runner.popen_process_group",
+            "openconstraint_mcp.shared.childrun.popen_process_group",
             side_effect=_fake_popen_group,
         ),
-        patch("openconstraint_mcp.pyexec.runner.terminate_process_tree"),
+        patch("openconstraint_mcp.shared.childrun.terminate_process_tree"),
     ):
         run_cpsat_python("print('hi')", timeout_ms=5000)
 
     cmd = captured["cmd"]
     assert cmd[0] == sys.executable
     assert cmd[1] == "-u"  # unbuffered, before the script path
-
-
-# (c2b) the child must not inherit the server's stdin: over stdio that channel
-# carries JSON-RPC, so an input()/sys.stdin read would steal protocol bytes.
-def test_run_cpsat_python_child_gets_no_stdin() -> None:
-    captured: dict[str, Any] = {}
-
-    def _fake_popen_group(cmd: list[str], **kwargs: Any) -> MagicMock:
-        captured.update(kwargs)
-        fake = MagicMock()
-        fake.pid = 1234
-        fake.returncode = 0
-        stdout_file = kwargs.get("stdout")
-        if stdout_file and hasattr(stdout_file, "write"):
-            stdout_file.write(_VALID_STDOUT)
-            stdout_file.flush()
-        fake.poll = lambda: 0
-        fake.wait.return_value = 0
-        return fake
-
-    with (
-        patch(
-            "openconstraint_mcp.pyexec.runner.popen_process_group",
-            side_effect=_fake_popen_group,
-        ),
-        patch("openconstraint_mcp.pyexec.runner.terminate_process_tree"),
-    ):
-        run_cpsat_python("print('hi')", timeout_ms=5000)
-
-    assert captured.get("stdin") == subprocess.DEVNULL
 
 
 # (c3) on timeout, an intermediate JSON block (best-so-far from a callback) is
@@ -349,53 +299,12 @@ def test_run_cpsat_python_timeout_return_code_is_none() -> None:
     assert result.return_code is None
 
 
-# (c6) a burst writer can overrun the cap with the deadline firing before the
-# loop's size check (the deadline is checked first). The timeout result must still
-# report truncated=True, computed from the on-disk size like the clean-exit path.
-# The clock is mocked so the deadline wins deterministically on the first poll.
-def test_run_cpsat_python_timeout_over_cap_reports_truncated() -> None:
-    def _fake_popen_group(cmd: list[str], **kwargs: Any) -> MagicMock:
-        fake = MagicMock()
-        fake.pid = 1234
-        fake.returncode = None
-        stdout_file = kwargs.get("stdout")
-        if stdout_file and hasattr(stdout_file, "write"):
-            stdout_file.write("x" * (MAX_OUTPUT_BYTES + 1))
-            stdout_file.flush()
-        fake.poll = lambda: None  # never exits on its own
-        fake.wait.return_value = None
-        return fake
-
-    with (
-        patch(
-            "openconstraint_mcp.pyexec.runner.popen_process_group",
-            side_effect=_fake_popen_group,
-        ),
-        patch("openconstraint_mcp.pyexec.runner.terminate_process_tree"),
-        # start, loop-now (past deadline), elapsed_ms.
-        patch("openconstraint_mcp.pyexec.runner.time.monotonic", side_effect=[0.0, 100.0, 100.0]),
-    ):
-        result = run_cpsat_python("print('hi')", timeout_ms=50)
-
-    assert result.timed_out is True
-    assert result.status == "timeout"
-    assert result.truncated is True
-
-
 # (d) unparseable stdout → status="error"
 def test_run_cpsat_python_unparseable_stdout_yields_error() -> None:
     result = _run_with_mocked_proc(stdout_content="not json at all")
 
     assert result.status == "error"
     assert result.solution is None
-
-
-# (e) output over MAX_OUTPUT_BYTES → truncated=True, tree-kill invoked
-def test_run_cpsat_python_large_output_truncates_and_kills() -> None:
-    result = _run_with_mocked_proc(large_output=True, timeout_ms=5000)
-
-    assert result.truncated is True
-    assert result._mock_kill.called  # type: ignore[attr-defined]
 
 
 # (f) off-vocabulary status → normalized to "error"
@@ -499,43 +408,15 @@ def test_run_cpsat_python_fast_exit_large_output_is_flagged_truncated() -> None:
 
     with (
         patch(
-            "openconstraint_mcp.pyexec.runner.popen_process_group",
+            "openconstraint_mcp.shared.childrun.popen_process_group",
             side_effect=_fake_popen_group,
         ),
-        patch("openconstraint_mcp.pyexec.runner.terminate_process_tree"),
+        patch("openconstraint_mcp.shared.childrun.terminate_process_tree"),
     ):
         result = run_cpsat_python("print('hi')", timeout_ms=5000)
 
     assert result.truncated is True
     assert result.status == "error"
-
-
-# (j) _read_capped applies the cap at the read boundary: an oversized file is read
-# at most MAX_OUTPUT_BYTES into memory (never slurped whole), yet the pre-cap size
-# it reports for the truncation check reflects the true on-disk length.
-def test_read_capped_reads_at_most_cap_into_memory(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    big = tmp_path / "stdout.txt"
-    big.write_bytes(b"x" * (MAX_OUTPUT_BYTES * 2))
-
-    def _no_slurp(self: Path) -> bytes:
-        raise AssertionError("read_bytes() slurps the whole file; read must be capped")
-
-    monkeypatch.setattr(Path, "read_bytes", _no_slurp)
-
-    text, size = _read_capped(big)
-
-    assert len(text) == MAX_OUTPUT_BYTES  # output capped at the read boundary
-    assert size == MAX_OUTPUT_BYTES * 2  # true pre-cap size, from stat
-
-
-# (j2) a missing/unreadable capture file degrades to empty output and zero length.
-def test_read_capped_missing_file_returns_empty(tmp_path: Path) -> None:
-    text, size = _read_capped(tmp_path / "does-not-exist.txt")
-
-    assert text == ""
-    assert size == 0
 
 
 # --- run_cpsat_python_file: path-based variant -----------------------------
@@ -569,10 +450,10 @@ def _run_file_with_mocked_proc(
 
     with (
         patch(
-            "openconstraint_mcp.pyexec.runner.popen_process_group",
+            "openconstraint_mcp.shared.childrun.popen_process_group",
             side_effect=_fake_popen_group,
         ),
-        patch("openconstraint_mcp.pyexec.runner.terminate_process_tree"),
+        patch("openconstraint_mcp.shared.childrun.terminate_process_tree"),
     ):
         result = run_cpsat_python_file(script_path, timeout_ms=timeout_ms, tracker=tracker, env=env)
     return result, captured
@@ -627,174 +508,13 @@ def test_run_cpsat_python_file_registers_then_unregisters_child(tmp_path: Path) 
 def test_run_cpsat_python_file_missing_path_raises(tmp_path: Path) -> None:
     missing = tmp_path / "nope.py"
 
-    with patch("openconstraint_mcp.pyexec.runner.popen_process_group") as fake_popen:
+    with patch("openconstraint_mcp.shared.childrun.popen_process_group") as fake_popen:
         with pytest.raises(ValueError, match="does not exist"):
             run_cpsat_python_file(missing)
     fake_popen.assert_not_called()
 
 
 # --- on_start hook -----------------------------------------------------------
-
-
-def test_run_cpsat_python_on_start_called_once_with_live_proc() -> None:
-    """on_start receives the Popen handle exactly once right after launch."""
-    received: list[Any] = []
-
-    def _capture(proc: Any) -> None:
-        received.append(proc)
-
-    def _fake_popen_group(cmd: list[str], **kwargs: Any) -> MagicMock:
-        fake = MagicMock()
-        fake.pid = 1234
-        fake.returncode = 0
-        stdout_file = kwargs.get("stdout")
-        if stdout_file and hasattr(stdout_file, "write"):
-            stdout_file.write(_VALID_STDOUT)
-            stdout_file.flush()
-        fake.poll = lambda: 0
-        fake.wait.return_value = 0
-        return fake
-
-    with (
-        patch(
-            "openconstraint_mcp.pyexec.runner.popen_process_group",
-            side_effect=_fake_popen_group,
-        ),
-        patch("openconstraint_mcp.pyexec.runner.terminate_process_tree"),
-    ):
-        run_cpsat_python("print('hi')", timeout_ms=5000, on_start=_capture)
-
-    assert len(received) == 1
-    assert received[0].pid == 1234
-
-
-def test_run_cpsat_python_on_start_terminate_ends_run() -> None:
-    """Calling terminate_process_tree inside on_start kills the child."""
-    killed: list[Any] = []
-
-    def _kill_it(proc: Any) -> None:
-        from openconstraint_mcp.pyexec.runner import terminate_process_tree
-
-        terminate_process_tree(proc)
-        killed.append(proc)
-
-    def _fake_popen_group(cmd: list[str], **kwargs: Any) -> MagicMock:
-        fake = MagicMock()
-        fake.pid = 9999
-        fake.returncode = None  # simulate live
-        stdout_file = kwargs.get("stdout")
-        if stdout_file and hasattr(stdout_file, "write"):
-            stdout_file.write("")
-            stdout_file.flush()
-        # poll returns None first (live), then non-zero after the kill
-        _calls = [0]
-
-        def _poll() -> int | None:
-            _calls[0] += 1
-            if _calls[0] == 1:
-                return None
-            fake.returncode = -15
-            return -15
-
-        fake.poll = _poll
-        fake.wait.return_value = -15
-        return fake
-
-    with (
-        patch(
-            "openconstraint_mcp.pyexec.runner.popen_process_group",
-            side_effect=_fake_popen_group,
-        ),
-        patch("openconstraint_mcp.pyexec.runner.terminate_process_tree") as mock_kill,
-    ):
-        run_cpsat_python("print('hi')", timeout_ms=5000, on_start=_kill_it)
-
-    assert mock_kill.called
-    assert len(killed) == 1
-
-
-def test_run_cpsat_python_on_start_raise_still_reaps_child() -> None:
-    """If on_start raises, the finally still kills and reaps the live child.
-
-    The callback fires inside the reaping guard, so a raising hook must not
-    orphan the process it was handed — the finally terminates and waits it.
-    """
-
-    def _boom(proc: Any) -> None:
-        raise RuntimeError("on_start failed")
-
-    def _fake_popen_group(cmd: list[str], **kwargs: Any) -> MagicMock:
-        fake = MagicMock()
-        fake.pid = 4242
-        fake.returncode = None  # live when on_start fires
-        _calls = [0]
-
-        def _poll() -> int | None:
-            _calls[0] += 1
-            if _calls[0] == 1:
-                return None  # still running at the finally's reap check
-            fake.returncode = -15
-            return -15
-
-        fake.poll = _poll
-        fake.wait.return_value = -15
-        return fake
-
-    with (
-        patch(
-            "openconstraint_mcp.pyexec.runner.popen_process_group",
-            side_effect=_fake_popen_group,
-        ),
-        patch("openconstraint_mcp.pyexec.runner.terminate_process_tree") as mock_kill,
-    ):
-        with pytest.raises(RuntimeError, match="on_start failed"):
-            run_cpsat_python("print('hi')", timeout_ms=5000, on_start=_boom)
-
-    # The reaping finally must have terminated the still-live child.
-    assert mock_kill.called
-
-
-def test_run_cpsat_python_on_start_raise_still_unregisters_child() -> None:
-    """on_start raising must not leak the child from the tracker's live set.
-
-    The kill-on-raise invariant is covered above; this pins the companion
-    half — register/unregister are balanced even when on_start blows up, so the
-    lifespan never re-terminates an already-reaped process.
-    """
-    tracker = _SpyTracker()
-
-    def _boom(proc: Any) -> None:
-        raise RuntimeError("on_start failed")
-
-    def _fake_popen_group(cmd: list[str], **kwargs: Any) -> MagicMock:
-        fake = MagicMock()
-        fake.pid = 4242
-        fake.returncode = None  # live when on_start fires
-        _calls = [0]
-
-        def _poll() -> int | None:
-            _calls[0] += 1
-            if _calls[0] == 1:
-                return None  # still running at the finally's reap check
-            fake.returncode = -15
-            return -15
-
-        fake.poll = _poll
-        fake.wait.return_value = -15
-        return fake
-
-    with (
-        patch(
-            "openconstraint_mcp.pyexec.runner.popen_process_group",
-            side_effect=_fake_popen_group,
-        ),
-        patch("openconstraint_mcp.pyexec.runner.terminate_process_tree"),
-    ):
-        with pytest.raises(RuntimeError, match="on_start failed"):
-            run_cpsat_python("print('hi')", timeout_ms=5000, on_start=_boom, tracker=tracker)
-
-    assert [name for name, _ in tracker.events] == ["register", "unregister"]
-    assert tracker.events[0][1] is tracker.events[1][1]  # same handle both times
 
 
 def test_run_cpsat_python_no_on_start_default_is_none() -> None:
@@ -847,10 +567,10 @@ def test_run_cpsat_python_file_on_start_called_once(tmp_path: Path) -> None:
 
     with (
         patch(
-            "openconstraint_mcp.pyexec.runner.popen_process_group",
+            "openconstraint_mcp.shared.childrun.popen_process_group",
             side_effect=_fake_popen_group,
         ),
-        patch("openconstraint_mcp.pyexec.runner.terminate_process_tree"),
+        patch("openconstraint_mcp.shared.childrun.terminate_process_tree"),
     ):
         run_cpsat_python_file(script, timeout_ms=5000, on_start=lambda p: received.append(p))
 
@@ -860,7 +580,7 @@ def test_run_cpsat_python_file_on_start_called_once(tmp_path: Path) -> None:
 
 # (k5) a directory is not a runnable script.
 def test_run_cpsat_python_file_directory_raises(tmp_path: Path) -> None:
-    with patch("openconstraint_mcp.pyexec.runner.popen_process_group") as fake_popen:
+    with patch("openconstraint_mcp.shared.childrun.popen_process_group") as fake_popen:
         with pytest.raises(ValueError, match="not a file"):
             run_cpsat_python_file(tmp_path)
     fake_popen.assert_not_called()
@@ -871,7 +591,7 @@ def test_run_cpsat_python_file_empty_file_raises(tmp_path: Path) -> None:
     script = tmp_path / "empty.py"
     script.write_text("   \n", encoding="utf-8")
 
-    with patch("openconstraint_mcp.pyexec.runner.popen_process_group") as fake_popen:
+    with patch("openconstraint_mcp.shared.childrun.popen_process_group") as fake_popen:
         with pytest.raises(ValueError, match="is empty"):
             run_cpsat_python_file(script)
     fake_popen.assert_not_called()
@@ -882,7 +602,7 @@ def test_run_cpsat_python_file_non_utf8_raises(tmp_path: Path) -> None:
     script = tmp_path / "latin1.py"
     script.write_bytes(b"print('caf\xe9')")
 
-    with patch("openconstraint_mcp.pyexec.runner.popen_process_group") as fake_popen:
+    with patch("openconstraint_mcp.shared.childrun.popen_process_group") as fake_popen:
         with pytest.raises(ValueError, match="not valid UTF-8"):
             run_cpsat_python_file(script)
     fake_popen.assert_not_called()
@@ -894,7 +614,7 @@ def test_run_cpsat_python_file_non_positive_timeout_raises(tmp_path: Path, timeo
     script = tmp_path / "model.py"
     script.write_text("print('x')", encoding="utf-8")
 
-    with patch("openconstraint_mcp.pyexec.runner.popen_process_group") as fake_popen:
+    with patch("openconstraint_mcp.shared.childrun.popen_process_group") as fake_popen:
         with pytest.raises(ValueError, match="timeout_ms must be positive"):
             run_cpsat_python_file(script, timeout_ms=timeout_ms)
     fake_popen.assert_not_called()
@@ -967,24 +687,11 @@ def _capture_popen_env(source: str, *, env: dict[str, str | None] | None) -> dic
         return fake
 
     with (
-        patch("openconstraint_mcp.pyexec.runner.popen_process_group", side_effect=_fake_popen),
-        patch("openconstraint_mcp.pyexec.runner.terminate_process_tree"),
+        patch("openconstraint_mcp.shared.childrun.popen_process_group", side_effect=_fake_popen),
+        patch("openconstraint_mcp.shared.childrun.terminate_process_tree"),
     ):
         run_cpsat_python(source, timeout_ms=1000, env=env)
     return captured["env"]
-
-
-def test_env_overlay_merged_on_top_of_parent_environment() -> None:
-    env = _capture_popen_env("print('x')", env={"OPENCONSTRAINT_MCP_CPSAT_SEED": "7"})
-    assert env is not None
-    assert env["OPENCONSTRAINT_MCP_CPSAT_SEED"] == "7"
-    # The child still inherits the parent's environment (overlay, not replacement).
-    assert "PATH" in env
-
-
-def test_no_env_overlay_leaves_child_environment_inherited() -> None:
-    # env=None must pass env=None to Popen so the child inherits os.environ as before.
-    assert _capture_popen_env("print('x')", env=None) is None
 
 
 def test_seed_config_env_always_returns_both_keys() -> None:
