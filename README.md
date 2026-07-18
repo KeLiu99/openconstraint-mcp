@@ -127,6 +127,26 @@ The package exposes five commands:
 
 - **`openconstraint-mcp stdio`** — run the MCP server over stdio. This is the entry
   point an MCP client (e.g. Claude Desktop, Claude Code) launches.
+
+  Flags:
+
+  - `--toolset core|full` — which MCP toolset to advertise (default: `core`).
+    The **core** profile exposes eight essential tools and no prompts, for a
+    materially smaller `tools/list` payload and a less ambiguous default choice
+    set: `check_runtime`, `list_available_solvers`, `check_minizinc_model`,
+    `solve_minizinc_model`, `check_minizinc_files`, `solve_minizinc_files`,
+    `run_cpsat_python`, and `run_cpsat_python_file`. The **full** profile
+    (`--toolset full`) additionally exposes the three MCP prompts and every
+    advanced tool — background solve/CP-SAT jobs, solver portfolios, explicit
+    CP-SAT experiments, verified saving, model-interface inspection,
+    unsat-core diagnostics, and tabular (Excel/CSV) I/O. Use `--toolset full`
+    when you need any of those; existing users who relied on an advanced tool
+    from bare `stdio` must now pass `--toolset full`.
+
+    > This is an advertised-contract change only: the smaller payload is a
+    > server-level guarantee. Whether a smaller default set reduces the tokens
+    > your model sees is host-dependent — the MCP host decides how it caches,
+    > filters, or forwards discovered tool metadata.
 - **`openconstraint-mcp install-runtime`** — fetch and install the managed
   MiniZinc bundle (Linux x86_64, macOS arm64, and Windows x86_64 in v0). Streams
   the pinned upstream asset from the MiniZinc GitHub release (a `.tgz` on Linux, a
@@ -217,6 +237,14 @@ The server never performs LLM repair and does not sandbox CP-SAT children; a
 diagnostic describes only what the local wrapper observed.
 
 ## MCP tools
+
+> **This section is the full-profile catalog.** It documents every tool the
+> server can expose. The default `stdio` profile is **core** and advertises only
+> eight of them (`check_runtime`, `list_available_solvers`,
+> `check_minizinc_model`, `solve_minizinc_model`, `check_minizinc_files`,
+> `solve_minizinc_files`, `run_cpsat_python`, `run_cpsat_python_file`) and no
+> prompts. The advanced tools and the [MCP prompts](#mcp-prompts) below require
+> `openconstraint-mcp stdio --toolset full` (see [CLI](#cli)).
 
 The stdio server exposes two runtime-introspection tools, a model-check tool, a
 model-inspection tool, an execution tool, an unsat-core diagnostic tool, and
@@ -1659,7 +1687,10 @@ telemetry, no subprocess, and no managed-runtime dependency.
 
 ## MCP prompts
 
-The stdio server exposes three MCP prompts for client-side LLMs:
+The stdio server exposes three MCP prompts for client-side LLMs. These are part
+of the **full** profile only — start the server with
+`openconstraint-mcp stdio --toolset full` to expose them (the default `core`
+profile registers no prompts; see [CLI](#cli)):
 
 - **`solve_constraint_problem(problem: str)`** — a guided template for the
   MCP client's LLM. Given a natural-language constraint or optimization

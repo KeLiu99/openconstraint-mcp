@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import enum
 import os
 import sys
 from pathlib import Path
@@ -32,14 +33,33 @@ def _warn_on_corrupt_install_config() -> None:
         _stderr_console.print(f"[yellow]Warning:[/yellow] {warning}")
 
 
+class Toolset(enum.StrEnum):
+    """Advertised MCP toolset for the ``stdio`` server (Typer choice values)."""
+
+    core = "core"
+    full = "full"
+
+
 @app.command()
-def stdio() -> None:
+def stdio(
+    toolset: Toolset = typer.Option(  # noqa: B008  (typer-standard pattern)
+        Toolset.core,
+        "--toolset",
+        help=(
+            "Advertised MCP toolset. 'core' (default) exposes 8 essential tools "
+            "for a smaller tools/list payload; 'full' exposes every tool and "
+            "three prompts, adding background jobs, solver portfolios, explicit "
+            "experiments, verified saves, inspection/unsat-core diagnostics, and "
+            "tabular I/O."
+        ),
+    ),
+) -> None:
     """Run the MCP server over stdio."""
     # Lazy-imported so metadata/runtime commands do not load the FastMCP server
     # layer (and its httpx dependency) on the CLI's cold import path.
     from .server import run_stdio
 
-    run_stdio()
+    run_stdio(toolset.value)
 
 
 @app.command("install-runtime")
