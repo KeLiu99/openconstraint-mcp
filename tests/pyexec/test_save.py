@@ -3,11 +3,17 @@
 from __future__ import annotations
 
 import json
+from collections.abc import Callable
 from pathlib import Path
 
 import pytest
 
 from openconstraint_mcp.pyexec.core import VERIFIED_STATUSES, config_sha256
+from openconstraint_mcp.pyexec.save import (
+    CHECKER_FILENAME,
+    SOLUTION_FILENAME,
+    save_verified_cpsat_python,
+)
 from openconstraint_mcp.schemas.cpsat import (
     CpsatCheckerReport,
     CpsatExpectation,
@@ -81,8 +87,6 @@ def test_save_verified_cpsat_python_optimal_saves_files(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from openconstraint_mcp.pyexec.save import save_verified_cpsat_python
-
     _patch_executor(monkeypatch, _OPTIMAL_RESULT)
     target = tmp_path / "my_solution"
 
@@ -100,8 +104,6 @@ def test_save_verified_cpsat_python_manifest_structure(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from openconstraint_mcp.pyexec.save import save_verified_cpsat_python
-
     _patch_executor(monkeypatch, _OPTIMAL_RESULT)
     target = tmp_path / "my_solution"
     save_verified_cpsat_python(_SCRIPT, target_dir=target)
@@ -118,8 +120,6 @@ def test_save_verified_cpsat_python_manifest_records_backend(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from openconstraint_mcp.pyexec.save import save_verified_cpsat_python
-
     _patch_executor(monkeypatch, _OPTIMAL_RESULT)
     target = tmp_path / "my_solution"
     save_verified_cpsat_python(_SCRIPT, target_dir=target)
@@ -133,8 +133,6 @@ def test_save_verified_cpsat_python_manifest_records_timeout_ms(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from openconstraint_mcp.pyexec.save import save_verified_cpsat_python
-
     _patch_executor(monkeypatch, _OPTIMAL_RESULT)
     target = tmp_path / "my_solution"
     save_verified_cpsat_python(_SCRIPT, target_dir=target, timeout_ms=12_345)
@@ -148,8 +146,6 @@ def test_save_verified_cpsat_python_manifest_records_explicit_checker_timeout_ms
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from openconstraint_mcp.pyexec.save import save_verified_cpsat_python
-
     _patch_executor(monkeypatch, _OPTIMAL_RESULT)
     _patch_checker(monkeypatch, _accepted_report())
     target = tmp_path / "my_solution"
@@ -170,8 +166,6 @@ def test_save_verified_cpsat_python_manifest_omits_checker_timeout_ms_when_not_s
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from openconstraint_mcp.pyexec.save import save_verified_cpsat_python
-
     _patch_executor(monkeypatch, _OPTIMAL_RESULT)
     _patch_checker(monkeypatch, _accepted_report())
     target = tmp_path / "my_solution"
@@ -187,8 +181,6 @@ def test_save_verified_cpsat_python_writes_problem_txt(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from openconstraint_mcp.pyexec.save import save_verified_cpsat_python
-
     _patch_executor(monkeypatch, _OPTIMAL_RESULT)
     target = tmp_path / "my_solution"
 
@@ -201,15 +193,9 @@ def test_save_verified_cpsat_python_writes_problem_txt(
     assert (target / "problem.txt").read_text() == "Assign workers to tasks."
 
 
-# (a4) optimal status but no solution dict → saved=False, reason set, nothing written
-def test_save_verified_cpsat_python_optimal_no_solution_does_not_save(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    from openconstraint_mcp.pyexec.save import save_verified_cpsat_python
-
-    _patch_executor(
-        monkeypatch,
+# (a4, a5, b, b2) unsaved result shapes → saved=False, reason set, nothing written
+_UNSAVED_RESULT_CASES = [
+    pytest.param(
         CpsatPythonResult(
             status="optimal",
             solution=None,
@@ -221,26 +207,10 @@ def test_save_verified_cpsat_python_optimal_no_solution_does_not_save(
             truncated=False,
             duration_ms=7,
         ),
-    )
-    target = tmp_path / "no_solution"
-
-    result = save_verified_cpsat_python(_SCRIPT, target_dir=target)
-
-    assert result.saved is False
-    assert result.reason is not None
-    assert result.target_dir is None
-    assert not target.exists()
-
-
-# (a5) verified status but empty solution dict → saved=False, reason set, nothing written
-def test_save_verified_cpsat_python_empty_solution_does_not_save(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    from openconstraint_mcp.pyexec.save import save_verified_cpsat_python
-
-    _patch_executor(
-        monkeypatch,
+        "no_solution",
+        id="optimal-no-solution",
+    ),
+    pytest.param(
         CpsatPythonResult(
             status="optimal",
             solution={},
@@ -252,8 +222,23 @@ def test_save_verified_cpsat_python_empty_solution_does_not_save(
             truncated=False,
             duration_ms=7,
         ),
-    )
-    target = tmp_path / "empty_solution"
+        "empty_solution",
+        id="optimal-empty-solution",
+    ),
+    pytest.param(_INFEASIBLE_RESULT, "infeas", id="infeasible"),
+    pytest.param(_ERROR_RESULT, "err", id="error"),
+]
+
+
+@pytest.mark.parametrize(("executor_result", "target_name"), _UNSAVED_RESULT_CASES)
+def test_save_verified_cpsat_python_unsaved_result_does_not_save(
+    executor_result: CpsatPythonResult,
+    target_name: str,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _patch_executor(monkeypatch, executor_result)
+    target = tmp_path / target_name
 
     result = save_verified_cpsat_python(_SCRIPT, target_dir=target)
 
@@ -263,46 +248,10 @@ def test_save_verified_cpsat_python_empty_solution_does_not_save(
     assert not target.exists()
 
 
-# (b) infeasible → saved=False, reason set, nothing written
-def test_save_verified_cpsat_python_infeasible_does_not_save(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    from openconstraint_mcp.pyexec.save import save_verified_cpsat_python
-
-    _patch_executor(monkeypatch, _INFEASIBLE_RESULT)
-    target = tmp_path / "infeas"
-
-    result = save_verified_cpsat_python(_SCRIPT, target_dir=target)
-
-    assert result.saved is False
-    assert result.reason is not None
-    assert not target.exists()
-
-
-# (b2) error result → saved=False, reason set, nothing written
-def test_save_verified_cpsat_python_error_does_not_save(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    from openconstraint_mcp.pyexec.save import save_verified_cpsat_python
-
-    _patch_executor(monkeypatch, _ERROR_RESULT)
-    target = tmp_path / "err"
-
-    result = save_verified_cpsat_python(_SCRIPT, target_dir=target)
-
-    assert result.saved is False
-    assert result.reason is not None
-    assert not target.exists()
-
-
 # (c) relative target_dir → ValueError before executor runs
 def test_save_verified_cpsat_python_relative_path_raises(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from openconstraint_mcp.pyexec.save import save_verified_cpsat_python
-
     called = []
     monkeypatch.setattr(
         "openconstraint_mcp.pyexec.save.run_cpsat_python",
@@ -320,8 +269,6 @@ def test_save_verified_cpsat_python_unmanaged_nonempty_dir_raises(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from openconstraint_mcp.pyexec.save import save_verified_cpsat_python
-
     _patch_executor(monkeypatch, _OPTIMAL_RESULT)
     target = tmp_path / "existing"
     target.mkdir()
@@ -336,8 +283,6 @@ def test_save_verified_cpsat_python_existing_managed_no_overwrite_raises(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from openconstraint_mcp.pyexec.save import save_verified_cpsat_python
-
     _patch_executor(monkeypatch, _OPTIMAL_RESULT)
     target = tmp_path / "managed"
 
@@ -355,8 +300,6 @@ def test_save_verified_cpsat_python_overwrite_replaces_managed_dir(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from openconstraint_mcp.pyexec.save import save_verified_cpsat_python
-
     _patch_executor(monkeypatch, _OPTIMAL_RESULT)
     target = tmp_path / "managed"
 
@@ -375,8 +318,6 @@ def test_save_no_expectation_saves_with_reported_level(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from openconstraint_mcp.pyexec.save import save_verified_cpsat_python
-
     _patch_executor(monkeypatch, _OPTIMAL_RESULT)
     target = tmp_path / "s"
 
@@ -393,8 +334,6 @@ def test_save_maximize_expectation_passes(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from openconstraint_mcp.pyexec.save import save_verified_cpsat_python
-
     _patch_executor(monkeypatch, _OPTIMAL_RESULT)
     target = tmp_path / "s"
     exp = CpsatExpectation(objective_sense="maximize", objective_threshold=2.0)
@@ -412,8 +351,6 @@ def test_save_maximize_expectation_fails(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from openconstraint_mcp.pyexec.save import save_verified_cpsat_python
-
     _patch_executor(monkeypatch, _OPTIMAL_RESULT)
     target = tmp_path / "s"
     exp = CpsatExpectation(objective_sense="maximize", objective_threshold=100.0)
@@ -432,8 +369,6 @@ def test_save_minimize_expectation_passes(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from openconstraint_mcp.pyexec.save import save_verified_cpsat_python
-
     _patch_executor(monkeypatch, _OPTIMAL_RESULT)
     target = tmp_path / "s"
     exp = CpsatExpectation(objective_sense="minimize", objective_threshold=100.0)
@@ -449,8 +384,6 @@ def test_save_minimize_expectation_fails(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from openconstraint_mcp.pyexec.save import save_verified_cpsat_python
-
     _patch_executor(monkeypatch, _OPTIMAL_RESULT)
     target = tmp_path / "s"
     exp = CpsatExpectation(objective_sense="minimize", objective_threshold=1.0)
@@ -467,8 +400,6 @@ def test_save_expectation_fails_when_objective_missing(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from openconstraint_mcp.pyexec.save import save_verified_cpsat_python
-
     no_obj = CpsatPythonResult(
         status="optimal",
         solution={"x": 1},
@@ -497,8 +428,6 @@ def test_save_reported_gate_fails_with_expectation_supplied(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from openconstraint_mcp.pyexec.save import save_verified_cpsat_python
-
     _patch_executor(monkeypatch, _INFEASIBLE_RESULT)
     target = tmp_path / "s"
     exp = CpsatExpectation(objective_sense="maximize", objective_threshold=10.0)
@@ -517,8 +446,6 @@ def test_save_reported_gate_fails_with_expectation_and_checker_supplied(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from openconstraint_mcp.pyexec.save import save_verified_cpsat_python
-
     _patch_executor(monkeypatch, _INFEASIBLE_RESULT)
     target = tmp_path / "s"
     exp = CpsatExpectation(objective_sense="maximize", objective_threshold=10.0)
@@ -536,8 +463,6 @@ def test_save_reported_gate_fails_with_expectation_and_checker_supplied(
 
 
 def test_save_checker_timeout_ms_without_checker_raises() -> None:
-    from openconstraint_mcp.pyexec.save import save_verified_cpsat_python
-
     with pytest.raises(ValueError, match="checker_timeout_ms"):
         save_verified_cpsat_python(
             _SCRIPT,
@@ -547,8 +472,6 @@ def test_save_checker_timeout_ms_without_checker_raises() -> None:
 
 
 def test_save_checker_timeout_ms_zero_raises() -> None:
-    from openconstraint_mcp.pyexec.save import save_verified_cpsat_python
-
     with pytest.raises(ValueError, match="positive"):
         save_verified_cpsat_python(
             _SCRIPT,
@@ -558,26 +481,19 @@ def test_save_checker_timeout_ms_zero_raises() -> None:
         )
 
 
-def test_save_empty_checker_raises() -> None:
-    from openconstraint_mcp.pyexec.save import save_verified_cpsat_python
-
+@pytest.mark.parametrize(
+    "bad_checker",
+    [pytest.param("", id="empty"), pytest.param("  \n", id="whitespace")],
+)
+def test_save_empty_or_whitespace_checker_raises(bad_checker: str) -> None:
     with pytest.raises(ValueError, match="non-empty"):
-        save_verified_cpsat_python(_SCRIPT, target_dir=Path("/tmp/x"), checker="")
-
-
-def test_save_whitespace_only_checker_raises() -> None:
-    from openconstraint_mcp.pyexec.save import save_verified_cpsat_python
-
-    with pytest.raises(ValueError, match="non-empty"):
-        save_verified_cpsat_python(_SCRIPT, target_dir=Path("/tmp/x"), checker="  \n")
+        save_verified_cpsat_python(_SCRIPT, target_dir=Path("/tmp/x"), checker=bad_checker)
 
 
 def test_save_expectation_gate_fails_with_checker_skipped(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from openconstraint_mcp.pyexec.save import save_verified_cpsat_python
-
     _patch_executor(monkeypatch, _OPTIMAL_RESULT)
     target = tmp_path / "s"
     exp = CpsatExpectation(objective_sense="maximize", objective_threshold=100.0)
@@ -664,13 +580,6 @@ def test_save_accepted_checker_saves_with_checked_level(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from openconstraint_mcp.pyexec.save import (
-        CHECKER_FILENAME,
-        SOLUTION_FILENAME,
-        save_verified_cpsat_python,
-    )
-    from openconstraint_mcp.shared.save_target import MANIFEST_FILENAME
-
     _patch_executor(monkeypatch, _OPTIMAL_RESULT)
     _patch_checker(monkeypatch, _accepted_report())
     target = tmp_path / "s"
@@ -693,8 +602,6 @@ def test_save_accepted_checker_manifest_has_scalar_summary_only(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Accepted checker: manifest carries only scalar summary, never free-text fields."""
-    from openconstraint_mcp.schemas.cpsat import CpsatCheckerReport
-
     _patch_executor(monkeypatch, _OPTIMAL_RESULT)
     sensitive_report = CpsatCheckerReport(
         status="accepted",
@@ -708,9 +615,6 @@ def test_save_accepted_checker_manifest_has_scalar_summary_only(
     )
     _patch_checker(monkeypatch, sensitive_report)
     target = tmp_path / "s"
-
-    from openconstraint_mcp.pyexec.save import save_verified_cpsat_python
-    from openconstraint_mcp.shared.save_target import MANIFEST_FILENAME
 
     save_verified_cpsat_python(_SCRIPT, target_dir=target, checker=_CHECKER_SOURCE)
 
@@ -741,25 +645,21 @@ def test_save_accepted_checker_manifest_has_scalar_summary_only(
 @pytest.mark.parametrize(
     ("report_fn", "expected_checker_status"),
     [
-        ("_rejected_report", "rejected"),
-        ("_error_report", "error"),
-        ("_timeout_report", "timeout"),
+        (_rejected_report, "rejected"),
+        (_error_report, "error"),
+        (_timeout_report, "timeout"),
     ],
 )
 def test_save_non_accepted_checker_does_not_save(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
-    report_fn: str,
+    report_fn: Callable[[], CpsatCheckerReport],
     expected_checker_status: str,
 ) -> None:
-    import tests.pyexec.test_save as _mod
-
-    report = getattr(_mod, report_fn)()
+    report = report_fn()
     _patch_executor(monkeypatch, _OPTIMAL_RESULT)
     _patch_checker(monkeypatch, report)
     target = tmp_path / "s"
-
-    from openconstraint_mcp.pyexec.save import save_verified_cpsat_python
 
     result = save_verified_cpsat_python(_SCRIPT, target_dir=target, checker=_CHECKER_SOURCE)
 
@@ -778,8 +678,6 @@ def test_save_non_accepted_checker_with_expectation_reports_expectation_level(
     _patch_checker(monkeypatch, _rejected_report())
     target = tmp_path / "s"
     exp = CpsatExpectation(objective_sense="maximize", objective_threshold=2.0)
-
-    from openconstraint_mcp.pyexec.save import save_verified_cpsat_python
 
     result = save_verified_cpsat_python(
         _SCRIPT, target_dir=target, expectation=exp, checker=_CHECKER_SOURCE
@@ -805,8 +703,6 @@ def test_save_checker_not_run_when_reported_fails(
     )
     target = tmp_path / "s"
 
-    from openconstraint_mcp.pyexec.save import save_verified_cpsat_python
-
     result = save_verified_cpsat_python(_SCRIPT, target_dir=target, checker=_CHECKER_SOURCE)
 
     assert result.saved is False
@@ -829,8 +725,6 @@ def test_save_checker_not_run_when_expectation_fails(
     target = tmp_path / "s"
     exp = CpsatExpectation(objective_sense="maximize", objective_threshold=1000.0)
 
-    from openconstraint_mcp.pyexec.save import save_verified_cpsat_python
-
     result = save_verified_cpsat_python(
         _SCRIPT, target_dir=target, expectation=exp, checker=_CHECKER_SOURCE
     )
@@ -844,11 +738,7 @@ def test_save_checker_not_run_when_expectation_fails(
 @pytest.mark.integration
 def test_save_verified_cpsat_python_integration(tmp_path: Path) -> None:
     """Run a real script end-to-end and verify it saves."""
-    from pathlib import Path as _Path
-
-    from openconstraint_mcp.pyexec.save import save_verified_cpsat_python
-
-    examples = _Path(__file__).parent.parent / "fixtures" / "cpsat_python"
+    examples = Path(__file__).parent.parent / "fixtures" / "cpsat_python"
     source = (examples / "assignment.py").read_text()
     target = tmp_path / "assignment_save"
 
@@ -879,8 +769,6 @@ def test_save_with_seed_reruns_with_seed_env_and_records_it(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from openconstraint_mcp.pyexec.save import save_verified_cpsat_python
-
     captured: dict = {}
 
     def _spy(source: str, **kw: object) -> CpsatPythonResult:
@@ -909,8 +797,6 @@ def test_save_without_seed_passes_no_env_and_omits_seed_from_manifest(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from openconstraint_mcp.pyexec.save import save_verified_cpsat_python
-
     captured: dict = {}
 
     def _spy(source: str, **kw: object) -> CpsatPythonResult:
@@ -934,8 +820,6 @@ def test_save_with_seed_timeout_winner_still_fails_reported_gate(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from openconstraint_mcp.pyexec.save import save_verified_cpsat_python
-
     _patch_executor(monkeypatch, _TIMEOUT_RESULT)
     target = tmp_path / "timeout_seeded"
 
@@ -951,8 +835,6 @@ def test_save_with_bool_seed_is_rejected(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from openconstraint_mcp.pyexec.save import save_verified_cpsat_python
-
     _patch_executor(monkeypatch, _OPTIMAL_RESULT)
     with pytest.raises(ValueError, match="seed must be a non-bool integer"):
         save_verified_cpsat_python(_SCRIPT, target_dir=tmp_path / "x", seed=True)
@@ -962,8 +844,6 @@ def test_save_with_negative_seed_reruns_with_seed_env_and_records_it(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from openconstraint_mcp.pyexec.save import save_verified_cpsat_python
-
     captured: dict = {}
 
     def _spy(source: str, **kw: object) -> CpsatPythonResult:
@@ -985,26 +865,18 @@ def test_save_with_negative_seed_reruns_with_seed_env_and_records_it(
     assert manifest["verification"]["replay_seed"] == -1
 
 
-def test_save_with_seed_below_int32_is_rejected(
+@pytest.mark.parametrize(
+    "bad_seed",
+    [pytest.param(-2_147_483_649, id="below"), pytest.param(2_147_483_648, id="above")],
+)
+def test_save_with_seed_outside_int32_range_is_rejected(
+    bad_seed: int,
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from openconstraint_mcp.pyexec.save import save_verified_cpsat_python
-
     _patch_executor(monkeypatch, _OPTIMAL_RESULT)
     with pytest.raises(ValueError, match="CP-SAT random_seed range"):
-        save_verified_cpsat_python(_SCRIPT, target_dir=tmp_path / "x", seed=-2_147_483_649)
-
-
-def test_save_with_seed_above_int32_is_rejected(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    from openconstraint_mcp.pyexec.save import save_verified_cpsat_python
-
-    _patch_executor(monkeypatch, _OPTIMAL_RESULT)
-    with pytest.raises(ValueError, match="CP-SAT random_seed range"):
-        save_verified_cpsat_python(_SCRIPT, target_dir=tmp_path / "x", seed=2_147_483_648)
+        save_verified_cpsat_python(_SCRIPT, target_dir=tmp_path / "x", seed=bad_seed)
 
 
 # --- config replay ------------------------------------------------------------
@@ -1014,8 +886,6 @@ def test_save_with_config_reruns_with_config_env_and_persists_replay_config(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from openconstraint_mcp.pyexec.save import save_verified_cpsat_python
-
     captured: dict = {}
 
     def _spy(source: str, **kw: object) -> CpsatPythonResult:
@@ -1044,8 +914,6 @@ def test_save_without_config_passes_no_config_env_and_writes_no_artifact(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from openconstraint_mcp.pyexec.save import save_verified_cpsat_python
-
     captured: dict = {}
 
     def _spy(source: str, **kw: object) -> CpsatPythonResult:
@@ -1070,8 +938,6 @@ def test_save_with_empty_config_dict_equivalent_to_omitted(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from openconstraint_mcp.pyexec.save import save_verified_cpsat_python
-
     captured: dict = {}
 
     def _spy(source: str, **kw: object) -> CpsatPythonResult:
@@ -1094,8 +960,6 @@ def test_save_with_seed_and_config_combine_in_env(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from openconstraint_mcp.pyexec.save import save_verified_cpsat_python
-
     captured: dict = {}
 
     def _spy(source: str, **kw: object) -> CpsatPythonResult:
@@ -1183,8 +1047,6 @@ def test_save_with_matching_experiment_result_writes_experiment_log(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from openconstraint_mcp.pyexec.save import save_verified_cpsat_python
-
     _patch_executor(monkeypatch, _OPTIMAL_RESULT)
     target = tmp_path / "with_experiment_log"
     experiment_result = _experiment_result(winning_attempt=_winning_attempt_row())
@@ -1229,8 +1091,6 @@ def test_save_without_experiment_result_writes_no_experiment_log(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from openconstraint_mcp.pyexec.save import save_verified_cpsat_python
-
     _patch_executor(monkeypatch, _OPTIMAL_RESULT)
     target = tmp_path / "no_experiment_log"
 
@@ -1243,8 +1103,6 @@ def test_save_rejects_no_winner_experiment_result(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from openconstraint_mcp.pyexec.save import save_verified_cpsat_python
-
     called = _patch_executor_counting(monkeypatch, _OPTIMAL_RESULT)
     experiment_result = _experiment_result(
         winning_attempt=_winning_attempt_row(accepted=False), status="no_winner"
@@ -1261,8 +1119,6 @@ def test_save_rejects_experiment_result_with_source_mismatch(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from openconstraint_mcp.pyexec.save import save_verified_cpsat_python
-
     called = _patch_executor_counting(monkeypatch, _OPTIMAL_RESULT)
     experiment_result = _experiment_result(
         winning_attempt=_winning_attempt_row(source_sha256="wrong-hash")
@@ -1279,8 +1135,6 @@ def test_save_rejects_experiment_result_with_seed_mismatch(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from openconstraint_mcp.pyexec.save import save_verified_cpsat_python
-
     called = _patch_executor_counting(monkeypatch, _OPTIMAL_RESULT)
     experiment_result = _experiment_result(winning_attempt=_winning_attempt_row(seed=7))
 
@@ -1295,8 +1149,6 @@ def test_save_rejects_experiment_result_config_supplied_but_winner_had_none(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from openconstraint_mcp.pyexec.save import save_verified_cpsat_python
-
     called = _patch_executor_counting(monkeypatch, _OPTIMAL_RESULT)
     experiment_result = _experiment_result(winning_attempt=_winning_attempt_row(config_sha256=None))
 
@@ -1314,8 +1166,6 @@ def test_save_rejects_experiment_result_config_omitted_but_winner_used_one(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from openconstraint_mcp.pyexec.save import save_verified_cpsat_python
-
     called = _patch_executor_counting(monkeypatch, _OPTIMAL_RESULT)
     winning_config_hash = config_sha256({"num_workers": 4})
     experiment_result = _experiment_result(
@@ -1333,8 +1183,6 @@ def test_save_accepts_experiment_result_config_matching_winner(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from openconstraint_mcp.pyexec.save import save_verified_cpsat_python
-
     _patch_executor(monkeypatch, _OPTIMAL_RESULT)
     config = {"num_workers": 4}
     winning_config_hash = config_sha256(config)
@@ -1363,8 +1211,6 @@ def test_save_with_matching_experiment_result_still_fails_a_bad_fresh_rerun(
     fail the reported gate and write nothing, exactly as it would with no
     experiment_result at all.
     """
-    from openconstraint_mcp.pyexec.save import save_verified_cpsat_python
-
     _patch_executor(monkeypatch, _INFEASIBLE_RESULT)
     experiment_result = _experiment_result(winning_attempt=_winning_attempt_row())
     target = tmp_path / "provenance_is_not_evidence"
@@ -1381,8 +1227,6 @@ def test_save_with_matching_experiment_result_still_fails_a_bad_fresh_rerun(
 def test_save_accepts_experiment_result_matching_a_non_winning_accepted_attempt(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    from openconstraint_mcp.pyexec.save import save_verified_cpsat_python
-
     _patch_executor(monkeypatch, _OPTIMAL_RESULT)
     matching_but_not_winner = _losing_attempt_row(
         source_sha256=text_sha256(_SCRIPT), name="faster_alt"
@@ -1415,8 +1259,6 @@ def test_save_rejects_experiment_result_when_only_source_match_not_accepted(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """A source-matching attempt that was rejected by the experiment cannot be provenance."""
-    from openconstraint_mcp.pyexec.save import save_verified_cpsat_python
-
     called = _patch_executor_counting(monkeypatch, _OPTIMAL_RESULT)
     not_accepted = _losing_attempt_row(
         source_sha256=text_sha256(_SCRIPT),
@@ -1451,8 +1293,6 @@ def test_save_rejects_experiment_result_non_winner_accepted_attempt_seed_mismatc
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """The error must name the actual matching (non-winning) attempt, not the winner."""
-    from openconstraint_mcp.pyexec.save import save_verified_cpsat_python
-
     called = _patch_executor_counting(monkeypatch, _OPTIMAL_RESULT)
     matching_but_not_winner = _losing_attempt_row(
         source_sha256=text_sha256(_SCRIPT), name="faster_alt", seed=7

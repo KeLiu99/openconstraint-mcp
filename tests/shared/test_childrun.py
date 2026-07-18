@@ -444,6 +444,28 @@ def test_read_capped_missing_file_returns_empty(tmp_path: Path) -> None:
     assert size == 0
 
 
+def _make_live_then_dead_popen_group(*, pid: int, final_returncode: int) -> Any:
+    """Fake popen_process_group side_effect: proc reports alive once, then dead."""
+
+    def _fake_popen_group(cmd: list[str], **kwargs: Any) -> MagicMock:
+        fake = MagicMock()
+        fake.pid = pid
+        fake.returncode = None
+        _calls = [0]
+
+        def _poll() -> int | None:
+            _calls[0] += 1
+            if _calls[0] == 1:
+                return None
+            fake.returncode = final_returncode
+            return final_returncode
+
+        fake.poll = _poll
+        return fake
+
+    return _fake_popen_group
+
+
 # --- on_start lifecycle ------------------------------------------------------
 
 
@@ -467,26 +489,10 @@ def test_execute_child_on_start_terminate_ends_run(tmp_path: Path) -> None:
         terminate_process_tree(proc)
         killed.append(proc)
 
-    def _fake_popen_group(cmd: list[str], **kwargs: Any) -> MagicMock:
-        fake = MagicMock()
-        fake.pid = 9999
-        fake.returncode = None
-        _calls = [0]
-
-        def _poll() -> int | None:
-            _calls[0] += 1
-            if _calls[0] == 1:
-                return None
-            fake.returncode = -15
-            return -15
-
-        fake.poll = _poll
-        return fake
-
     with (
         patch(
             "openconstraint_mcp.shared.childrun.popen_process_group",
-            side_effect=_fake_popen_group,
+            side_effect=_make_live_then_dead_popen_group(pid=9999, final_returncode=-15),
         ),
         patch("openconstraint_mcp.shared.childrun.terminate_process_tree") as mock_kill,
     ):
@@ -502,26 +508,10 @@ def test_execute_child_on_start_raise_still_reaps_child(tmp_path: Path) -> None:
     def _boom(proc: Any) -> None:
         raise RuntimeError("on_start failed")
 
-    def _fake_popen_group(cmd: list[str], **kwargs: Any) -> MagicMock:
-        fake = MagicMock()
-        fake.pid = 4242
-        fake.returncode = None  # live when on_start fires
-        _calls = [0]
-
-        def _poll() -> int | None:
-            _calls[0] += 1
-            if _calls[0] == 1:
-                return None  # still running at the finally's reap check
-            fake.returncode = -15
-            return -15
-
-        fake.poll = _poll
-        return fake
-
     with (
         patch(
             "openconstraint_mcp.shared.childrun.popen_process_group",
-            side_effect=_fake_popen_group,
+            side_effect=_make_live_then_dead_popen_group(pid=4242, final_returncode=-15),
         ),
         patch("openconstraint_mcp.shared.childrun.terminate_process_tree") as mock_kill,
     ):
@@ -539,26 +529,10 @@ def test_execute_child_on_start_raise_still_unregisters_child(tmp_path: Path) ->
     def _boom(proc: Any) -> None:
         raise RuntimeError("on_start failed")
 
-    def _fake_popen_group(cmd: list[str], **kwargs: Any) -> MagicMock:
-        fake = MagicMock()
-        fake.pid = 4242
-        fake.returncode = None
-        _calls = [0]
-
-        def _poll() -> int | None:
-            _calls[0] += 1
-            if _calls[0] == 1:
-                return None
-            fake.returncode = -15
-            return -15
-
-        fake.poll = _poll
-        return fake
-
     with (
         patch(
             "openconstraint_mcp.shared.childrun.popen_process_group",
-            side_effect=_fake_popen_group,
+            side_effect=_make_live_then_dead_popen_group(pid=4242, final_returncode=-15),
         ),
         patch(
             "openconstraint_mcp.shared.childrun.terminate_process_tree",
