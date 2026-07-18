@@ -32,7 +32,7 @@ else:
     CREATION_FLAGS = 0
 
 # Grace period between SIGTERM and an escalated SIGKILL when terminating a tree.
-_TERMINATE_GRACE_SECONDS: float = 3.0
+_TERMINATE_GRACE_SECONDS: float = 4.0
 
 # Public milliseconds view of the same SIGTERM→SIGKILL grace, for callers that must
 # account for the time a timed-out child can spend being terminated (a future
@@ -130,8 +130,14 @@ def terminate_process_tree_posix(proc: subprocess.Popen[Any], *, grace_seconds: 
     if _group_exits_within(proc, pgid, grace_seconds):
         return
     _killpg(pgid, signal.SIGKILL)
-    with contextlib.suppress(subprocess.TimeoutExpired):
-        proc.wait(timeout=grace_seconds)
+    # SIGKILL is asynchronous: a descendant (re-parented to init, or one in an
+    # uninterruptible syscall) can outlive the leader's reap. Wait on the GROUP,
+    # not just the leader, so this returns only once the whole tree is gone or the
+    # grace expires — mirroring the SIGTERM escalation above and honoring the
+    # "no-op only once the whole group is gone" contract on the KILL path too. The
+    # poll inside still reaps the leader, which is what the caller's tracker
+    # unregister keys off, so it must not unregister while a group member survives.
+    _group_exits_within(proc, pgid, grace_seconds)
 
 
 _GROUP_POLL_INTERVAL_S: float = 0.05

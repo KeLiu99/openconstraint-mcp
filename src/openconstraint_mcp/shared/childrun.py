@@ -140,7 +140,16 @@ def execute_child(
     truncated = False
     truncation_killed = False
 
-    with tempfile.TemporaryDirectory() as tmp_dir:
+    # ignore_cleanup_errors: on Windows a child that outlived the bounded
+    # terminate_process_tree() wait still holds these capture files open, and you
+    # cannot delete a file another process has open — so rmtree would raise
+    # PermissionError out of execute_child before the result is even built. Making
+    # cleanup best-effort matches proc.py's documented "Windows child cleanup is
+    # best-effort" posture and, unlike a trailing proc.wait(), keeps teardown within
+    # the 2x-grace worst-case budget (a blocking reap here would either hang the
+    # server on a kernel-stuck child or overrun that budget). The surviving child is
+    # not orphaned: the finally leaves it tracker-registered for lifespan teardown.
+    with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp_dir:
         tmp = Path(tmp_dir)
         stdout_path = tmp / "stdout.txt"
         stderr_path = tmp / "stderr.txt"

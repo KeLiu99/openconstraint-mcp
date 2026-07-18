@@ -9,6 +9,7 @@ tested in the respective caller packages.
 from __future__ import annotations
 
 import subprocess
+import tempfile
 from pathlib import Path
 from typing import Any
 from unittest.mock import MagicMock, patch
@@ -225,6 +226,53 @@ def test_execute_child_keeps_unreaped_child_registered_for_teardown(tmp_path: Pa
         execute_child(_ARGV, tmp_path, timeout_ms=50, tracker=tracker)
 
     assert [name for name, _ in tracker.events] == ["register"]  # registered, not unregistered
+
+
+def test_execute_child_tolerates_temp_dir_cleanup_failure(tmp_path: Path) -> None:
+    # Windows regression: a child that outlives terminate_process_tree's bounded
+    # wait still holds the capture files open, so removing the temp dir raises
+    # PermissionError (you cannot delete a file another process has open). The run
+    # must opt into best-effort cleanup so that error never propagates in place of
+    # the result. Model CPython's real semantics — ignore_cleanup_errors=True
+    # suppresses the failure inside TemporaryDirectory itself, not via a try/except
+    # in execute_child — so the fake raises only when the flag was NOT requested.
+    real_tempdir = tempfile.TemporaryDirectory
+
+    class _CleanupFailsUnlessIgnored:
+        def __init__(self, *args: Any, **kwargs: Any) -> None:
+            self._ignored = bool(kwargs.pop("ignore_cleanup_errors", False))
+            self._inner = real_tempdir(*args, **kwargs)
+
+        def __enter__(self) -> str:
+            return self._inner.__enter__()
+
+        def __exit__(self, *exc: Any) -> bool:
+            self._inner.__exit__(*exc)  # remove the real dir so the test leaks nothing
+            if not self._ignored:
+                raise PermissionError("capture file still held open by a live child")
+            return False
+
+    def _fake_popen_group(cmd: list[str], **kwargs: Any) -> MagicMock:
+        fake = MagicMock()
+        fake.pid = 1234
+        fake.returncode = 0
+        fake.poll = lambda: 0
+        return fake
+
+    with (
+        patch(
+            "openconstraint_mcp.shared.childrun.tempfile.TemporaryDirectory",
+            _CleanupFailsUnlessIgnored,
+        ),
+        patch(
+            "openconstraint_mcp.shared.childrun.popen_process_group",
+            side_effect=_fake_popen_group,
+        ),
+        patch("openconstraint_mcp.shared.childrun.terminate_process_tree"),
+    ):
+        result = execute_child(_ARGV, tmp_path, timeout_ms=1000, tracker=None)
+
+    assert result.return_code == 0  # cleanup failure swallowed, result still returned
 
 
 @pytest.mark.parametrize("timeout_ms", [0, -1])
