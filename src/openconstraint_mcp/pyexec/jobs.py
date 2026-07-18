@@ -132,6 +132,10 @@ class CpsatJobRegistry:
         self._lock = threading.Lock()
         self._records: dict[str, _CpsatJobRecord] = {}
         self._terminal_order: list[str] = []
+        # Handles of evicted terminal records whose leader was never reaped
+        # (returncode None). Eviction drops the record — the only reference to
+        # that live child — so the handle is stashed here for shutdown to sweep.
+        self._unreaped_orphans: list[Popen[str]] = []
         self._in_flight = 0
         self._executor = ThreadPoolExecutor(
             max_workers=max_running_jobs, thread_name_prefix="cpsat-job"
@@ -244,11 +248,17 @@ class CpsatJobRegistry:
                 with self._lock:
                     self._finalize(record, "cancelled", None, "Cancelled at shutdown")
         with self._lock:
+            # A terminal record can still own a leader that termination could not
+            # reap. Its None returncode is the teardown-retry signal.
             handles = [
                 cast("Popen[str]", r.handle)
                 for r in self._records.values()
-                if r.handle is not None and r.state not in TERMINAL_STATES
+                if r.handle is not None
+                and (r.state not in TERMINAL_STATES or getattr(r.handle, "returncode", 0) is None)
             ]
+            # Evicted-but-unreaped children live only here now; sweep them too.
+            handles.extend(self._unreaped_orphans)
+            self._unreaped_orphans = []
         for handle in handles:
             _terminate_process_tree(handle)
         self._executor.shutdown(wait=True, cancel_futures=True)
@@ -366,7 +376,14 @@ class CpsatJobRegistry:
     def _evict_terminal_overflow(self) -> None:
         while len(self._terminal_order) > self._max_retained_terminal:
             oldest = self._terminal_order.pop(0)
-            self._records.pop(oldest, None)
+            evicted = self._records.pop(oldest, None)
+            handle = evicted.handle if evicted is not None else None
+            # poll() (not the stale .returncode) so a leader that exited on its own
+            # since finalize gets reaped here instead of stashed as a false orphan.
+            if handle is not None and handle.poll() is None:
+                # A still-live, unreaped leader whose only reference was this record;
+                # keep the handle so shutdown can still terminate it.
+                self._unreaped_orphans.append(handle)
 
     def _on_start(self, job_id: str, proc: Popen[str]) -> None:
         with self._lock:

@@ -115,6 +115,10 @@ class JobRegistry:
         self._records: dict[str, _JobRecord] = {}
         self._terminal_order: list[str] = []
         self._pin_counts: dict[str, int] = {}
+        # Handles of evicted terminal records whose leader was never reaped
+        # (returncode None). Eviction drops the record — the only reference to
+        # that live child — so the handle is stashed here for shutdown to sweep.
+        self._unreaped_orphans: list[Popen[str]] = []
         self._in_flight = 0
         self._executor = ThreadPoolExecutor(
             max_workers=max_running_jobs, thread_name_prefix="solve-job"
@@ -305,6 +309,9 @@ class JobRegistry:
                 if r.handle is not None
                 and (r.state not in TERMINAL_STATES or getattr(r.handle, "returncode", 0) is None)
             ]
+            # Evicted-but-unreaped children live only here now; sweep them too.
+            handles.extend(self._unreaped_orphans)
+            self._unreaped_orphans = []
         for handle in handles:
             _terminate_process_tree(handle)
         self._executor.shutdown(wait=True, cancel_futures=True)
@@ -427,8 +434,15 @@ class JobRegistry:
             if evict_index is None:
                 return
             oldest = self._terminal_order.pop(evict_index)
-            self._records.pop(oldest, None)
+            evicted = self._records.pop(oldest, None)
             self._pin_counts.pop(oldest, None)
+            handle = evicted.handle if evicted is not None else None
+            # poll() (not the stale .returncode) so a leader that exited on its own
+            # since finalize gets reaped here instead of stashed as a false orphan.
+            if handle is not None and handle.poll() is None:
+                # A still-live, unreaped leader whose only reference was this record;
+                # keep the handle so shutdown can still terminate it.
+                self._unreaped_orphans.append(handle)
 
     def _on_start(self, job_id: str, proc: Popen[str]) -> None:
         # Called by the runner the instant the child is launched. Record the handle

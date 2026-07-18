@@ -258,7 +258,43 @@ def test_terminate_process_tree_signals_group_when_running(
 
     assert killed[0] == (4321, signal.SIGTERM)
     assert (4321, signal.SIGKILL) in killed  # group still alive → escalated
-    assert fake.wait_calls >= 1
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX process-group termination")
+def test_terminate_process_tree_waits_for_group_after_sigkill(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # SIGKILL is asynchronous: a descendant (re-parented to init, or one in an
+    # uninterruptible syscall) can outlive the leader's reap. After escalating to
+    # SIGKILL, teardown must keep probing the GROUP until it clears or the grace
+    # expires — not return the instant the leader is reaped (the old proc.wait
+    # behaviour) — so the caller never unregisters a handle while a group member is
+    # still winding down.
+    fake = _FakePopen(returncode=-signal.SIGKILL)  # poll() None until SIGKILL reaps it
+    post_kill_group_probes = 0
+    leader_killed = False
+
+    def _killpg(_pgid: int, sig: int) -> None:
+        nonlocal post_kill_group_probes, leader_killed
+        if sig == signal.SIGKILL:
+            leader_killed = True
+            fake.returncode = -signal.SIGKILL  # the kernel reaps the leader
+            return
+        if sig == signal.SIGTERM:
+            return
+        # signal-0 liveness probe: the group stays alive through the SIGTERM
+        # window (forcing escalation), then clears on the first post-kill probe.
+        if leader_killed:
+            post_kill_group_probes += 1
+            raise ProcessLookupError
+
+    monkeypatch.setattr("openconstraint_mcp.shared.proc.os.killpg", _killpg)
+
+    terminate_process_tree(fake, grace_seconds=0.05)  # type: ignore[arg-type]
+
+    assert leader_killed
+    assert post_kill_group_probes >= 1  # group-aware wait ran after SIGKILL
+    assert fake.wait_calls == 0  # no longer a leader-only proc.wait
 
 
 @pytest.mark.skipif(sys.platform == "win32", reason="POSIX process-group termination")

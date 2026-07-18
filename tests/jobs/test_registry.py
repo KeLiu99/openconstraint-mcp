@@ -71,7 +71,15 @@ class _FakeProc:
     It has no ``pid`` and backs no real process, so the real (group-aware)
     ``_terminate_process_tree`` must never see it — the autouse
     ``_never_terminate_for_real`` fixture below guarantees that.
+
+    Defaults to looking unreaped (``returncode = None``); set ``returncode = 0``
+    to model a child the registry has already reaped.
     """
+
+    returncode: Any = None
+
+    def poll(self) -> Any:
+        return self.returncode
 
 
 @pytest.fixture(autouse=True)
@@ -511,6 +519,79 @@ def test_shutdown_retries_a_terminal_unreaped_child(monkeypatch: pytest.MonkeyPa
         registry.shutdown()
 
     assert terminated == [handle]
+
+
+def test_shutdown_terminates_an_evicted_unreaped_child(monkeypatch: pytest.MonkeyPatch) -> None:
+    # Evicting a terminal record that still owns an unreaped leader must not drop
+    # the only reference to that child: the handle is kept for the shutdown sweep.
+    unreaped = _FakeProc()
+    unreaped.returncode = None  # type: ignore[attr-defined]
+    reaped = _FakeProc()
+    reaped.returncode = 0  # type: ignore[attr-defined]
+    handles = iter([unreaped, reaped])
+    terminated: list[Any] = []
+
+    def _solve(model: str, *, on_start: Any, **kw: Any) -> SolveResult:
+        on_start(next(handles))
+        return _solve_result()
+
+    _patch_solve(monkeypatch, _solve)
+    _patch_terminate(monkeypatch, terminated)
+    # max_running=1 forces sequential completion so "oldest terminal" is the first
+    # job; cap=1 evicts it the moment the second finalizes.
+    registry = JobRegistry(max_running_jobs=1, max_queued_jobs=8, max_retained_terminal=1)
+    try:
+        first = registry.submit(model="solve satisfy;")
+        assert _wait_until_terminal(registry, first) == "succeeded"
+        second = registry.submit(model="solve satisfy;")
+        assert _wait_until_terminal(registry, second) == "succeeded"
+        with pytest.raises(ValueError, match="unknown"):
+            registry.get(first)  # evicted
+    finally:
+        registry.shutdown()
+
+    # first's unreaped handle was kept and swept; second's reaped handle was not.
+    assert terminated == [unreaped]
+
+
+def test_eviction_reaps_a_leader_that_exited_before_eviction(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # A leader can exit on its own between finalize and eviction (eviction may run
+    # long after the job that owns it finished, once the retention cap is next
+    # exceeded). Eviction must poll() to reap it there rather than trusting the
+    # stale post-finalize returncode and stashing an already-dead handle.
+    class _LateExitProc(_FakeProc):
+        def __init__(self) -> None:
+            self.returncode = None
+
+        def poll(self) -> Any:
+            self.returncode = 0  # exits the moment eviction checks it
+            return self.returncode
+
+    late_exit = _LateExitProc()
+    reaped = _FakeProc()
+    reaped.returncode = 0  # type: ignore[attr-defined]
+    handles = iter([late_exit, reaped])
+    terminated: list[Any] = []
+
+    def _solve(model: str, *, on_start: Any, **kw: Any) -> SolveResult:
+        on_start(next(handles))
+        return _solve_result()
+
+    _patch_solve(monkeypatch, _solve)
+    _patch_terminate(monkeypatch, terminated)
+    registry = JobRegistry(max_running_jobs=1, max_queued_jobs=8, max_retained_terminal=1)
+    try:
+        first = registry.submit(model="solve satisfy;")
+        assert _wait_until_terminal(registry, first) == "succeeded"
+        second = registry.submit(model="solve satisfy;")
+        assert _wait_until_terminal(registry, second) == "succeeded"
+    finally:
+        registry.shutdown()
+
+    # Reaped at eviction time, so it was never stashed for the shutdown sweep.
+    assert terminated == []
 
 
 def test_shutdown_finalizes_a_queued_job_as_cancelled(monkeypatch: pytest.MonkeyPatch) -> None:
