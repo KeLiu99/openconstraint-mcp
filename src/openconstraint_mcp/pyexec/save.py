@@ -8,7 +8,6 @@ this module supplies the CP-SAT-specific writer and the public function.
 from __future__ import annotations
 
 import json
-import tempfile
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -39,11 +38,10 @@ from .core import (
     VERIFIED_STATUSES,
     config_sha256,
     effective_checker_timeout_ms,
+    replay_env_scope,
     run_cpsat_python,
-    seed_config_env,
     validate_checker_args,
     validate_cpsat_random_seed,
-    write_config_file,
 )
 from .diagnostics import save_failure_diagnostic
 
@@ -401,15 +399,7 @@ def save_verified_cpsat_python(
     )
 
     target = validate_save_target(target_dir, overwrite=overwrite)
-    if normalized_config is not None:
-        with tempfile.TemporaryDirectory() as tmp_dir:
-            config_path = write_config_file(Path(tmp_dir), normalized_config)
-            replay_env = seed_config_env(seed=seed, config_path=config_path)
-            run_result = run_cpsat_python(
-                source, timeout_ms=timeout_ms, tracker=tracker, env=replay_env
-            )
-    else:
-        replay_env = seed_config_env(seed=seed, config_path=None)
+    with replay_env_scope(seed=seed, config=normalized_config) as replay_env:
         run_result = run_cpsat_python(
             source, timeout_ms=timeout_ms, tracker=tracker, env=replay_env
         )

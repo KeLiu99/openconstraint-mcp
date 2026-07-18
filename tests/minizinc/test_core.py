@@ -24,7 +24,7 @@ from openconstraint_mcp.minizinc.core import (
     FINDMUS_SOLVER,
     MiniZincExecutionError,
     _build_solve_result,
-    _run_managed_minizinc_cancellable,
+    _run_managed_minizinc,
     _RunOutcome,
     _solver_capabilities,
     check_model,
@@ -2975,7 +2975,7 @@ def test_cancellable_runner_invokes_on_start_with_the_handle(
     )
     seen: list[Any] = []
 
-    _run_managed_minizinc_cancellable(
+    _run_managed_minizinc(
         "var 1..5: x;\nsolve satisfy;",
         solver=DEFAULT_SOLVER,
         timeout_ms=DEFAULT_SOLVE_TIMEOUT_MS,
@@ -2993,7 +2993,7 @@ def test_cancellable_runner_clean_run_returns_outcome(
         monkeypatch, child_result(stdout=STREAM_SATISFY, stderr="warn\n", returncode=0)
     )
 
-    outcome = _run_managed_minizinc_cancellable(
+    outcome = _run_managed_minizinc(
         "var 1..5: x;\nsolve satisfy;",
         solver=DEFAULT_SOLVER,
         timeout_ms=DEFAULT_SOLVE_TIMEOUT_MS,
@@ -3016,7 +3016,7 @@ def test_cancellable_runner_timeout_adapts_to_timed_out_outcome(
     # returncode sentinel (never read while timed out).
     _patch_cancellable_executor(monkeypatch, child_result(stdout="partial\n", timed_out=True))
 
-    outcome = _run_managed_minizinc_cancellable(
+    outcome = _run_managed_minizinc(
         "var 1..5: x;\nsolve satisfy;",
         solver=DEFAULT_SOLVER,
         timeout_ms=DEFAULT_SOLVE_TIMEOUT_MS,
@@ -3038,7 +3038,7 @@ def test_cancellable_runner_wraps_oserror_as_execution_error(
     monkeypatch.setattr("openconstraint_mcp.minizinc.core.execute_child", _boom)
 
     with pytest.raises(MiniZincExecutionError) as exc_info:
-        _run_managed_minizinc_cancellable(
+        _run_managed_minizinc(
             "solve satisfy;",
             solver=DEFAULT_SOLVER,
             timeout_ms=DEFAULT_SOLVE_TIMEOUT_MS,

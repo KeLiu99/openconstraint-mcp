@@ -4,7 +4,6 @@ import functools
 import inspect
 import os
 import sys
-import tempfile
 from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import AbstractAsyncContextManager, asynccontextmanager
 from importlib import metadata
@@ -14,7 +13,7 @@ from typing import Annotated, Any, ParamSpec, TypeVar, cast
 from anyio import to_thread
 from mcp.server.fastmcp import Context, FastMCP
 from mcp.types import CallToolResult, TextContent
-from pydantic import JsonValue, StrictInt
+from pydantic import BaseModel, JsonValue, StrictInt
 
 from .jobs.portfolio_registry import PortfolioJobRegistry
 from .jobs.registry import JobRegistry
@@ -87,11 +86,11 @@ from .protocol_text.results import (
 )
 from .pyexec.core import (
     DEFAULT_PYEXEC_TIMEOUT_MS,
+    replay_env_scope,
     run_cpsat_python,
     run_cpsat_python_file,
     seed_config_env,
     validate_cpsat_random_seed,
-    write_config_file,
 )
 from .pyexec.experiment import run_cpsat_python_experiment
 from .pyexec.jobs import CpsatJobRegistry
@@ -174,42 +173,12 @@ def _log_boot_diagnostic() -> None:
     print("\n".join(lines), file=sys.stderr, flush=True)
 
 
-def _wrap_solve_result(result: SolveResult) -> CallToolResult:
-    """Wrap a SolveResult as prose text content plus the full structured output."""
+def _wrap_result[ResultT: BaseModel](
+    result: ResultT, formatter: Callable[[ResultT], str]
+) -> CallToolResult:
+    """Wrap a result model as formatter-rendered text content plus full structured output."""
     return CallToolResult(
-        content=[TextContent(type="text", text=format_solve_result_content(result))],
-        structuredContent=result.model_dump(mode="json"),
-    )
-
-
-def _wrap_save_result(result: SaveVerifiedModelResult) -> CallToolResult:
-    """Wrap a SaveVerifiedModelResult as concise text plus full structured output."""
-    return CallToolResult(
-        content=[TextContent(type="text", text=format_save_result_content(result))],
-        structuredContent=result.model_dump(mode="json"),
-    )
-
-
-def _wrap_cpsat_experiment_result(result: CpsatPythonExperimentResult) -> CallToolResult:
-    """Wrap a CpsatPythonExperimentResult as concise text plus full structured output."""
-    return CallToolResult(
-        content=[TextContent(type="text", text=format_cpsat_experiment_content(result))],
-        structuredContent=result.model_dump(mode="json"),
-    )
-
-
-def _wrap_solver_list(result: SolverList) -> CallToolResult:
-    """Wrap a SolverList as a complete-inventory text block plus structured output."""
-    return CallToolResult(
-        content=[TextContent(type="text", text=format_solver_list_content(result))],
-        structuredContent=result.model_dump(mode="json"),
-    )
-
-
-def _wrap_tabular_data_result(result: TabularData) -> CallToolResult:
-    """Wrap a TabularData as a bounded summary plus the full structured page."""
-    return CallToolResult(
-        content=[TextContent(type="text", text=format_tabular_data_content(result))],
+        content=[TextContent(type="text", text=formatter(result))],
         structuredContent=result.model_dump(mode="json"),
     )
 
@@ -486,22 +455,14 @@ def _run_cpsat_python_file_with_replay(
     """Run a CP-SAT Python file, always clearing/setting both protocol env vars.
 
     Tool-layer replay support for a saved seeded/configured artifact: builds
-    the child env overlay via ``seed_config_env`` so an absent ``seed``/
+    the child env overlay via ``replay_env_scope`` so an absent ``seed``/
     ``config`` explicitly clears ``OPENCONSTRAINT_MCP_CPSAT_SEED``/``_CONFIG``
     instead of leaking a value the server process happened to inherit. A
-    non-empty ``config`` is written to a temp file kept alive for the run
-    (mirroring the save path's ``TemporaryDirectory`` pattern in
-    ``pyexec/save.py``) and torn down on every exit path.
+    non-empty ``config`` is written to a temp file kept alive for the run and
+    torn down on every exit path.
     """
-    if config is not None:
-        with tempfile.TemporaryDirectory() as tmp_dir:
-            config_path = write_config_file(Path(tmp_dir), config)
-            env = seed_config_env(seed=seed, config_path=config_path)
-            return run_cpsat_python_file(
-                script_path, timeout_ms=timeout_ms, tracker=tracker, env=env
-            )
-    env = seed_config_env(seed=seed, config_path=None)
-    return run_cpsat_python_file(script_path, timeout_ms=timeout_ms, tracker=tracker, env=env)
+    with replay_env_scope(seed=seed, config=config) as env:
+        return run_cpsat_python_file(script_path, timeout_ms=timeout_ms, tracker=tracker, env=env)
 
 
 def create_mcp_server() -> FastMCP:
@@ -554,7 +515,7 @@ def create_mcp_server() -> FastMCP:
     # ValueError would be a real bug, not an actionable user message.
     @_as_mcp_error(RuntimeMissingError, MiniZincExecutionError)
     def list_available_solvers() -> Annotated[CallToolResult, SolverList]:
-        return _wrap_solver_list(list_solvers())
+        return _wrap_result(list_solvers(), format_solver_list_content)
 
     @mcp.tool(description=SOLVE_MINIZINC_MODEL_DESCRIPTION)
     @_as_mcp_error()
@@ -590,7 +551,7 @@ def create_mcp_server() -> FastMCP:
                 tracker=child_tracker,
             ),
         )
-        return _wrap_solve_result(result)
+        return _wrap_result(result, format_solve_result_content)
 
     @mcp.tool(description=CHECK_MINIZINC_MODEL_DESCRIPTION)
     @_as_mcp_error()
@@ -693,7 +654,7 @@ def create_mcp_server() -> FastMCP:
                 tracker=child_tracker,
             ),
         )
-        return _wrap_save_result(result)
+        return _wrap_result(result, format_save_result_content)
 
     @mcp.tool(description=CHECK_MINIZINC_FILES_DESCRIPTION)
     @_as_mcp_error()
@@ -773,7 +734,7 @@ def create_mcp_server() -> FastMCP:
                 tracker=child_tracker,
             ),
         )
-        return _wrap_solve_result(result)
+        return _wrap_result(result, format_solve_result_content)
 
     @mcp.tool(description=FIND_UNSAT_CORE_FILES_DESCRIPTION)
     @_as_mcp_error()
@@ -1034,7 +995,7 @@ def create_mcp_server() -> FastMCP:
                 tracker=child_tracker,
             ),
         )
-        return _wrap_cpsat_experiment_result(result)
+        return _wrap_result(result, format_cpsat_experiment_content)
 
     @mcp.tool(name="save_verified_cpsat_python", description=SAVE_VERIFIED_CPSAT_PYTHON_DESCRIPTION)
     @_as_mcp_error(ValueError)
@@ -1095,7 +1056,7 @@ def create_mcp_server() -> FastMCP:
                 max_rows=max_rows,
             )
         )
-        return _wrap_tabular_data_result(result)
+        return _wrap_result(result, format_tabular_data_content)
 
     @mcp.tool(name="write_tabular_result", description=WRITE_TABULAR_RESULT_DESCRIPTION)
     @_as_mcp_error(ValueError)
