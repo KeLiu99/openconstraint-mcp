@@ -67,16 +67,40 @@ def test_help_lists_all_commands() -> None:
 
 
 def test_stdio_command_delegates_to_server_run_stdio(monkeypatch: pytest.MonkeyPatch) -> None:
-    calls = {"n": 0}
+    # Bare `stdio` must delegate with the core profile — the user-facing default.
+    calls: list[str] = []
 
-    def _fake_run_stdio() -> None:
-        calls["n"] += 1
+    def _fake_run_stdio(toolset: str = "core") -> None:
+        calls.append(toolset)
 
     monkeypatch.setattr("openconstraint_mcp.server.run_stdio", _fake_run_stdio)
 
     result = runner.invoke(app, ["stdio"])
     assert result.exit_code == 0, result.output
-    assert calls["n"] == 1
+    assert calls == ["core"]
+
+
+def test_stdio_full_toolset_delegates_with_full(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls: list[str] = []
+
+    def _fake_run_stdio(toolset: str = "core") -> None:
+        calls.append(toolset)
+
+    monkeypatch.setattr("openconstraint_mcp.server.run_stdio", _fake_run_stdio)
+
+    result = runner.invoke(app, ["stdio", "--toolset", "full"])
+    assert result.exit_code == 0, result.output
+    assert calls == ["full"]
+
+
+def test_stdio_rejects_invalid_toolset() -> None:
+    # Typer validates the choice before the command body runs, so an invalid
+    # value fails with an actionable CLI error naming the accepted values.
+    result = runner.invoke(app, ["stdio", "--toolset", "typo"])
+    assert result.exit_code != 0
+    output = result.output.lower()
+    assert "core" in output
+    assert "full" in output
 
 
 def test_list_solvers_handles_execution_failure_cleanly(

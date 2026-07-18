@@ -144,6 +144,43 @@ MCP_SERVER_INSTRUCTIONS = (
     "arbitrary code."
 )
 
+# Core-profile server instructions: the default `stdio` toolset advertises only
+# the eight core tools, so these instructions name ONLY those tools and describe
+# the opt-in `--toolset full` surface generically. They must never name a
+# full-only tool or prompt — the metadata-budget test cross-checks this text
+# against the same forbidden set it scans the core tool payload with.
+MCP_SERVER_INSTRUCTIONS_CORE = (
+    "Use this MCP server for local constraint programming and optimization: "
+    "scheduling, rostering, knapsack, allocation, assignment, routing, "
+    "bin-packing, model validation, and solving. It offers two equal backends; "
+    "pick by problem shape. OR-Tools CP-SAT Python: zero-install (no managed "
+    "runtime needed), LLM-fluent, suits pure integer/scheduling problems, "
+    "imperative preprocessing, and custom data structures. MiniZinc: expressive "
+    "global constraints and `.dzn` data files run through the managed local "
+    "runtime. For MiniZinc, draft the model in the client LLM, check it with "
+    "check_minizinc_model, then solve with solve_minizinc_model; when the model "
+    "and data already exist as local files, pass their paths to "
+    "check_minizinc_files / solve_minizinc_files instead of pasting contents — "
+    "the path-based tools run from the model's directory, so a relative "
+    "`include` resolves. For CP-SAT, write a conforming script and run it with "
+    "run_cpsat_python (bounded child process: timeout, 1 MB output cap, "
+    "tree-kill), or run_cpsat_python_file for a script already on disk. Use "
+    "check_runtime to confirm the managed MiniZinc runtime is installed and "
+    "list_available_solvers to enumerate its solvers. Lead with the result: a "
+    "plain-language status, the solution stated in the terms of the user's "
+    "problem (not the raw JSON result), a compact item table when the problem "
+    "supplies item-like data, and the complete model-visible `Statistics:` "
+    "section when present — do not condense it to selected fields. MiniZinc "
+    "tools use the managed local MiniZinc runtime; never a remote solver or a "
+    "bare PATH minizinc. The CP-SAT Python tools execute user-provided Python "
+    "locally in an UNSANDBOXED child process — the server wrapper makes no "
+    "network calls, but the executed child is arbitrary code. This is the "
+    "default core toolset; advanced capabilities (model interface inspection, "
+    "unsatisfiable-core diagnostics, background jobs, solver portfolios, "
+    "explicit experiments, verified result saving, and tabular data I/O) are "
+    "available by launching the server with `--toolset full`."
+)
+
 CHECK_RUNTIME_DESCRIPTION = "Report whether the managed MiniZinc runtime is installed."
 
 LIST_AVAILABLE_SOLVERS_DESCRIPTION = (
@@ -179,7 +216,23 @@ LIST_AVAILABLE_SOLVERS_DESCRIPTION = (
     "is not printed by default — request it explicitly to surface it."
 )
 
-SOLVE_MINIZINC_MODEL_DESCRIPTION = (
+# Full-only hard-instance guidance. The full profile keeps the portfolio nudge;
+# the core profile (which hides `submit_portfolio_job`) swaps in a variant that
+# names no hidden tool. Both share the same description body above.
+_SOLVE_MZN_HARD_INSTANCE_FULL = (
+    "For a HARD "
+    "instance — status is unknown/timeout, or the best formulation/solver/seed "
+    "choice is unclear — consider `submit_portfolio_job` to race multiple "
+    "formulations, solvers, and seeds instead of one run; for an especially "
+    "hard instance, also consider the OR-Tools CP-SAT Python path "
+    "(`run_cpsat_python`) for the same problem."
+)
+_SOLVE_MZN_HARD_INSTANCE_CORE = (
+    "For an especially hard instance, also consider the OR-Tools CP-SAT Python "
+    "path (`run_cpsat_python`) for the same problem."
+)
+
+_SOLVE_MINIZINC_MODEL_BODY = (
     "Solve a complete MiniZinc model through the managed local runtime. `model` "
     "must be full source: declarations, constraints, exactly one `solve` "
     "statement, and an `output` block. Optional `data` is `.dzn` text run as a "
@@ -229,13 +282,11 @@ SOLVE_MINIZINC_MODEL_DESCRIPTION = (
     "NOT interpreted by the server — only a nested UNSATISFIABLE sets "
     "`violation`. The checker validates each solution but never proves "
     "optimality — `status` remains the proof of completeness/optimality. "
-    "`structuredContent` carries the complete SolveResult. For a HARD "
-    "instance — status is unknown/timeout, or the best formulation/solver/seed "
-    "choice is unclear — consider `submit_portfolio_job` to race multiple "
-    "formulations, solvers, and seeds instead of one run; for an especially "
-    "hard instance, also consider the OR-Tools CP-SAT Python path "
-    "(`run_cpsat_python`) for the same problem."
+    "`structuredContent` carries the complete SolveResult. "
 )
+
+SOLVE_MINIZINC_MODEL_DESCRIPTION = _SOLVE_MINIZINC_MODEL_BODY + _SOLVE_MZN_HARD_INSTANCE_FULL
+SOLVE_MINIZINC_MODEL_DESCRIPTION_CORE = _SOLVE_MINIZINC_MODEL_BODY + _SOLVE_MZN_HARD_INSTANCE_CORE
 
 CHECK_MINIZINC_MODEL_DESCRIPTION = (
     "Compile-check a complete MiniZinc model through the managed local runtime "
@@ -563,13 +614,20 @@ LIST_PORTFOLIO_JOBS_DESCRIPTION = (
     + _NO_ARGS_LIST_TOOL
 )
 
-RUN_CPSAT_PYTHON_DESCRIPTION = (
+_RUN_CPSAT_PYTHON_HEAD = (
     "Execute LLM-generated OR-Tools CP-SAT Python source in a bounded child "
     "process and return a structured CpsatPythonResult. The script runs under "
     "the same Python interpreter as the server, with `ortools` and the stdlib "
     "available. " + _CPSAT_JSON_CONTRACT + " "
     "Valid `status` values: `optimal`, `feasible`, `infeasible`, `unknown`, `error`. "
+)
+
+# Full-only: names the `solve_cpsat_python` prompt, which the core profile hides.
+_RUN_CPSAT_PYTHON_PROMPT_REF = (
     "Use the `solve_cpsat_python` prompt to generate conforming scripts. "
+)
+
+_RUN_CPSAT_PYTHON_MID = (
     "Returns a CpsatPythonResult: `status` (one of the above, or `timeout` if the "
     "process exceeded `timeout_ms`), `solution` (the parsed dict or null), "
     "`objective` (parsed float/int or null), `best_objective_bound` (parsed "
@@ -583,17 +641,37 @@ RUN_CPSAT_PYTHON_DESCRIPTION = (
     "On `timeout`, `solution`/`objective`/`best_objective_bound` carry the last "
     "intermediate result block the script printed (the child runs unbuffered, "
     "so a best-so-far emitted from a CpSolverSolutionCallback survives), else "
-    "null. For a HARD "
+    "null. "
+)
+
+# Full-only: names the `submit_portfolio_job` MiniZinc portfolio path, hidden in core.
+_RUN_CPSAT_PYTHON_PORTFOLIO_REF = (
+    "For a HARD "
     "instance — status is unknown/timeout, or incumbent quality is unclear — "
     "consider the MiniZinc portfolio path (`submit_portfolio_job`) to race "
-    "multiple formulations, solvers, and seeds for the same problem. This tool "
+    "multiple formulations, solvers, and seeds for the same problem. "
+)
+
+_RUN_CPSAT_PYTHON_TAIL = (
+    "This tool "
     "has no `seed`/`config` parameters; it always clears "
     "`OPENCONSTRAINT_MCP_CPSAT_SEED`/`OPENCONSTRAINT_MCP_CPSAT_CONFIG` for the "
     "child so a value inherited from the server's own launch environment cannot "
     "leak in. " + _CPSAT_CHILD_POSTURE
 )
 
-RUN_CPSAT_PYTHON_FILE_DESCRIPTION = (
+RUN_CPSAT_PYTHON_DESCRIPTION = (
+    _RUN_CPSAT_PYTHON_HEAD
+    + _RUN_CPSAT_PYTHON_PROMPT_REF
+    + _RUN_CPSAT_PYTHON_MID
+    + _RUN_CPSAT_PYTHON_PORTFOLIO_REF
+    + _RUN_CPSAT_PYTHON_TAIL
+)
+RUN_CPSAT_PYTHON_DESCRIPTION_CORE = (
+    _RUN_CPSAT_PYTHON_HEAD + _RUN_CPSAT_PYTHON_MID + _RUN_CPSAT_PYTHON_TAIL
+)
+
+_RUN_CPSAT_PYTHON_FILE_HEAD = (
     "Execute an OR-Tools CP-SAT Python script from a LOCAL file path — the "
     "path-based sibling of `run_cpsat_python`. Pass `script_path` instead of "
     "pasting the whole source, so iterating on a local file does not mean "
@@ -615,15 +693,43 @@ RUN_CPSAT_PYTHON_FILE_DESCRIPTION = (
     "instead of exporting environment variables by hand: `seed` sets "
     "`OPENCONSTRAINT_MCP_CPSAT_SEED`, and a non-empty `config` is written to a "
     "temp file whose path is set as `OPENCONSTRAINT_MCP_CPSAT_CONFIG` — the same "
-    "two cooperative, opt-in protocols as `save_verified_cpsat_python`'s "
-    "`seed`/`config`. An empty `config` (`{}`) is identical to omitting it. "
+    "two cooperative, opt-in "
+)
+
+# Full-only: both fragments name `save_verified_cpsat_python`, hidden in core.
+# The core protocols phrase drops the cross-tool reference; the checked-replay
+# sentence is dropped entirely (its whole subject is the hidden save tool).
+_RUN_CPSAT_PYTHON_FILE_PROTOCOLS_FULL = "protocols as `save_verified_cpsat_python`'s "
+_RUN_CPSAT_PYTHON_FILE_PROTOCOLS_CORE = "`seed`/`config` protocols. "
+
+_RUN_CPSAT_PYTHON_FILE_MID = (
+    "An empty `config` (`{}`) is identical to omitting it. "
     "When `seed`/`config` are omitted, both protocol environment variables are "
     "explicitly cleared for the child rather than left to inherit a stale value "
-    "from the server's own launch environment. This tool has no checker "
+    "from the server's own launch environment. "
+)
+
+_RUN_CPSAT_PYTHON_FILE_CHECKED_REPLAY_FULL = (
+    "This tool has no checker "
     "parameter: replaying a `checked`-level save this way only re-verifies at "
     "the `reported` level; for full checked replay, call "
     "`save_verified_cpsat_python` with the saved source/checker/seed/config and "
-    "a scratch `target_dir`. " + _CPSAT_CHILD_POSTURE
+    "a scratch `target_dir`. "
+)
+
+RUN_CPSAT_PYTHON_FILE_DESCRIPTION = (
+    _RUN_CPSAT_PYTHON_FILE_HEAD
+    + _RUN_CPSAT_PYTHON_FILE_PROTOCOLS_FULL
+    + "`seed`/`config`. "
+    + _RUN_CPSAT_PYTHON_FILE_MID
+    + _RUN_CPSAT_PYTHON_FILE_CHECKED_REPLAY_FULL
+    + _CPSAT_CHILD_POSTURE
+)
+RUN_CPSAT_PYTHON_FILE_DESCRIPTION_CORE = (
+    _RUN_CPSAT_PYTHON_FILE_HEAD
+    + _RUN_CPSAT_PYTHON_FILE_PROTOCOLS_CORE
+    + _RUN_CPSAT_PYTHON_FILE_MID
+    + _CPSAT_CHILD_POSTURE
 )
 
 SOLVE_CONSTRAINT_PROBLEM_PROMPT_DESCRIPTION = (

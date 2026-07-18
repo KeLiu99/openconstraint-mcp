@@ -8,7 +8,7 @@ from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import AbstractAsyncContextManager, asynccontextmanager
 from importlib import metadata
 from pathlib import Path
-from typing import Annotated, Any, ParamSpec, TypeVar, cast
+from typing import Annotated, Any, Literal, ParamSpec, TypeVar, cast
 
 from anyio import to_thread
 from mcp.server.fastmcp import Context, FastMCP
@@ -57,15 +57,19 @@ from .protocol_text.descriptions import (
     LIST_SOLVE_JOBS_DESCRIPTION,
     LOAD_TABULAR_DATA_DESCRIPTION,
     MCP_SERVER_INSTRUCTIONS,
+    MCP_SERVER_INSTRUCTIONS_CORE,
     RUN_CPSAT_PYTHON_DESCRIPTION,
+    RUN_CPSAT_PYTHON_DESCRIPTION_CORE,
     RUN_CPSAT_PYTHON_EXPERIMENT_DESCRIPTION,
     RUN_CPSAT_PYTHON_FILE_DESCRIPTION,
+    RUN_CPSAT_PYTHON_FILE_DESCRIPTION_CORE,
     SAVE_VERIFIED_CPSAT_PYTHON_DESCRIPTION,
     SAVE_VERIFIED_MINIZINC_MODEL_DESCRIPTION,
     SOLVE_CONSTRAINT_PROBLEM_PROMPT_DESCRIPTION,
     SOLVE_CPSAT_PYTHON_PROMPT_DESCRIPTION,
     SOLVE_MINIZINC_FILES_DESCRIPTION,
     SOLVE_MINIZINC_MODEL_DESCRIPTION,
+    SOLVE_MINIZINC_MODEL_DESCRIPTION_CORE,
     SUBMIT_CPSAT_PYTHON_FILE_JOB_DESCRIPTION,
     SUBMIT_CPSAT_PYTHON_JOB_DESCRIPTION,
     SUBMIT_PORTFOLIO_JOB_DESCRIPTION,
@@ -123,6 +127,47 @@ from .shared.job_errors import JobRejectedError
 from .shared.tabular_io import DEFAULT_MAX_ROWS, read_tabular_data, write_tabular_data
 
 _PACKAGE_NAME = "openconstraint-mcp"
+
+# The advertised MCP toolset. `full` (the internal default) registers every tool
+# and prompt; `core` (the user-facing `stdio` default) advertises only eight core
+# tools and no prompts, for a materially smaller `tools/list` payload and a less
+# ambiguous default choice set.
+Toolset = Literal["core", "full"]
+_VALID_TOOLSETS: tuple[Toolset, ...] = ("core", "full")
+
+# Every tool the core profile removes after registration. Static (not derived via
+# `asyncio.run(mcp.list_tools())`, which raises inside the running event loop the
+# tests build the server in). Two nets guard drift: `remove_tool()` raises
+# `ToolError` on an unknown name, so a renamed/deleted tool breaks core
+# construction loudly, and the exact-set tests catch a new tool leaking into
+# core. MAINTENANCE RULE: a newly registered tool must be added here unless it is
+# deliberately core.
+_FULL_ONLY_TOOL_NAMES = frozenset(
+    {
+        "inspect_minizinc_model",
+        "find_unsat_core",
+        "save_verified_minizinc_model",
+        "inspect_minizinc_files",
+        "find_unsat_core_files",
+        "submit_solve_job",
+        "get_solve_job",
+        "cancel_solve_job",
+        "list_solve_jobs",
+        "submit_portfolio_job",
+        "get_portfolio_job",
+        "cancel_portfolio_job",
+        "list_portfolio_jobs",
+        "submit_cpsat_python_job",
+        "submit_cpsat_python_file_job",
+        "get_cpsat_python_job",
+        "cancel_cpsat_python_job",
+        "list_cpsat_python_jobs",
+        "run_cpsat_python_experiment",
+        "save_verified_cpsat_python",
+        "load_tabular_data",
+        "write_tabular_result",
+    }
+)
 
 
 def _homepage_url() -> str | None:
@@ -465,8 +510,36 @@ def _run_cpsat_python_file_with_replay(
         return run_cpsat_python_file(script_path, timeout_ms=timeout_ms, tracker=tracker, env=env)
 
 
-def create_mcp_server() -> FastMCP:
-    """Build a fresh FastMCP server and register all tools and prompts."""
+def create_mcp_server(toolset: str = "full") -> FastMCP:
+    """Build a fresh FastMCP server for the given ``toolset``.
+
+    ``full`` (the default, for internal callers and existing tests) registers
+    every tool and all three prompts. ``core`` registers the same surface, then
+    removes every tool in ``_FULL_ONLY_TOOL_NAMES`` and skips the prompts, so the
+    advertised ``tools/list`` payload is the eight core tools only. The user-
+    facing ``stdio`` default is ``core``, enforced by ``run_stdio`` and the CLI.
+    An unknown value is rejected before any server object is built.
+    """
+    if toolset not in _VALID_TOOLSETS:
+        valid = ", ".join(repr(t) for t in _VALID_TOOLSETS)
+        raise ValueError(f"toolset must be one of {valid}; got {toolset!r}")
+    is_core = toolset == "core"
+
+    # Core hides the tools/prompts these three descriptions cross-reference, so
+    # it advertises portfolio/prompt/save-free description variants; the server
+    # instructions likewise name only the core tools. Full keeps every string
+    # unchanged.
+    instructions = MCP_SERVER_INSTRUCTIONS_CORE if is_core else MCP_SERVER_INSTRUCTIONS
+    solve_minizinc_model_desc = (
+        SOLVE_MINIZINC_MODEL_DESCRIPTION_CORE if is_core else SOLVE_MINIZINC_MODEL_DESCRIPTION
+    )
+    run_cpsat_python_desc = (
+        RUN_CPSAT_PYTHON_DESCRIPTION_CORE if is_core else RUN_CPSAT_PYTHON_DESCRIPTION
+    )
+    run_cpsat_python_file_desc = (
+        RUN_CPSAT_PYTHON_FILE_DESCRIPTION_CORE if is_core else RUN_CPSAT_PYTHON_FILE_DESCRIPTION
+    )
+
     # The single server-owned job registry (D1.1): one instance per server,
     # captured by the job-tool closures and torn down by the lifespan. This is
     # the deliberate, bounded exception to "no global mutable state". The three
@@ -501,7 +574,7 @@ def create_mcp_server() -> FastMCP:
     child_tracker = ChildProcessTracker()
     mcp: FastMCP[Any] = FastMCP(
         "openconstraint-mcp",
-        instructions=MCP_SERVER_INSTRUCTIONS,
+        instructions=instructions,
         website_url=_homepage_url(),
         lifespan=_make_lifespan(registry, cpsat_registry, child_tracker),
     )
@@ -517,7 +590,7 @@ def create_mcp_server() -> FastMCP:
     def list_available_solvers() -> Annotated[CallToolResult, SolverList]:
         return _wrap_result(list_solvers(), format_solver_list_content)
 
-    @mcp.tool(description=SOLVE_MINIZINC_MODEL_DESCRIPTION)
+    @mcp.tool(description=solve_minizinc_model_desc)
     @_as_mcp_error()
     async def solve_minizinc_model(
         model: str,
@@ -916,7 +989,7 @@ def create_mcp_server() -> FastMCP:
     def list_cpsat_python_jobs() -> list[CpsatPythonJobStatus]:
         return cpsat_registry.list()
 
-    @mcp.tool(name="run_cpsat_python", description=RUN_CPSAT_PYTHON_DESCRIPTION)
+    @mcp.tool(name="run_cpsat_python", description=run_cpsat_python_desc)
     @_as_mcp_error(ValueError)
     async def run_cpsat_python_tool(
         source: str,
@@ -939,7 +1012,7 @@ def create_mcp_server() -> FastMCP:
             ),
         )
 
-    @mcp.tool(name="run_cpsat_python_file", description=RUN_CPSAT_PYTHON_FILE_DESCRIPTION)
+    @mcp.tool(name="run_cpsat_python_file", description=run_cpsat_python_file_desc)
     @_as_mcp_error(ValueError)
     async def run_cpsat_python_file_tool(
         script_path: str,
@@ -1076,6 +1149,17 @@ def create_mcp_server() -> FastMCP:
             )
         )
 
+    if is_core:
+        # Finalize the core profile before any client connects: drop every
+        # full-only tool and register no prompts (they reference save,
+        # portfolio, experiment, inspection, and job tools core hides).
+        # remove_tool() raises ToolError on an unknown name, so a rename or
+        # deletion upstream breaks core construction loudly instead of silently
+        # drifting.
+        for name in _FULL_ONLY_TOOL_NAMES:
+            mcp.remove_tool(name)
+        return mcp
+
     @mcp.prompt(
         name="solve_constraint_problem",
         description=SOLVE_CONSTRAINT_PROBLEM_PROMPT_DESCRIPTION,
@@ -1100,6 +1184,11 @@ def create_mcp_server() -> FastMCP:
     return mcp
 
 
-def run_stdio() -> None:
-    """Create the MCP server and run it over stdio for CLI/client use."""
-    create_mcp_server().run(transport="stdio")
+def run_stdio(toolset: str = "core") -> None:
+    """Create the MCP server and run it over stdio for CLI/client use.
+
+    Defaults to the ``core`` profile: the user-facing ``stdio`` entry point
+    advertises the eight core tools only. Pass ``full`` for the complete
+    tool and three-prompt surface.
+    """
+    create_mcp_server(toolset).run(transport="stdio")
