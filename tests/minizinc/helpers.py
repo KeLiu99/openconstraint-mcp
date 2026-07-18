@@ -1,8 +1,9 @@
 from __future__ import annotations
 
 import json
-import subprocess
 from typing import Any
+
+from openconstraint_mcp.shared.childrun import ChildExecutionResult
 
 # Shared `--json-stream` test fixtures for the MiniZinc solve/checker parsers and
 # the MCP tools that wrap them. The pinned managed runtime (MiniZinc 2.9.7) emits
@@ -15,65 +16,41 @@ from typing import Any
 # the fixtures in `tests/conftest.py`.
 
 
-class FakeCompletedProcess:
-    """Stand-in for the ``subprocess.Popen`` handle the MiniZinc runner drives.
+def child_result(
+    *,
+    stdout: str = "",
+    stderr: str = "",
+    returncode: int = 0,
+    timed_out: bool = False,
+    truncated: bool = False,
+    truncation_killed: bool = False,
+    duration_ms: int = 5,
+) -> ChildExecutionResult:
+    """Canned raw executor outcome — the shape ``minizinc.core.execute_child`` returns.
 
-    ``_invoke_minizinc`` launches via the shared ``popen_process_group`` launcher
-    and reads the result through ``communicate``/``returncode`` (a ``Popen`` handle
-    rather than ``subprocess.run`` so the live child can be registered with the
-    teardown tracker). Tests patch ``core.popen_process_group`` to return one of
-    these; it exposes exactly what the runner touches: ``communicate`` (returning
-    the captured ``stdout``/``stderr``), ``returncode``, ``poll`` (non-``None`` so
-    a tree-kill on this fake is a no-op), ``pid``, and the context-manager protocol.
+    MiniZinc's runners now drive the shared capped executor (``shared.childrun``)
+    rather than a bare ``Popen``. Tests patch ``minizinc.core.execute_child`` to
+    return one of these instead of faking a ``Popen`` handle; the timeout / output
+    cap / tree-kill loop itself is covered once, in ``tests/shared/test_childrun.py``.
 
-    With ``timeout=True`` the first ``communicate`` raises ``TimeoutExpired`` (the
-    runner then tree-kills and drains a second ``communicate``, which returns the
-    partial ``stdout``) — the way a real wall-clock-cap firing is exercised. The
-    timeout passed to ``communicate`` is recorded on ``communicate_timeout`` (and,
-    when the recording helpers attach a call record, into that record) so a test
-    can assert the outer grace window.
+    ``return_code`` is forced to ``None`` when ``timed_out=True`` — a test sentinel,
+    NOT the executor's contract: the real ``execute_child`` keeps a killed child's
+    signal-derived code (e.g. ``-15`` for SIGTERM), and the ``_RunOutcome`` adapter
+    is what maps a timeout to ``return_code=None`` (its timeout branch never reads
+    the child's code). ``truncated=True`` marks an output-cap overrun;
+    ``truncation_killed=True`` additionally marks that the cap branch requested tree
+    termination while the child was last seen running (as opposed to a burst writer
+    that overran the cap but exited before the loop observed it).
     """
-
-    def __init__(self, stdout: str, stderr: str, returncode: int, *, timeout: bool = False) -> None:
-        self.stdout = stdout
-        self.stderr = stderr
-        self.returncode = returncode
-        self.pid = 4321
-        self._timeout = timeout
-        self._communicate_calls = 0
-        self.communicate_timeout: float | None = None
-        self._record: dict[str, Any] | None = None
-
-    def poll(self) -> int | None:
-        # Non-None → terminate_process_tree treats the fake as already-exited, so
-        # the timeout path never reaches os.getpgid/killpg on a fake pid.
-        return self.returncode
-
-    def wait(self, timeout: float | None = None) -> int:
-        return self.returncode
-
-    def terminate(self) -> None:
-        pass
-
-    def kill(self) -> None:
-        pass
-
-    def communicate(self, timeout: float | None = None) -> tuple[str, str]:
-        self._communicate_calls += 1
-        self.communicate_timeout = timeout
-        if self._record is not None:
-            self._record["communicate_timeout"] = timeout
-        if self._timeout and self._communicate_calls == 1:
-            raise subprocess.TimeoutExpired(
-                cmd="minizinc", timeout=timeout or 0, output=self.stdout, stderr=self.stderr
-            )
-        return self.stdout, self.stderr
-
-    def __enter__(self) -> FakeCompletedProcess:
-        return self
-
-    def __exit__(self, *exc: object) -> bool:
-        return False
+    return ChildExecutionResult(
+        stdout=stdout,
+        stderr=stderr,
+        return_code=None if timed_out else returncode,
+        timed_out=timed_out,
+        truncated=truncated,
+        truncation_killed=truncation_killed,
+        duration_ms=duration_ms,
+    )
 
 
 def stream(*objects: dict[str, Any]) -> str:

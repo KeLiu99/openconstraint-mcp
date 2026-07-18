@@ -16,8 +16,9 @@ Checker output protocol: the checker must print, as its final stdout line,
 one JSON object:
     {"status": "accepted" | "rejected" | "error", "errors": [...], "details": {...}}
 
-Imports only: ``runner`` (shared executor), ``schemas`` (checker report type),
-and ``childproc`` (tracker type). Never imports ``minizinc`` or ``runtime``.
+Imports only: ``shared.childrun`` (shared executor), ``schemas`` (checker
+report type), and ``childproc`` (tracker type). Never imports ``minizinc`` or
+``runtime``.
 """
 
 from __future__ import annotations
@@ -32,8 +33,8 @@ from typing import TypedDict
 
 from ..schemas.cpsat import CpsatCheckerReport, CpsatPythonResult
 from ..shared.childproc import ChildProcessTracker
+from ..shared.childrun import execute_child
 from .diagnostics import checker_report_diagnostic
-from .runner import execute_child
 
 _ACCEPTED_STATUS = "accepted"
 _REJECTED_STATUS = "rejected"

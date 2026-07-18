@@ -203,7 +203,7 @@ first line, `Diagnostic: <category> — <message>`, in the error text.
 | `cancelled` | a job was cancelled | resubmit if still needed |
 | `job_failed` | a background job failed with no result | read `message`; fix inputs and resubmit |
 | `child_process_error` | the CP-SAT child failed or broke its output contract | fix the script; check `stderr`/`return_code` |
-| `output_truncated` | the child's output exceeded the byte cap | reduce printed output |
+| `output_truncated` | the child's output exceeded the 1 MiB cap (CP-SAT or MiniZinc) and was truncated | reduce printed output, or page a MiniZinc enumeration with `num_solutions` |
 | `invalid_save_target` | the save `target_dir` is invalid/occupied | pick an absolute, empty/owned dir; pass `overwrite=true` |
 | `not_verified` | a save/verification gate rejected the result | address the gate (objective/checker) and retry |
 | `checker_failed` | the solution checker rejected/errored/timed out | inspect `checker`; fix the solution or checker |
@@ -297,6 +297,12 @@ produced solution against a checker model without changing result shape:
     exists (that is only known after solving).
   - `solver: str` — the solver the model was flattened for, echoed from
     the request.
+  - `truncated: bool` — `true` when the child's combined stdout+stderr
+    exceeded the **1 MiB** output cap (same contract as
+    `solve_minizinc_model`'s `truncated`): `stdout`/`stderr` are partial and
+    the `diagnostic` is `output_truncated`. The `status` stays return-code
+    driven, so a clean exit that overran the cap is still `"ok"` — the
+    compile verdict holds even when the captured output does not.
   - `stdout: str` — the runtime's raw stdout (normally empty on a clean
     compile).
   - `stderr: str` — the runtime's raw stderr (compile diagnostics and
@@ -369,6 +375,9 @@ produced solution against a checker model without changing result shape:
     text); variable domains and parameter ranges (e.g. `1..n`) are not reported;
     array index sets are not reported, only the `dim` count; and `tuple`/`record`
     entries carry only the tag, not their component types.
+  - `truncated: bool` — output-cap overrun flag, same contract as
+    `check_minizinc_model`'s `truncated` (`stdout`/`stderr` partial,
+    `diagnostic` is `output_truncated`).
   - `stdout: str` / `stderr: str` — the runtime's raw output. A *successful*
     inspection may still emit warnings to `stderr`, so `status="ok"` does not
     depend on empty `stderr`.
@@ -439,10 +448,28 @@ produced solution against a checker model without changing result shape:
   - `solver: str` — the solver name that ran, echoed from the request.
   - `return_code: int | None` — the managed binary's subprocess return code,
     or `null` when the outer subprocess timeout fired before a real return
-    code existed (so `null` on `status="timeout"`).
+    code existed (so `null` on `status="timeout"`), **or** when the output cap
+    tree-killed the child — that exit code is the server's artifact rather
+    than the model's. A fast writer that overran the cap but exited on its own
+    keeps its genuine exit code (`truncated=true` with a non-null
+    `return_code`).
   - `timed_out: bool` — `true` when the subprocess wall-clock cap fired. This
     is explicit process-timeout metadata; today it is redundant with
     `status="timeout"`, not a new independent solver signal.
+  - `truncated: bool` — `true` when the child's combined stdout+stderr exceeded
+    the **1 MiB** output cap (the same cap and file-backed capture the CP-SAT
+    runner uses). The process tree is killed if still running, but a fast
+    writer can overrun the cap and exit cleanly before the executor's poll
+    loop sees it. Partial parsed solutions are
+    **kept** (each `--json-stream` line is a complete record) and the
+    `diagnostic` is `output_truncated` either way. On a cap tree-kill,
+    `return_code` is `null` and `status` is the stream's verdict if one
+    arrived else `satisfied` when solutions survived else `unknown` (never the
+    rc-derived `error`); a clean-exit overrun instead keeps its genuine
+    `return_code` and can still classify as the rc-derived `error`. A trivially reachable trigger is
+    `all_solutions=true` enumeration on a high-cardinality satisfaction model;
+    page with `num_solutions` on `org.gecode.gecode`/`org.chuffed.chuffed`, or
+    reduce the model's `output`.
   - `stdout: str` — the human-readable solution text, **reconstructed** from
     the solve stream's `default` output sections (one solution's `output`
     block per block). When a model declares no explicit `output` item the
@@ -549,6 +576,11 @@ produced solution against a checker model without changing result shape:
     from the submitted model, each with `line`, `column`, `end_line`,
     `end_column`, and `source`. This may be empty even when a MUS was found.
   - `message: str` — short run-specific summary.
+  - `truncated: bool` — output-cap overrun flag, same contract as
+    `check_minizinc_model`'s `truncated`. A truncated findMUS transcript may
+    have lost MUS lines beyond the cap, so a `no_core` (or even `mus_found`)
+    verdict parsed from it may be incomplete — the `diagnostic` is
+    `output_truncated` rather than the verdict's usual category.
   - `stdout: str` — raw findMUS output, preserved verbatim and authoritative.
   - `stderr: str` — raw runtime diagnostics.
   - `elapsed_ms: int` — wall-clock duration of the subprocess call.

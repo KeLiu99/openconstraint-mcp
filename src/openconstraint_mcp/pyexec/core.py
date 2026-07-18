@@ -70,9 +70,9 @@ from typing import Any
 
 from ..schemas.cpsat import CpsatPythonResult, CpsatStatus
 from ..shared.childproc import ChildProcessTracker
+from ..shared.childrun import ChildExecutionResult, execute_child
 from ..shared.save_target import text_sha256
 from .diagnostics import cpsat_result_diagnostic
-from .runner import ChildExecutionResult, execute_child
 from .runner import python_script_argv as _python_script_argv
 
 DEFAULT_PYEXEC_TIMEOUT_MS: int = 30_000
@@ -381,8 +381,9 @@ def run_cpsat_python(
 
     Writes ``source`` to a temporary file, runs it with ``sys.executable``
     (the server's own venv, which ships ``ortools``), and captures stdout/stderr
-    to bounded temp files (max ``MAX_OUTPUT_BYTES`` each). Returns a
-    ``CpsatPythonResult`` with the parsed solution and execution metadata.
+    to bounded temp files sharing a combined ``MAX_OUTPUT_BYTES`` budget
+    (stderr gets what stdout leaves). Returns a ``CpsatPythonResult`` with the
+    parsed solution and execution metadata.
 
     Raises ``ValueError`` on a non-positive ``timeout_ms`` — matching the
     MiniZinc path's ``validate_model_and_timeout`` so a zero/negative cap is
@@ -390,8 +391,8 @@ def run_cpsat_python(
 
     When a ``tracker`` is supplied (the server's per-run child tracker), the live
     child is registered for the duration of the run so an abrupt server teardown
-    can terminate it instead of orphaning it; it is unregistered on every exit
-    path (clean, timeout-kill, or output-cap kill).
+    can terminate it instead of orphaning it. A reaped leader is unregistered;
+    one that survives termination stays registered for teardown to retry.
 
     ``env`` is an INTERNAL environment overlay merged on top of the parent's
     environment for the child (callers are the experiment attempt runner and

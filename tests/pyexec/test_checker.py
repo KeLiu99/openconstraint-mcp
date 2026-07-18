@@ -8,8 +8,8 @@ from unittest.mock import patch
 
 import pytest
 
-from openconstraint_mcp.pyexec.runner import ChildExecutionResult
 from openconstraint_mcp.schemas.cpsat import CpsatCheckerReport, CpsatPythonResult
+from openconstraint_mcp.shared.childrun import ChildExecutionResult
 
 _OPTIMAL_RESULT = CpsatPythonResult(
     status="optimal",

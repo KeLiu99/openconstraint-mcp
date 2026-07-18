@@ -28,7 +28,7 @@ test:
 pytest *args:
     uv run pytest {{args}}
 
-# Run real-runtime integration tests.
+# Run integration tests using real subprocesses, platform behavior, or a managed runtime.
 integration:
     uv run pytest -m integration -v
 

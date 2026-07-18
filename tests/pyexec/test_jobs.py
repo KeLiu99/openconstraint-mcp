@@ -36,12 +36,22 @@ def _cpsat_result(
 class _FakeProc:
     """Stand-in Popen handle passed through on_start/terminate.
 
-    ``poll`` reports exited so the real ``terminate_process_tree`` is a no-op
-    on handles that survive their run in tests that don't mock termination.
+    It has no ``pid`` and backs no real process, so the real (group-aware)
+    ``_terminate_process_tree`` must never see it — the autouse
+    ``_never_terminate_for_real`` fixture below guarantees that.
     """
 
-    def poll(self) -> int:
-        return 0
+
+@pytest.fixture(autouse=True)
+def _never_terminate_for_real(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Every proc in this file is a ``_FakeProc``; the real group-aware
+    terminate would probe ``os.getpgid``/``os.killpg`` on it. Tests that
+    assert termination re-patch a recorder over this via ``_patch_terminate``.
+    """
+    monkeypatch.setattr(
+        "openconstraint_mcp.pyexec.jobs._terminate_process_tree",
+        lambda proc, **kwargs: None,
+    )
 
 
 def _patch_run_source(monkeypatch: pytest.MonkeyPatch, fake: Any) -> None:

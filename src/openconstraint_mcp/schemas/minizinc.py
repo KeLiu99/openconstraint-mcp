@@ -106,6 +106,16 @@ class SolveResult(BaseModel):
     solver: str
     return_code: int | None
     timed_out: bool
+    # True when the child's combined stdout+stderr exceeded the 1 MiB output cap.
+    # Tree termination is requested if the child was last seen running, but a burst
+    # writer can overrun the cap and exit on its own before the poll loop observes it.
+    # Partial parsed solutions are kept (each json-stream line is complete).
+    # `return_code` is None when the cap branch requested termination (the child was
+    # last seen running, so its exit code may be the executor's artifact, not the
+    # model's); an overrun the loop never observed, where the child exited on its
+    # own (with ANY code), keeps its genuine code.
+    # The structured diagnostic is `output_truncated` either way.
+    truncated: bool = False
     stdout: str
     stderr: str
     elapsed_ms: int
@@ -205,6 +215,13 @@ CheckStatus = Literal[
 class CheckResult(BaseModel):
     status: CheckStatus
     solver: str
+    # True when the child's combined stdout+stderr exceeded the 1 MiB output cap
+    # (same contract as `SolveResult.truncated`): stdout/stderr are partial and
+    # the diagnostic is `output_truncated`. `status` stays rc-driven — a burst
+    # writer can overrun the cap and still exit 0, so `ok` and truncation coexist,
+    # while a cap tree-kill surfaces as `error` (deliberate fail-closed: the
+    # server never claims a compile it killed succeeded — no solve-style masking).
+    truncated: bool = False
     stdout: str
     stderr: str
     elapsed_ms: int
@@ -305,6 +322,8 @@ class ModelInspectionResult(BaseModel):
     status: InspectStatus
     solver: str
     interface: ModelInterface | None = None
+    # Output-cap overrun flag; same contract as `CheckResult.truncated`.
+    truncated: bool = False
     stdout: str
     stderr: str
     elapsed_ms: int
@@ -333,11 +352,19 @@ class UnsatCoreResult(BaseModel):
     best-effort structured view and may be empty even when status is
     "mus_found". `no_core` means findMUS finished without reporting a MUS,
     NOT that the model is satisfiable — a tight `timeout_ms` can also surface
-    as `no_core` (findMUS may stop at its own --time-limit with rc 0).
+    as `no_core` (findMUS may stop at its own --time-limit with rc 0), as can
+    an output-cap tree-kill with no MUS in the capped transcript (the kill's
+    exit code is the server's artifact, so it is masked rather than reported
+    as `error`).
     Clients branch on `status`; there is no derived `core_found` flag.
+    `truncated` is the output-cap overrun flag (same contract as
+    `CheckResult.truncated`); a truncated transcript may have lost MUS lines,
+    so a `no_core`/`mus_found` verdict parsed from it may be incomplete —
+    the diagnostic is `output_truncated`.
     """
 
     status: UnsatCoreStatus
+    truncated: bool = False
     core: list[UnsatCoreConstraint] = Field(
         default_factory=list,
         description=(

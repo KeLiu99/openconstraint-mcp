@@ -1,9 +1,7 @@
 from __future__ import annotations
 
 import json
-import signal
 import subprocess
-import sys
 from pathlib import Path
 from typing import Any
 
@@ -25,7 +23,9 @@ from openconstraint_mcp.minizinc.core import (
     DEFAULT_UNSAT_CORE_TIMEOUT_MS,
     FINDMUS_SOLVER,
     MiniZincExecutionError,
+    _build_solve_result,
     _run_managed_minizinc_cancellable,
+    _RunOutcome,
     _solver_capabilities,
     check_model,
     find_unsat_core,
@@ -50,6 +50,7 @@ from openconstraint_mcp.schemas.portfolio import (
     PortfolioSolveControls,
     PortfolioSolveResult,
 )
+from openconstraint_mcp.shared.childrun import ChildExecutionResult
 from openconstraint_mcp.shared.save_target import EXPERIMENT_LOG_FILENAME, text_sha256
 from tests.minizinc.helpers import (
     STREAM_ERROR,
@@ -59,9 +60,9 @@ from tests.minizinc.helpers import (
     STREAM_UNSAT,
     UNSAT_CORE_MODEL,
     UNSAT_CORE_STDOUT,
-    FakeCompletedProcess,
     checker_pass,
     checker_violation,
+    child_result,
     solution_obj,
     solution_obj_json_only,
     stream,
@@ -284,21 +285,29 @@ def test_solver_capabilities_malformed_std_flags_allowlisted_keeps_num_solutions
 
 
 def _record_subprocess(
-    monkeypatch: pytest.MonkeyPatch, completed: FakeCompletedProcess
+    monkeypatch: pytest.MonkeyPatch, completed: ChildExecutionResult
 ) -> list[dict[str, Any]]:
-    """Patch subprocess.run to record args/kwargs and return ``completed``.
+    """Patch ``minizinc.core.execute_child`` to record the call and return ``completed``.
 
-    Captures the cmd, kwargs, model-file existence, model-file contents, and —
-    when a positional ``data.dzn`` or flagged ``checker.mzc.mzn`` is present —
-    their contents at the moment ``subprocess.run`` was called. The model/data
-    files are positional (model last, or second-last before data); checker files
-    live in the flags slot and may also end in ``.mzn``. ``solve_model`` deletes
-    the temp dir on return, so post-call reads would race the cleanup.
+    Captures the argv, run directory, the executor timeout budget (``timeout_ms`` =
+    the model's ``--time-limit`` plus the outer grace), the forwarded
+    tracker/on_start, and the model/data/checker file contents read from the argv at
+    call time (the runner deletes the temp dir on return, so post-call reads would
+    race the cleanup). The ``args``/``kwargs`` keys mirror the old popen-record shape
+    — ``args[0]`` is the argv, ``kwargs['cwd']`` the run directory — so the existing
+    argv/cwd assertions read unchanged.
     """
     calls: list[dict[str, Any]] = []
 
-    def _fake_run(*args: Any, **kwargs: Any) -> FakeCompletedProcess:
-        cmd = args[0]
+    def _fake_run(
+        argv: list[str],
+        cwd: Any,
+        *,
+        timeout_ms: int,
+        tracker: Any = None,
+        on_start: Any = None,
+    ) -> ChildExecutionResult:
+        cmd = list(argv)
         data_path = Path(cmd[-1]) if str(cmd[-1]).endswith(".dzn") else None
         model_path = Path(cmd[-2]) if data_path is not None else Path(cmd[-1])
         checker_path: Path | None = None
@@ -310,23 +319,25 @@ def _record_subprocess(
         checker_contents: str | None = None
         if checker_path is not None and checker_path.is_file():
             checker_contents = checker_path.read_text()
-        record = {
-            "args": args,
-            "kwargs": kwargs,
-            "model_path": str(model_path),
-            "model_path_existed": model_path.is_file(),
-            "model_contents": (model_path.read_text() if model_path.is_file() else None),
-            "data_contents": data_contents,
-            "checker_contents": checker_contents,
-        }
-        # The runner now drives a Popen and passes the wall-clock cap to
-        # communicate(); the fake stamps it into the record so the outer-grace
-        # tests can read calls[0]["communicate_timeout"].
-        completed._record = record
-        calls.append(record)
+        calls.append(
+            {
+                "args": (cmd,),
+                "kwargs": {"cwd": str(cwd)},
+                "argv": cmd,
+                "cwd": str(cwd),
+                "timeout_ms": timeout_ms,
+                "tracker": tracker,
+                "on_start": on_start,
+                "model_path": str(model_path),
+                "model_path_existed": model_path.is_file(),
+                "model_contents": (model_path.read_text() if model_path.is_file() else None),
+                "data_contents": data_contents,
+                "checker_contents": checker_contents,
+            }
+        )
         return completed
 
-    monkeypatch.setattr("openconstraint_mcp.minizinc.core.popen_process_group", _fake_run)
+    monkeypatch.setattr("openconstraint_mcp.minizinc.core.execute_child", _fake_run)
     return calls
 
 
@@ -343,34 +354,32 @@ class _SpyTracker:
         self.events.append(("unregister", proc))
 
 
-def test_solve_model_registers_then_unregisters_child_with_tracker(
+def test_solve_model_forwards_tracker_to_executor(
     fake_minizinc_binary: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    # The synchronous solve registers its live child for the duration of the run
-    # so the lifespan can terminate it on teardown, then drops it on completion.
-    completed = FakeCompletedProcess(stdout=STREAM_SATISFY, stderr="", returncode=0)
-    _record_subprocess(monkeypatch, completed)
+    # The synchronous solve forwards its tracker to the shared executor, which owns
+    # the register/unregister lifecycle (proven in tests/shared/test_childrun.py) so
+    # the lifespan can terminate the live child on teardown.
+    calls = _record_subprocess(monkeypatch, child_result(stdout=STREAM_SATISFY, returncode=0))
     spy = _SpyTracker()
 
     solve_model("solve satisfy;", tracker=spy)
 
-    assert [name for name, _ in spy.events] == ["register", "unregister"]
-    assert spy.events[0][1] is completed  # the live handle, registered then dropped
+    assert calls[0]["tracker"] is spy
 
 
-def test_solve_model_unregisters_child_even_on_timeout(
+def test_solve_model_forwards_tracker_to_executor_on_timeout(
     fake_minizinc_binary: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    # A timed-out solve still leaves the live set clean, so the lifespan never
-    # re-terminates a child that the wall-clock cap already killed.
-    completed = FakeCompletedProcess(stdout="", stderr="", returncode=0, timeout=True)
-    _record_subprocess(monkeypatch, completed)
+    # Even a timed-out solve forwards the tracker; the executor's unregister-on-every-
+    # exit-path guarantee (test_childrun.py) keeps the live set clean.
+    calls = _record_subprocess(monkeypatch, child_result(stdout="", timed_out=True))
     spy = _SpyTracker()
 
     result = solve_model("solve satisfy;", tracker=spy)
 
     assert result.timed_out is True
-    assert [name for name, _ in spy.events] == ["register", "unregister"]
+    assert calls[0]["tracker"] is spy
 
 
 def test_solve_model_happy_path_returns_satisfied(
@@ -381,7 +390,7 @@ def test_solve_model_happy_path_returns_satisfied(
     # classified `satisfied` from the clean exit + solution — not `optimal` (the
     # classic-`==========` misread this whole change exists to kill).
     calls = _record_subprocess(
-        monkeypatch, FakeCompletedProcess(stdout=STREAM_SATISFY, stderr="", returncode=0)
+        monkeypatch, child_result(stdout=STREAM_SATISFY, stderr="", returncode=0)
     )
 
     result = solve_model("var 1..5: x;\nconstraint x > 2;\nsolve satisfy;")
@@ -408,7 +417,7 @@ def test_solve_model_synthesizes_human_stdout_when_model_has_no_output_item(
     # The structured solution must still be paired with a human stdout block, so
     # the solution does not vanish from the model-visible text.
     stdout = stream(solution_obj_json_only({"x": 3}))
-    _record_subprocess(monkeypatch, FakeCompletedProcess(stdout=stdout, stderr="", returncode=0))
+    _record_subprocess(monkeypatch, child_result(stdout=stdout, stderr="", returncode=0))
 
     result = solve_model("var 1..5: x;\nconstraint x > 2;\nsolve satisfy;")
 
@@ -425,9 +434,7 @@ def test_solve_model_returns_structured_optimal_solution(
     # An optimization run: the driver's OPTIMAL_SOLUTION verdict maps to
     # `optimal`, the best objective and solution come from the last solution
     # object, and statistics are the merged, stringified stream values.
-    _record_subprocess(
-        monkeypatch, FakeCompletedProcess(stdout=STREAM_OPTIMAL, stderr="", returncode=0)
-    )
+    _record_subprocess(monkeypatch, child_result(stdout=STREAM_OPTIMAL, stderr="", returncode=0))
 
     result = solve_model("var 0..10: x;\nvar 0..10: y;\nsolve maximize x + 2 * y;")
 
@@ -446,7 +453,7 @@ def test_solve_model_command_shape(
 ) -> None:
     model = "var 1..5: x;\nconstraint x > 2;\nsolve satisfy;"
     calls = _record_subprocess(
-        monkeypatch, FakeCompletedProcess(stdout=STREAM_SATISFY, stderr="", returncode=0)
+        monkeypatch, child_result(stdout=STREAM_SATISFY, stderr="", returncode=0)
     )
 
     result = solve_model(model)
@@ -489,9 +496,7 @@ def test_solve_model_with_checker_adds_solution_checker_flag(
         solution_obj("x=1 y=2\n", {"x": 1, "y": 2}),
         {"type": "status", "status": "SATISFIED"},
     )
-    calls = _record_subprocess(
-        monkeypatch, FakeCompletedProcess(stdout=stdout, stderr="", returncode=0)
-    )
+    calls = _record_subprocess(monkeypatch, child_result(stdout=stdout, stderr="", returncode=0))
 
     result = solve_model(
         "var 1..3: x;\nvar 1..3: y;\nconstraint x < y;\nsolve satisfy;", checker=_CHECKER_SRC
@@ -515,7 +520,7 @@ def test_solve_model_with_checker_incorrect_text_is_not_a_violation(
         solution_obj("x=3 y=1\n", {"x": 3, "y": 1}),
         {"type": "status", "status": "SATISFIED"},
     )
-    _record_subprocess(monkeypatch, FakeCompletedProcess(stdout=stdout, stderr="", returncode=0))
+    _record_subprocess(monkeypatch, child_result(stdout=stdout, stderr="", returncode=0))
 
     result = solve_model("var 1..3: x;\nvar 1..3: y;\nsolve satisfy;", checker=_CHECKER_SRC)
 
@@ -534,7 +539,7 @@ def test_solve_model_with_checker_violation_keeps_rejected_solution(
         solution_obj("x=1 y=2\n", {"x": 1, "y": 2}),
         {"type": "status", "status": "SATISFIED"},
     )
-    _record_subprocess(monkeypatch, FakeCompletedProcess(stdout=stdout, stderr="", returncode=0))
+    _record_subprocess(monkeypatch, child_result(stdout=stdout, stderr="", returncode=0))
 
     result = solve_model("var 1..3: x;\nvar 1..3: y;\nsolve satisfy;", checker=_CHECKER_SRC)
 
@@ -552,7 +557,7 @@ def test_solve_model_with_checker_missing_verdict_is_error(
         solution_obj("x=1 y=2\n", {"x": 1, "y": 2}),
         {"type": "status", "status": "SATISFIED"},
     )
-    _record_subprocess(monkeypatch, FakeCompletedProcess(stdout=stdout, stderr="", returncode=0))
+    _record_subprocess(monkeypatch, child_result(stdout=stdout, stderr="", returncode=0))
 
     result = solve_model("var 1..3: x;\nvar 1..3: y;\nsolve satisfy;", checker=_CHECKER_SRC)
 
@@ -565,7 +570,7 @@ def test_solve_model_with_checker_stream_error_is_error(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     stdout = stream({"type": "status", "status": "ERROR"})
-    _record_subprocess(monkeypatch, FakeCompletedProcess(stdout=stdout, stderr="", returncode=0))
+    _record_subprocess(monkeypatch, child_result(stdout=stdout, stderr="", returncode=0))
 
     result = solve_model("solve satisfy;", checker=_CHECKER_SRC)
 
@@ -587,7 +592,7 @@ def test_solve_model_with_checker_top_level_error_and_nested_unknown_is_error(
         {"type": "checker", "messages": [{"type": "status", "status": "UNKNOWN"}]},
         solution_obj_json_only({"x": 2}),
     )
-    _record_subprocess(monkeypatch, FakeCompletedProcess(stdout=stdout, stderr="", returncode=0))
+    _record_subprocess(monkeypatch, child_result(stdout=stdout, stderr="", returncode=0))
 
     result = solve_model("var 1..3: x;\nconstraint x = 2;\nsolve satisfy;", checker=_CHECKER_SRC)
 
@@ -608,9 +613,7 @@ def test_solve_model_with_checker_nonzero_rc_is_error(
         checker_pass("CORRECT\n"),
         solution_obj("x=1 y=2\n", {"x": 1, "y": 2}),
     )
-    _record_subprocess(
-        monkeypatch, FakeCompletedProcess(stdout=stdout, stderr="boom", returncode=1)
-    )
+    _record_subprocess(monkeypatch, child_result(stdout=stdout, stderr="boom", returncode=1))
 
     result = solve_model("var 1..3: x;\nvar 1..3: y;\nsolve satisfy;", checker=_CHECKER_SRC)
 
@@ -623,7 +626,7 @@ def test_solve_model_with_checker_no_solution_status(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     stdout = stream({"type": "status", "status": "UNSATISFIABLE"})
-    _record_subprocess(monkeypatch, FakeCompletedProcess(stdout=stdout, stderr="", returncode=0))
+    _record_subprocess(monkeypatch, child_result(stdout=stdout, stderr="", returncode=0))
 
     result = solve_model("constraint false;\nsolve satisfy;", checker=_CHECKER_SRC)
 
@@ -636,10 +639,10 @@ def test_solve_model_with_checker_timeout_status(
     fake_minizinc_binary: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    def _fake_run(*args: Any, **kwargs: Any) -> FakeCompletedProcess:
-        return FakeCompletedProcess(stdout="", stderr="", returncode=0, timeout=True)
+    def _fake_run(*args: Any, **kwargs: Any) -> ChildExecutionResult:
+        return child_result(stdout="", stderr="", returncode=0, timed_out=True)
 
-    monkeypatch.setattr("openconstraint_mcp.minizinc.core.popen_process_group", _fake_run)
+    monkeypatch.setattr("openconstraint_mcp.minizinc.core.execute_child", _fake_run)
 
     result = solve_model("solve satisfy;", checker=_CHECKER_SRC)
 
@@ -656,7 +659,7 @@ def test_solve_model_with_checker_transcript_is_raw_stdout(
         checker_pass("CORRECT\n"),
         solution_obj("x=1 y=2\n", {"x": 1, "y": 2}),
     )
-    _record_subprocess(monkeypatch, FakeCompletedProcess(stdout=stdout, stderr="", returncode=0))
+    _record_subprocess(monkeypatch, child_result(stdout=stdout, stderr="", returncode=0))
 
     result = solve_model("var 1..3: x;\nvar 1..3: y;\nsolve satisfy;", checker=_CHECKER_SRC)
 
@@ -685,7 +688,7 @@ def _solve_cmd_with_flags(monkeypatch: pytest.MonkeyPatch, **flags: Any) -> list
     )
     _patch_capabilities(monkeypatch, {DEFAULT_SOLVER: full, solver: full})
     calls = _record_subprocess(
-        monkeypatch, FakeCompletedProcess(stdout=STREAM_SATISFY, stderr="", returncode=0)
+        monkeypatch, child_result(stdout=STREAM_SATISFY, stderr="", returncode=0)
     )
     solve_model("var 1..5: x;\nsolve satisfy;", **flags)
     return calls[0]["args"][0]
@@ -761,7 +764,7 @@ def test_solve_model_rejects_non_positive_parallel(
     def _fail_if_called(*args: Any, **kwargs: Any) -> Any:
         raise AssertionError("subprocess.run must not be invoked for bad parallel")
 
-    monkeypatch.setattr("openconstraint_mcp.minizinc.core.popen_process_group", _fail_if_called)
+    monkeypatch.setattr("openconstraint_mcp.minizinc.core.execute_child", _fail_if_called)
     with pytest.raises(ValueError, match="parallel"):
         solve_model("solve satisfy;", parallel=bad)
 
@@ -786,7 +789,7 @@ def test_solve_model_num_solutions_rejects_short_alias(
     def _fail_if_called(*args: Any, **kwargs: Any) -> Any:
         raise AssertionError("subprocess.run must not be invoked for an unsupported solver")
 
-    monkeypatch.setattr("openconstraint_mcp.minizinc.core.popen_process_group", _fail_if_called)
+    monkeypatch.setattr("openconstraint_mcp.minizinc.core.execute_child", _fail_if_called)
     with pytest.raises(ValueError, match="num_solutions") as exc_info:
         solve_model("solve satisfy;", num_solutions=2, solver="gecode")
     message = str(exc_info.value)
@@ -802,7 +805,7 @@ def test_solve_model_num_solutions_rejected_for_default_solver(
     def _fail_if_called(*args: Any, **kwargs: Any) -> Any:
         raise AssertionError("subprocess.run must not be invoked for cp-sat + num_solutions")
 
-    monkeypatch.setattr("openconstraint_mcp.minizinc.core.popen_process_group", _fail_if_called)
+    monkeypatch.setattr("openconstraint_mcp.minizinc.core.execute_child", _fail_if_called)
     with pytest.raises(ValueError, match="num_solutions") as exc_info:
         solve_model("solve satisfy;", num_solutions=2)
     message = str(exc_info.value)
@@ -816,7 +819,7 @@ def test_solve_model_num_solutions_rejected_before_checker_run_for_default_solve
     def _fail_if_called(*args: Any, **kwargs: Any) -> Any:
         raise AssertionError("subprocess.run must not be invoked for cp-sat + num_solutions")
 
-    monkeypatch.setattr("openconstraint_mcp.minizinc.core.popen_process_group", _fail_if_called)
+    monkeypatch.setattr("openconstraint_mcp.minizinc.core.execute_child", _fail_if_called)
     with pytest.raises(ValueError, match="num_solutions") as exc_info:
         solve_model("solve satisfy;", checker=_CHECKER_SRC, num_solutions=2)
     message = str(exc_info.value)
@@ -831,7 +834,7 @@ def test_solve_model_rejects_non_positive_num_solutions(
     def _fail_if_called(*args: Any, **kwargs: Any) -> Any:
         raise AssertionError("subprocess.run must not be invoked for bad num_solutions")
 
-    monkeypatch.setattr("openconstraint_mcp.minizinc.core.popen_process_group", _fail_if_called)
+    monkeypatch.setattr("openconstraint_mcp.minizinc.core.execute_child", _fail_if_called)
     with pytest.raises(ValueError, match="num_solutions"):
         solve_model("solve satisfy;", num_solutions=bad, solver="org.chuffed.chuffed")
 
@@ -888,7 +891,7 @@ def _fail_if_solve_runs(monkeypatch: pytest.MonkeyPatch) -> None:
     def _fail(*args: Any, **kwargs: Any) -> Any:
         raise AssertionError("solve subprocess must not run when a control is unsupported")
 
-    monkeypatch.setattr("openconstraint_mcp.minizinc.core.popen_process_group", _fail)
+    monkeypatch.setattr("openconstraint_mcp.minizinc.core.execute_child", _fail)
 
 
 @pytest.mark.parametrize(
@@ -926,9 +929,7 @@ def test_solve_model_unresolved_solver_passes_capability_check(
     # and gets no "missing capability" message — it passes through to the solve so
     # MiniZinc resolves the alias, exactly as before (D4 case c).
     _patch_capabilities(monkeypatch, {"cp-sat": SolverCapabilities()})
-    _record_subprocess(
-        monkeypatch, FakeCompletedProcess(stdout=STREAM_SATISFY, stderr="", returncode=0)
-    )
+    _record_subprocess(monkeypatch, child_result(stdout=STREAM_SATISFY, stderr="", returncode=0))
     result = solve_model("solve satisfy;", solver="gecode", free_search=True)
     assert result.status == "satisfied"
 
@@ -939,9 +940,7 @@ def test_solve_model_default_controls_skip_capability_resolution(
     # With no gated control requested, the lazy resolver is never invoked, so a
     # default solve pays no --solvers-json cost (D2).
     resolve_calls = _patch_capabilities(monkeypatch, {"cp-sat": SolverCapabilities()})
-    _record_subprocess(
-        monkeypatch, FakeCompletedProcess(stdout=STREAM_SATISFY, stderr="", returncode=0)
-    )
+    _record_subprocess(monkeypatch, child_result(stdout=STREAM_SATISFY, stderr="", returncode=0))
     result = solve_model("solve satisfy;")
     assert result.status == "satisfied"
     assert resolve_calls[0] == 0
@@ -955,9 +954,7 @@ def test_solve_model_supported_control_resolves_once_and_solves(
     resolve_calls = _patch_capabilities(
         monkeypatch, {"cp-sat": SolverCapabilities(supports_free_search=True)}
     )
-    _record_subprocess(
-        monkeypatch, FakeCompletedProcess(stdout=STREAM_SATISFY, stderr="", returncode=0)
-    )
+    _record_subprocess(monkeypatch, child_result(stdout=STREAM_SATISFY, stderr="", returncode=0))
     result = solve_model("solve satisfy;", free_search=True)
     assert result.status == "satisfied"
     assert resolve_calls[0] == 1
@@ -969,7 +966,7 @@ def test_solve_model_forwards_inline_data_positionally(
 ) -> None:
     model = "int: n;\nvar 1..n: x;\nconstraint x = n;\nsolve satisfy;"
     calls = _record_subprocess(
-        monkeypatch, FakeCompletedProcess(stdout=STREAM_SATISFY, stderr="", returncode=0)
+        monkeypatch, child_result(stdout=STREAM_SATISFY, stderr="", returncode=0)
     )
 
     result = solve_model(model, data="n = 3;")
@@ -988,7 +985,7 @@ def test_solve_model_without_data_passes_only_model(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     calls = _record_subprocess(
-        monkeypatch, FakeCompletedProcess(stdout=STREAM_SATISFY, stderr="", returncode=0)
+        monkeypatch, child_result(stdout=STREAM_SATISFY, stderr="", returncode=0)
     )
 
     solve_model("var 1..5: x;\nsolve satisfy;")
@@ -1008,7 +1005,7 @@ def test_solve_model_returns_structured_error_for_malformed_data(
     )
     _record_subprocess(
         monkeypatch,
-        FakeCompletedProcess(stdout="", stderr=diagnostic, returncode=1),
+        child_result(stdout="", stderr=diagnostic, returncode=1),
     )
 
     result = solve_model("int: n;\nvar 1..n: x;\nsolve satisfy;", data="n = ;")
@@ -1023,7 +1020,7 @@ def test_solve_model_custom_solver_is_passed_through(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     calls = _record_subprocess(
-        monkeypatch, FakeCompletedProcess(stdout=STREAM_SATISFY, stderr="", returncode=0)
+        monkeypatch, child_result(stdout=STREAM_SATISFY, stderr="", returncode=0)
     )
 
     result = solve_model("solve satisfy;", solver="gecode")
@@ -1038,14 +1035,16 @@ def test_solve_model_custom_timeout_drives_outer_grace(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     calls = _record_subprocess(
-        monkeypatch, FakeCompletedProcess(stdout=STREAM_SATISFY, stderr="", returncode=0)
+        monkeypatch, child_result(stdout=STREAM_SATISFY, stderr="", returncode=0)
     )
 
     solve_model("solve satisfy;", timeout_ms=5000)
 
     cmd = calls[0]["args"][0]
     assert cmd[cmd.index("--time-limit") + 1] == "5000"
-    assert calls[0]["communicate_timeout"] == pytest.approx(10.0)
+    # The executor gets the model's --time-limit (5000 ms) plus the 5 s outer grace,
+    # so MiniZinc normally self-stops before the executor's wall-clock cap fires.
+    assert calls[0]["timeout_ms"] == 10000
 
 
 def test_solve_model_defaults_match_module_constants(
@@ -1053,7 +1052,7 @@ def test_solve_model_defaults_match_module_constants(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     calls = _record_subprocess(
-        monkeypatch, FakeCompletedProcess(stdout=STREAM_SATISFY, stderr="", returncode=0)
+        monkeypatch, child_result(stdout=STREAM_SATISFY, stderr="", returncode=0)
     )
 
     solve_model("solve satisfy;")
@@ -1071,7 +1070,7 @@ def test_solve_model_rejects_empty_or_whitespace_model(
     def _fail_if_called(*args: Any, **kwargs: Any) -> Any:
         raise AssertionError("subprocess.run must not be invoked for empty model")
 
-    monkeypatch.setattr("openconstraint_mcp.minizinc.core.popen_process_group", _fail_if_called)
+    monkeypatch.setattr("openconstraint_mcp.minizinc.core.execute_child", _fail_if_called)
 
     with pytest.raises(ValueError, match="empty"):
         solve_model(bad_model)
@@ -1085,7 +1084,7 @@ def test_solve_model_rejects_non_positive_timeout(
     def _fail_if_called(*args: Any, **kwargs: Any) -> Any:
         raise AssertionError("subprocess.run must not be invoked for bad timeout")
 
-    monkeypatch.setattr("openconstraint_mcp.minizinc.core.popen_process_group", _fail_if_called)
+    monkeypatch.setattr("openconstraint_mcp.minizinc.core.execute_child", _fail_if_called)
 
     with pytest.raises(ValueError, match="positive"):
         solve_model("solve satisfy;", timeout_ms=bad_timeout)
@@ -1114,7 +1113,7 @@ def test_solve_model_returns_structured_result_for_minizinc_compile_error(
 ) -> None:
     _record_subprocess(
         monkeypatch,
-        FakeCompletedProcess(
+        child_result(
             stdout="",
             stderr="MiniZinc: syntax error: unexpected token\n",
             returncode=1,
@@ -1135,7 +1134,7 @@ def test_solve_model_returns_structured_result_for_unsatisfiable(
 ) -> None:
     _record_subprocess(
         monkeypatch,
-        FakeCompletedProcess(stdout=STREAM_UNSAT, stderr="", returncode=0),
+        child_result(stdout=STREAM_UNSAT, stderr="", returncode=0),
     )
 
     result = solve_model("constraint false;\nsolve satisfy;")
@@ -1157,7 +1156,7 @@ def test_solve_model_satisfy_all_returns_ordered_solutions(
     # (not `optimal`); `solutions` keeps emission order and `solution` is the
     # last found.
     _record_subprocess(
-        monkeypatch, FakeCompletedProcess(stdout=STREAM_SATISFY_ALL, stderr="", returncode=0)
+        monkeypatch, child_result(stdout=STREAM_SATISFY_ALL, stderr="", returncode=0)
     )
 
     result = solve_model("solve satisfy;")
@@ -1176,9 +1175,7 @@ def test_solve_model_surfaces_stream_error_into_stderr(
     # `--json-stream` reports a syntax error as an `{"type":"error"}` object on
     # stdout with an empty real stderr; the runner classifies `error` and lifts
     # the message into the diagnostic stderr channel so the client can repair.
-    _record_subprocess(
-        monkeypatch, FakeCompletedProcess(stdout=STREAM_ERROR, stderr="", returncode=1)
-    )
+    _record_subprocess(monkeypatch, child_result(stdout=STREAM_ERROR, stderr="", returncode=1))
 
     result = solve_model("var 1..3: x\nsolve satisfy;")
 
@@ -1188,21 +1185,19 @@ def test_solve_model_surfaces_stream_error_into_stderr(
     assert "unexpected item" in result.stderr
 
 
-def test_solve_model_timeout_with_bytes_payload_decodes(
+def test_solve_model_timeout_keeps_partial_stream(
     fake_minizinc_binary: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    # A hard timeout surfaces a partial json-stream as bytes; it is decoded and
-    # parsed (keeping the fully-received solution), but the verdict is forced to
+    # A hard timeout surfaces a partial json-stream (a truncated trailing object);
+    # the fully-received solution is kept and parsed, but the verdict is forced to
     # `timeout` with no real return code.
-    partial = (
-        stream(solution_obj("x=3\n", {"x": 3})) + '{"type": "stat'  # truncated tail
-    ).encode("utf-8")
+    partial = stream(solution_obj("x=3\n", {"x": 3})) + '{"type": "stat'  # truncated tail
 
-    def _fake_run(*args: Any, **kwargs: Any) -> FakeCompletedProcess:
-        return FakeCompletedProcess(stdout=partial, stderr=b"", returncode=0, timeout=True)
+    def _fake_run(*args: Any, **kwargs: Any) -> ChildExecutionResult:
+        return child_result(stdout=partial, stderr="", returncode=0, timed_out=True)
 
-    monkeypatch.setattr("openconstraint_mcp.minizinc.core.popen_process_group", _fake_run)
+    monkeypatch.setattr("openconstraint_mcp.minizinc.core.execute_child", _fake_run)
 
     result = solve_model("solve satisfy;")
 
@@ -1215,20 +1210,82 @@ def test_solve_model_timeout_with_bytes_payload_decodes(
     assert result.elapsed_ms >= 0
 
 
-def test_solve_model_timeout_with_none_payload_returns_empty_strings(
+def test_solve_model_truncated_with_solutions_keeps_partial_and_nulls_return_code(
     fake_minizinc_binary: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    def _fake_run(*args: Any, **kwargs: Any) -> FakeCompletedProcess:
-        return FakeCompletedProcess(stdout=None, stderr=None, returncode=0, timeout=True)
-
-    monkeypatch.setattr("openconstraint_mcp.minizinc.core.popen_process_group", _fake_run)
+    # An output-cap tree-kill: partial parsed solutions are kept, the status is the
+    # stream's verdict (here `satisfied`, never the rc-derived `error`), return_code
+    # is null (the nonzero exit is ours), and the fixed cap-notice rides on stderr.
+    _record_subprocess(
+        monkeypatch,
+        child_result(
+            stdout=STREAM_SATISFY,
+            stderr="",
+            returncode=-15,
+            truncated=True,
+            truncation_killed=True,
+        ),
+    )
 
     result = solve_model("solve satisfy;")
 
+    assert result.truncated is True
+    assert result.status == "satisfied"
+    assert result.solution == {"x": 1, "y": 2}
+    assert result.return_code is None
+    assert result.timed_out is False
+    assert "output exceeded the 1 MiB cap; process stopped" in result.stderr
+
+
+def test_solve_model_truncated_without_solutions_is_unknown() -> None:
+    outcome = _RunOutcome(
+        timed_out=False,
+        returncode=-15,
+        stdout="",
+        stderr="",
+        elapsed_ms=3,
+        truncated=True,
+        truncation_killed=True,
+    )
+    result = _build_solve_result(outcome, solver="cp-sat")
+
+    assert result.truncated is True
+    assert result.status == "unknown"  # never the rc-derived "error"
+    assert result.return_code is None
+
+
+def test_solve_model_truncated_clean_exit_keeps_real_nonzero_return_code() -> None:
+    # A burst writer can overrun the cap and still exit ON ITS OWN with a genuine
+    # failure code — the executor never killed it, so rc=1 is the model's own
+    # verdict: it must stay visible and drive the rc-fallback "error" status
+    # instead of being masked to unknown/None.
+    outcome = _RunOutcome(
+        timed_out=False, returncode=1, stdout="", stderr="boom", elapsed_ms=3, truncated=True
+    )
+    result = _build_solve_result(outcome, solver="cp-sat")
+
+    assert result.truncated is True
+    assert result.status == "error"
+    assert result.return_code == 1
+
+
+def test_solve_model_truncated_and_timed_out_keeps_timeout_verdict() -> None:
+    # Both flags can be true (a burst overrun after a deadline kill); the timeout
+    # branch wins for status, and truncated rides along.
+    outcome = _RunOutcome(
+        timed_out=True,
+        returncode=-1,
+        stdout=STREAM_SATISFY,
+        stderr="",
+        elapsed_ms=3,
+        truncated=True,
+    )
+    result = _build_solve_result(outcome, solver="cp-sat")
+
     assert result.status == "timeout"
-    assert result.stdout == ""
-    assert result.stderr == ""
+    assert result.truncated is True
+    assert result.return_code is None
 
 
 def test_solve_model_wraps_oserror_as_execution_error(
@@ -1238,24 +1295,11 @@ def test_solve_model_wraps_oserror_as_execution_error(
     def _fake_run(*args: Any, **kwargs: Any) -> None:
         raise OSError(8, "Exec format error")
 
-    monkeypatch.setattr("openconstraint_mcp.minizinc.core.popen_process_group", _fake_run)
+    monkeypatch.setattr("openconstraint_mcp.minizinc.core.execute_child", _fake_run)
 
     with pytest.raises(MiniZincExecutionError) as exc_info:
         solve_model("solve satisfy;")
     assert "install-runtime" in str(exc_info.value)
-
-
-def test_solve_model_decodes_output_as_utf8(
-    fake_minizinc_binary: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    calls = _record_subprocess(
-        monkeypatch, FakeCompletedProcess(stdout=STREAM_SATISFY, stderr="", returncode=0)
-    )
-
-    solve_model("solve satisfy;")
-
-    assert calls[0]["kwargs"].get("encoding") == "utf-8"
 
 
 def test_solve_model_writes_model_file_as_utf8(
@@ -1270,9 +1314,7 @@ def test_solve_model_writes_model_file_as_utf8(
         return original_write_text(self, data, **kwargs)
 
     monkeypatch.setattr(Path, "write_text", _spy_write_text)
-    _record_subprocess(
-        monkeypatch, FakeCompletedProcess(stdout=STREAM_SATISFY, stderr="", returncode=0)
-    )
+    _record_subprocess(monkeypatch, child_result(stdout=STREAM_SATISFY, stderr="", returncode=0))
 
     solve_model("% café λ\nsolve satisfy;")
 
@@ -1283,9 +1325,7 @@ def test_check_model_happy_path_returns_ok(
     fake_minizinc_binary: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    calls = _record_subprocess(
-        monkeypatch, FakeCompletedProcess(stdout="", stderr="", returncode=0)
-    )
+    calls = _record_subprocess(monkeypatch, child_result(stdout="", stderr="", returncode=0))
 
     result = check_model("var 1..5: x;\nconstraint x > 2;\nsolve satisfy;")
 
@@ -1303,9 +1343,7 @@ def test_check_model_command_shape(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     model = "var 1..5: x;\nconstraint x > 2;\nsolve satisfy;"
-    calls = _record_subprocess(
-        monkeypatch, FakeCompletedProcess(stdout="", stderr="", returncode=0)
-    )
+    calls = _record_subprocess(monkeypatch, child_result(stdout="", stderr="", returncode=0))
 
     check_model(model)
 
@@ -1336,9 +1374,7 @@ def test_check_model_forwards_inline_data_positionally(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     model = "int: n;\nvar 1..n: x;\nconstraint x = n;\nsolve satisfy;"
-    calls = _record_subprocess(
-        monkeypatch, FakeCompletedProcess(stdout="", stderr="", returncode=0)
-    )
+    calls = _record_subprocess(monkeypatch, child_result(stdout="", stderr="", returncode=0))
 
     result = check_model(model, data="n = 3;")
 
@@ -1355,9 +1391,7 @@ def test_check_model_without_data_passes_only_model(
     fake_minizinc_binary: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    calls = _record_subprocess(
-        monkeypatch, FakeCompletedProcess(stdout="", stderr="", returncode=0)
-    )
+    calls = _record_subprocess(monkeypatch, child_result(stdout="", stderr="", returncode=0))
 
     check_model("var 1..5: x;\nsolve satisfy;")
 
@@ -1371,9 +1405,7 @@ def test_check_model_custom_solver_is_passed_through(
     fake_minizinc_binary: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    calls = _record_subprocess(
-        monkeypatch, FakeCompletedProcess(stdout="", stderr="", returncode=0)
-    )
+    calls = _record_subprocess(monkeypatch, child_result(stdout="", stderr="", returncode=0))
 
     result = check_model("solve satisfy;", solver="gecode")
 
@@ -1386,15 +1418,34 @@ def test_check_model_custom_timeout_drives_outer_grace(
     fake_minizinc_binary: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    calls = _record_subprocess(
-        monkeypatch, FakeCompletedProcess(stdout="", stderr="", returncode=0)
-    )
+    calls = _record_subprocess(monkeypatch, child_result(stdout="", stderr="", returncode=0))
 
     check_model("solve satisfy;", timeout_ms=5000)
 
     cmd = calls[0]["args"][0]
     assert cmd[cmd.index("--time-limit") + 1] == "5000"
-    assert calls[0]["communicate_timeout"] == pytest.approx(10.0)
+    # The executor gets the model's --time-limit (5000 ms) plus the 5 s outer grace,
+    # so MiniZinc normally self-stops before the executor's wall-clock cap fires.
+    assert calls[0]["timeout_ms"] == 10000
+
+
+def test_check_model_clean_exit_truncation_keeps_ok_and_flags_cap(
+    fake_minizinc_binary: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # A burst writer can overrun the 1 MiB cap and exit 0 before the executor's
+    # poll loop sees it. The rc-driven "ok" verdict stands, but the truncation is
+    # surfaced structurally (field + output_truncated diagnostic), not just as
+    # the raw stderr cap notice.
+    _record_subprocess(monkeypatch, child_result(returncode=0, truncated=True))
+
+    result = check_model("solve satisfy;")
+
+    assert result.status == "ok"
+    assert result.truncated is True
+    assert result.diagnostic is not None
+    assert result.diagnostic.category == "output_truncated"
+    assert "output exceeded the 1 MiB cap; process stopped" in result.stderr
 
 
 def test_check_model_returns_structured_result_for_compile_error(
@@ -1403,7 +1454,7 @@ def test_check_model_returns_structured_result_for_compile_error(
 ) -> None:
     _record_subprocess(
         monkeypatch,
-        FakeCompletedProcess(
+        child_result(
             stdout="",
             stderr="Error: type error: undefined identifier 'xz'\n",
             returncode=1,
@@ -1424,7 +1475,7 @@ def test_check_model_rejects_empty_or_whitespace_model(
     def _fail_if_called(*args: Any, **kwargs: Any) -> Any:
         raise AssertionError("subprocess.run must not be invoked for empty model")
 
-    monkeypatch.setattr("openconstraint_mcp.minizinc.core.popen_process_group", _fail_if_called)
+    monkeypatch.setattr("openconstraint_mcp.minizinc.core.execute_child", _fail_if_called)
 
     with pytest.raises(ValueError, match="empty"):
         check_model(bad_model)
@@ -1438,7 +1489,7 @@ def test_check_model_rejects_non_positive_timeout(
     def _fail_if_called(*args: Any, **kwargs: Any) -> Any:
         raise AssertionError("subprocess.run must not be invoked for bad timeout")
 
-    monkeypatch.setattr("openconstraint_mcp.minizinc.core.popen_process_group", _fail_if_called)
+    monkeypatch.setattr("openconstraint_mcp.minizinc.core.execute_child", _fail_if_called)
 
     with pytest.raises(ValueError, match="positive"):
         check_model("solve satisfy;", timeout_ms=bad_timeout)
@@ -1465,10 +1516,10 @@ def test_check_model_timeout_with_bytes_payload_decodes(
     fake_minizinc_binary: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    def _fake_run(*args: Any, **kwargs: Any) -> FakeCompletedProcess:
-        return FakeCompletedProcess(stdout=b"partial", stderr=b"", returncode=0, timeout=True)
+    def _fake_run(*args: Any, **kwargs: Any) -> ChildExecutionResult:
+        return child_result(stdout="partial", stderr="", returncode=0, timed_out=True)
 
-    monkeypatch.setattr("openconstraint_mcp.minizinc.core.popen_process_group", _fake_run)
+    monkeypatch.setattr("openconstraint_mcp.minizinc.core.execute_child", _fake_run)
 
     result = check_model("solve satisfy;")
 
@@ -1485,7 +1536,7 @@ def test_check_model_wraps_oserror_as_execution_error(
     def _fake_run(*args: Any, **kwargs: Any) -> None:
         raise OSError(8, "Exec format error")
 
-    monkeypatch.setattr("openconstraint_mcp.minizinc.core.popen_process_group", _fake_run)
+    monkeypatch.setattr("openconstraint_mcp.minizinc.core.execute_child", _fake_run)
 
     with pytest.raises(MiniZincExecutionError) as exc_info:
         check_model("solve satisfy;")
@@ -1498,7 +1549,7 @@ def test_find_unsat_core_mus_found_preserves_raw_output(
 ) -> None:
     _record_subprocess(
         monkeypatch,
-        FakeCompletedProcess(stdout=UNSAT_CORE_STDOUT, stderr="", returncode=0),
+        child_result(stdout=UNSAT_CORE_STDOUT, stderr="", returncode=0),
     )
 
     result = find_unsat_core(UNSAT_CORE_MODEL)
@@ -1515,7 +1566,7 @@ def test_find_unsat_core_command_shape(
 ) -> None:
     calls = _record_subprocess(
         monkeypatch,
-        FakeCompletedProcess(stdout=UNSAT_CORE_STDOUT, stderr="", returncode=0),
+        child_result(stdout=UNSAT_CORE_STDOUT, stderr="", returncode=0),
     )
 
     find_unsat_core(UNSAT_CORE_MODEL)
@@ -1545,7 +1596,7 @@ def test_find_unsat_core_forwards_inline_data_positionally(
 ) -> None:
     calls = _record_subprocess(
         monkeypatch,
-        FakeCompletedProcess(stdout=UNSAT_CORE_STDOUT, stderr="", returncode=0),
+        child_result(stdout=UNSAT_CORE_STDOUT, stderr="", returncode=0),
     )
 
     result = find_unsat_core(UNSAT_CORE_MODEL, data="lo = 5;")
@@ -1570,7 +1621,7 @@ def test_find_unsat_core_without_data_passes_only_model(
 ) -> None:
     calls = _record_subprocess(
         monkeypatch,
-        FakeCompletedProcess(stdout=UNSAT_CORE_STDOUT, stderr="", returncode=0),
+        child_result(stdout=UNSAT_CORE_STDOUT, stderr="", returncode=0),
     )
 
     find_unsat_core(UNSAT_CORE_MODEL)
@@ -1587,7 +1638,7 @@ def test_find_unsat_core_no_core_clears_structured_core(
 ) -> None:
     _record_subprocess(
         monkeypatch,
-        FakeCompletedProcess(stdout="=====UNKNOWN=====\n", stderr="", returncode=0),
+        child_result(stdout="=====UNKNOWN=====\n", stderr="", returncode=0),
     )
 
     result = find_unsat_core(UNSAT_CORE_MODEL)
@@ -1603,7 +1654,7 @@ def test_find_unsat_core_error_clears_structured_core_and_preserves_stderr(
     stderr = "Error: cannot load solver org.minizinc.findmus\n"
     _record_subprocess(
         monkeypatch,
-        FakeCompletedProcess(stdout="", stderr=stderr, returncode=1),
+        child_result(stdout="", stderr=stderr, returncode=1),
     )
 
     result = find_unsat_core(UNSAT_CORE_MODEL)
@@ -1613,14 +1664,39 @@ def test_find_unsat_core_error_clears_structured_core_and_preserves_stderr(
     assert result.stderr == stderr
 
 
+def test_find_unsat_core_truncation_kill_is_no_core_not_error(
+    fake_minizinc_binary: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # An output-cap tree-kill: the -15 exit is the executor's artifact, not a
+    # findMUS failure, so with no MUS in the capped transcript the verdict is
+    # `no_core` (no verdict) — never the rc-derived `error` — mirroring the
+    # solve path's masking policy.
+    _record_subprocess(
+        monkeypatch,
+        child_result(
+            stdout="FznSubProblem: partial preamble\n",
+            stderr="",
+            returncode=-15,
+            truncated=True,
+            truncation_killed=True,
+        ),
+    )
+
+    result = find_unsat_core(UNSAT_CORE_MODEL)
+
+    assert result.status == "no_core"
+    assert "stopped at the 1 MiB output cap" in result.message
+
+
 def test_find_unsat_core_timeout_with_bytes_payload_decodes(
     fake_minizinc_binary: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    def _fake_run(*args: Any, **kwargs: Any) -> FakeCompletedProcess:
-        return FakeCompletedProcess(stdout=b"partial", stderr=b"", returncode=0, timeout=True)
+    def _fake_run(*args: Any, **kwargs: Any) -> ChildExecutionResult:
+        return child_result(stdout="partial", stderr="", returncode=0, timed_out=True)
 
-    monkeypatch.setattr("openconstraint_mcp.minizinc.core.popen_process_group", _fake_run)
+    monkeypatch.setattr("openconstraint_mcp.minizinc.core.execute_child", _fake_run)
 
     result = find_unsat_core(UNSAT_CORE_MODEL)
 
@@ -1637,7 +1713,7 @@ def test_find_unsat_core_rejects_empty_or_whitespace_model(
     def _fail_if_called(*args: Any, **kwargs: Any) -> Any:
         raise AssertionError("subprocess.run must not be invoked for empty model")
 
-    monkeypatch.setattr("openconstraint_mcp.minizinc.core.popen_process_group", _fail_if_called)
+    monkeypatch.setattr("openconstraint_mcp.minizinc.core.execute_child", _fail_if_called)
 
     with pytest.raises(ValueError, match="empty"):
         find_unsat_core(bad_model)
@@ -1651,7 +1727,7 @@ def test_find_unsat_core_rejects_non_positive_timeout(
     def _fail_if_called(*args: Any, **kwargs: Any) -> Any:
         raise AssertionError("subprocess.run must not be invoked for bad timeout")
 
-    monkeypatch.setattr("openconstraint_mcp.minizinc.core.popen_process_group", _fail_if_called)
+    monkeypatch.setattr("openconstraint_mcp.minizinc.core.execute_child", _fail_if_called)
 
     with pytest.raises(ValueError, match="positive"):
         find_unsat_core(UNSAT_CORE_MODEL, timeout_ms=bad_timeout)
@@ -1672,7 +1748,7 @@ def test_find_unsat_core_wraps_oserror_as_execution_error(
     def _fake_run(*args: Any, **kwargs: Any) -> None:
         raise OSError(8, "Exec format error")
 
-    monkeypatch.setattr("openconstraint_mcp.minizinc.core.popen_process_group", _fake_run)
+    monkeypatch.setattr("openconstraint_mcp.minizinc.core.execute_child", _fake_run)
 
     with pytest.raises(MiniZincExecutionError) as exc_info:
         find_unsat_core(UNSAT_CORE_MODEL)
@@ -1685,7 +1761,7 @@ def test_find_unsat_core_uses_default_timeout(
 ) -> None:
     calls = _record_subprocess(
         monkeypatch,
-        FakeCompletedProcess(stdout=UNSAT_CORE_STDOUT, stderr="", returncode=0),
+        child_result(stdout=UNSAT_CORE_STDOUT, stderr="", returncode=0),
     )
 
     find_unsat_core(UNSAT_CORE_MODEL)
@@ -1714,7 +1790,7 @@ def test_inspect_model_happy_path_returns_ok(
 ) -> None:
     calls = _record_subprocess(
         monkeypatch,
-        FakeCompletedProcess(stdout=_INSPECT_KNAPSACK_STDOUT, stderr="", returncode=0),
+        child_result(stdout=_INSPECT_KNAPSACK_STDOUT, stderr="", returncode=0),
     )
 
     result = inspect_model(_INSPECT_KNAPSACK_MODEL)
@@ -1736,7 +1812,7 @@ def test_inspect_model_command_shape(
 ) -> None:
     calls = _record_subprocess(
         monkeypatch,
-        FakeCompletedProcess(stdout=_INSPECT_KNAPSACK_STDOUT, stderr="", returncode=0),
+        child_result(stdout=_INSPECT_KNAPSACK_STDOUT, stderr="", returncode=0),
     )
 
     inspect_model(_INSPECT_KNAPSACK_MODEL)
@@ -1760,7 +1836,7 @@ def test_inspect_model_returns_structured_error_for_compile_error(
 ) -> None:
     _record_subprocess(
         monkeypatch,
-        FakeCompletedProcess(
+        child_result(
             stdout="",
             stderr="Error: type error: undefined identifier 'xz'\n",
             returncode=1,
@@ -1782,7 +1858,7 @@ def test_inspect_model_degrades_to_error_on_unparseable_stdout(
     # partial interface, the result degrades to status="error" with interface None.
     _record_subprocess(
         monkeypatch,
-        FakeCompletedProcess(stdout="not an interface line\n", stderr="", returncode=0),
+        child_result(stdout="not an interface line\n", stderr="", returncode=0),
     )
 
     result = inspect_model("var 1..5: x;\nsolve satisfy;")
@@ -1800,10 +1876,10 @@ def test_inspect_model_returns_timeout_when_run_times_out(
     # A hard timeout during interface extraction classifies as status="timeout" with
     # no interface, completing the status matrix alongside ok / error-compile /
     # error-unparseable. Driven by a raised TimeoutExpired, the same idiom check uses.
-    def _fake_run(*args: Any, **kwargs: Any) -> FakeCompletedProcess:
-        return FakeCompletedProcess(stdout=b"partial", stderr=b"", returncode=0, timeout=True)
+    def _fake_run(*args: Any, **kwargs: Any) -> ChildExecutionResult:
+        return child_result(stdout="partial", stderr="", returncode=0, timed_out=True)
 
-    monkeypatch.setattr("openconstraint_mcp.minizinc.core.popen_process_group", _fake_run)
+    monkeypatch.setattr("openconstraint_mcp.minizinc.core.execute_child", _fake_run)
 
     result = inspect_model("solve satisfy;")
 
@@ -1823,7 +1899,7 @@ def test_inspect_model_forwards_inline_data_positionally(
     )
     calls = _record_subprocess(
         monkeypatch,
-        FakeCompletedProcess(stdout=empty_interface, stderr="", returncode=0),
+        child_result(stdout=empty_interface, stderr="", returncode=0),
     )
 
     result = inspect_model("int: n;\nvar 1..n: x;\nsolve satisfy;", data="n = 3;")
@@ -1847,7 +1923,7 @@ def test_inspect_model_rejects_empty_or_whitespace_model(
     def _fail_if_called(*args: Any, **kwargs: Any) -> Any:
         raise AssertionError("subprocess.run must not be invoked for empty model")
 
-    monkeypatch.setattr("openconstraint_mcp.minizinc.core.popen_process_group", _fail_if_called)
+    monkeypatch.setattr("openconstraint_mcp.minizinc.core.execute_child", _fail_if_called)
 
     with pytest.raises(ValueError, match="empty"):
         inspect_model(bad_model)
@@ -1859,7 +1935,7 @@ def test_inspect_model_rejects_non_positive_timeout(
     def _fail_if_called(*args: Any, **kwargs: Any) -> Any:
         raise AssertionError("subprocess.run must not be invoked for bad timeout")
 
-    monkeypatch.setattr("openconstraint_mcp.minizinc.core.popen_process_group", _fail_if_called)
+    monkeypatch.setattr("openconstraint_mcp.minizinc.core.execute_child", _fail_if_called)
 
     with pytest.raises(ValueError, match="positive"):
         inspect_model("solve satisfy;", timeout_ms=0)
@@ -1886,19 +1962,19 @@ _SAVE_MODEL = "var 1..5: x;\nconstraint x > 2;\nsolve satisfy;\n"
 def _fake_check_then_solve(
     monkeypatch: pytest.MonkeyPatch,
     *,
-    check: FakeCompletedProcess,
-    solve: FakeCompletedProcess,
+    check: ChildExecutionResult,
+    solve: ChildExecutionResult,
 ) -> list[list[str]]:
     """Route the save's two managed runs by argv: the ``-c`` compile gate gets
     ``check``, the json-stream solve gets ``solve``. Returns the captured argvs."""
     cmds: list[list[str]] = []
 
-    def _fake_run(*args: Any, **kwargs: Any) -> FakeCompletedProcess:
+    def _fake_run(*args: Any, **kwargs: Any) -> ChildExecutionResult:
         cmd = [str(part) for part in args[0]]
         cmds.append(cmd)
         return check if "-c" in cmd else solve
 
-    monkeypatch.setattr("openconstraint_mcp.minizinc.core.popen_process_group", _fake_run)
+    monkeypatch.setattr("openconstraint_mcp.minizinc.core.execute_child", _fake_run)
     return cmds
 
 
@@ -1927,8 +2003,8 @@ def test_save_verified_model_satisfied_solve_writes_project(
 ) -> None:
     cmds = _fake_check_then_solve(
         monkeypatch,
-        check=FakeCompletedProcess(stdout="", stderr="", returncode=0),
-        solve=FakeCompletedProcess(stdout=STREAM_SATISFY, stderr="", returncode=0),
+        check=child_result(stdout="", stderr="", returncode=0),
+        solve=child_result(stdout=STREAM_SATISFY, stderr="", returncode=0),
     )
     target = tmp_path / "project"
 
@@ -1960,8 +2036,8 @@ def test_save_verified_model_compile_error_writes_nothing(
 ) -> None:
     cmds = _fake_check_then_solve(
         monkeypatch,
-        check=FakeCompletedProcess(stdout="", stderr="type error: undefined 'xz'", returncode=1),
-        solve=FakeCompletedProcess(stdout=STREAM_SATISFY, stderr="", returncode=0),
+        check=child_result(stdout="", stderr="type error: undefined 'xz'", returncode=1),
+        solve=child_result(stdout=STREAM_SATISFY, stderr="", returncode=0),
     )
     target = tmp_path / "project"
 
@@ -1983,8 +2059,8 @@ def test_save_verified_model_unsatisfiable_solve_writes_nothing(
 ) -> None:
     _fake_check_then_solve(
         monkeypatch,
-        check=FakeCompletedProcess(stdout="", stderr="", returncode=0),
-        solve=FakeCompletedProcess(stdout=STREAM_UNSAT, stderr="", returncode=0),
+        check=child_result(stdout="", stderr="", returncode=0),
+        solve=child_result(stdout=STREAM_UNSAT, stderr="", returncode=0),
     )
     target = tmp_path / "project"
 
@@ -2004,8 +2080,8 @@ def test_save_verified_model_compile_error_surfaces_gate_diagnostic(
 ) -> None:
     _fake_check_then_solve(
         monkeypatch,
-        check=FakeCompletedProcess(stdout="", stderr="type error: undefined 'xz'", returncode=1),
-        solve=FakeCompletedProcess(stdout=STREAM_SATISFY, stderr="", returncode=0),
+        check=child_result(stdout="", stderr="type error: undefined 'xz'", returncode=1),
+        solve=child_result(stdout=STREAM_SATISFY, stderr="", returncode=0),
     )
 
     result = save_verified_model(_SAVE_MODEL, target_dir=tmp_path / "project")
@@ -2023,8 +2099,8 @@ def test_save_verified_model_unsatisfiable_surfaces_infeasible_diagnostic(
 ) -> None:
     _fake_check_then_solve(
         monkeypatch,
-        check=FakeCompletedProcess(stdout="", stderr="", returncode=0),
-        solve=FakeCompletedProcess(stdout=STREAM_UNSAT, stderr="", returncode=0),
+        check=child_result(stdout="", stderr="", returncode=0),
+        solve=child_result(stdout=STREAM_UNSAT, stderr="", returncode=0),
     )
 
     result = save_verified_model(_SAVE_MODEL, target_dir=tmp_path / "project")
@@ -2040,8 +2116,8 @@ def test_save_verified_model_saved_has_no_diagnostic(
 ) -> None:
     _fake_check_then_solve(
         monkeypatch,
-        check=FakeCompletedProcess(stdout="", stderr="", returncode=0),
-        solve=FakeCompletedProcess(stdout=STREAM_SATISFY, stderr="", returncode=0),
+        check=child_result(stdout="", stderr="", returncode=0),
+        solve=child_result(stdout=STREAM_SATISFY, stderr="", returncode=0),
     )
 
     result = save_verified_model(_SAVE_MODEL, target_dir=tmp_path / "project")
@@ -2055,13 +2131,13 @@ def test_save_verified_model_solve_timeout_blocks_saving(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    def _fake_run(*args: Any, **kwargs: Any) -> FakeCompletedProcess:
+    def _fake_run(*args: Any, **kwargs: Any) -> ChildExecutionResult:
         cmd = [str(part) for part in args[0]]
         if "-c" in cmd:
-            return FakeCompletedProcess(stdout="", stderr="", returncode=0)
-        return FakeCompletedProcess(stdout="", stderr="", returncode=0, timeout=True)
+            return child_result(stdout="", stderr="", returncode=0)
+        return child_result(stdout="", stderr="", returncode=0, timed_out=True)
 
-    monkeypatch.setattr("openconstraint_mcp.minizinc.core.popen_process_group", _fake_run)
+    monkeypatch.setattr("openconstraint_mcp.minizinc.core.execute_child", _fake_run)
     target = tmp_path / "project"
 
     result = save_verified_model(_SAVE_MODEL, target_dir=target, checker=_CHECKER_SRC)
@@ -2085,8 +2161,8 @@ def test_save_verified_model_nonzero_exit_blocks_saving(
     # classifies `satisfied` — the gate must catch the dirty exit on its own.
     _fake_check_then_solve(
         monkeypatch,
-        check=FakeCompletedProcess(stdout="", stderr="", returncode=0),
-        solve=FakeCompletedProcess(stdout=STREAM_SATISFY, stderr="boom", returncode=1),
+        check=child_result(stdout="", stderr="", returncode=0),
+        solve=child_result(stdout=STREAM_SATISFY, stderr="boom", returncode=1),
     )
     target = tmp_path / "project"
 
@@ -2094,6 +2170,35 @@ def test_save_verified_model_nonzero_exit_blocks_saving(
 
     assert result.status == "not_verified"
     assert "exited with code 1" in result.message
+    assert not target.exists()
+
+
+def test_save_verified_model_truncated_solve_blocks_saving_with_truncation_message(
+    fake_minizinc_binary: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    # A truncation tree-kill leaves status "satisfied" (stream verdict) with
+    # return_code None; the gate must name the truncation — not fall through to
+    # the rc check and report "exited with code None".
+    _fake_check_then_solve(
+        monkeypatch,
+        check=child_result(stdout="", stderr="", returncode=0),
+        solve=child_result(
+            stdout=STREAM_SATISFY,
+            stderr="",
+            returncode=-15,
+            truncated=True,
+            truncation_killed=True,
+        ),
+    )
+    target = tmp_path / "project"
+
+    result = save_verified_model(_SAVE_MODEL, target_dir=target)
+
+    assert result.status == "not_verified"
+    assert "truncated" in result.message
+    assert "code None" not in result.message
     assert not target.exists()
 
 
@@ -2109,8 +2214,8 @@ def test_save_verified_model_checker_completed_allows_saving(
     )
     _fake_check_then_solve(
         monkeypatch,
-        check=FakeCompletedProcess(stdout="", stderr="", returncode=0),
-        solve=FakeCompletedProcess(stdout=solve_stdout, stderr="", returncode=0),
+        check=child_result(stdout="", stderr="", returncode=0),
+        solve=child_result(stdout=solve_stdout, stderr="", returncode=0),
     )
     target = tmp_path / "project"
 
@@ -2150,8 +2255,8 @@ def test_save_verified_model_unverified_checker_blocks_saving(
 ) -> None:
     _fake_check_then_solve(
         monkeypatch,
-        check=FakeCompletedProcess(stdout="", stderr="", returncode=0),
-        solve=FakeCompletedProcess(stdout=solve_stdout, stderr="", returncode=0),
+        check=child_result(stdout="", stderr="", returncode=0),
+        solve=child_result(stdout=solve_stdout, stderr="", returncode=0),
     )
     target = tmp_path / "project"
 
@@ -2168,8 +2273,8 @@ def test_save_verified_model_saves_data_and_problem_when_supplied(
 ) -> None:
     _fake_check_then_solve(
         monkeypatch,
-        check=FakeCompletedProcess(stdout="", stderr="", returncode=0),
-        solve=FakeCompletedProcess(stdout=STREAM_SATISFY, stderr="", returncode=0),
+        check=child_result(stdout="", stderr="", returncode=0),
+        solve=child_result(stdout=STREAM_SATISFY, stderr="", returncode=0),
     )
     target = tmp_path / "project"
 
@@ -2196,8 +2301,8 @@ def test_save_verified_model_passes_same_data_to_check_and_solve(
 ) -> None:
     cmds = _fake_check_then_solve(
         monkeypatch,
-        check=FakeCompletedProcess(stdout="", stderr="", returncode=0),
-        solve=FakeCompletedProcess(stdout=STREAM_SATISFY, stderr="", returncode=0),
+        check=child_result(stdout="", stderr="", returncode=0),
+        solve=child_result(stdout=STREAM_SATISFY, stderr="", returncode=0),
     )
 
     save_verified_model(_SAVE_MODEL, target_dir=tmp_path / "project", data="n = 3;\n")
@@ -2215,8 +2320,8 @@ def test_save_verified_model_overwrite_replaces_prior_save(
 ) -> None:
     _fake_check_then_solve(
         monkeypatch,
-        check=FakeCompletedProcess(stdout="", stderr="", returncode=0),
-        solve=FakeCompletedProcess(stdout=STREAM_SATISFY, stderr="", returncode=0),
+        check=child_result(stdout="", stderr="", returncode=0),
+        solve=child_result(stdout=STREAM_SATISFY, stderr="", returncode=0),
     )
     target = tmp_path / "project"
     save_verified_model(_SAVE_MODEL, target_dir=target)
@@ -2232,7 +2337,7 @@ def _fail_if_subprocess_called(monkeypatch: pytest.MonkeyPatch) -> None:
     def _fail(*args: Any, **kwargs: Any) -> Any:
         raise AssertionError("subprocess.run must not be invoked for invalid save args")
 
-    monkeypatch.setattr("openconstraint_mcp.minizinc.core.popen_process_group", _fail)
+    monkeypatch.setattr("openconstraint_mcp.minizinc.core.execute_child", _fail)
 
 
 def test_save_verified_model_rejects_empty_model_before_any_subprocess(
@@ -2388,8 +2493,8 @@ def test_save_verified_model_with_portfolio_result_writes_experiment_log(
 ) -> None:
     _fake_check_then_solve(
         monkeypatch,
-        check=FakeCompletedProcess(stdout="", stderr="", returncode=0),
-        solve=FakeCompletedProcess(stdout=STREAM_SATISFY, stderr="", returncode=0),
+        check=child_result(stdout="", stderr="", returncode=0),
+        solve=child_result(stdout=STREAM_SATISFY, stderr="", returncode=0),
     )
     target = tmp_path / "project"
     portfolio_result = _portfolio_result()
@@ -2428,8 +2533,8 @@ def test_save_verified_model_portfolio_result_rejected_attempt_counts_as_termina
     # terminal states (see PORTFOLIO_ATTEMPT_TERMINAL_STATES).
     _fake_check_then_solve(
         monkeypatch,
-        check=FakeCompletedProcess(stdout="", stderr="", returncode=0),
-        solve=FakeCompletedProcess(stdout=STREAM_SATISFY, stderr="", returncode=0),
+        check=child_result(stdout="", stderr="", returncode=0),
+        solve=child_result(stdout=STREAM_SATISFY, stderr="", returncode=0),
     )
     target = tmp_path / "project"
     rejected_attempt = PortfolioAttempt(
@@ -2468,8 +2573,8 @@ def test_save_verified_model_portfolio_result_log_hashes_match_saved_artifacts(
 ) -> None:
     _fake_check_then_solve(
         monkeypatch,
-        check=FakeCompletedProcess(stdout="", stderr="", returncode=0),
-        solve=FakeCompletedProcess(stdout=STREAM_SATISFY, stderr="", returncode=0),
+        check=child_result(stdout="", stderr="", returncode=0),
+        solve=child_result(stdout=STREAM_SATISFY, stderr="", returncode=0),
     )
     target = tmp_path / "project"
     data = "n = 3;\n"
@@ -2519,8 +2624,8 @@ def test_save_verified_model_portfolio_result_log_row_surfaces_checker_status(
     # the in-memory PortfolioAttempt (see test_portfolio_attempt_surfaces_checker_status).
     _fake_check_then_solve(
         monkeypatch,
-        check=FakeCompletedProcess(stdout="", stderr="", returncode=0),
-        solve=FakeCompletedProcess(stdout=STREAM_SATISFY, stderr="", returncode=0),
+        check=child_result(stdout="", stderr="", returncode=0),
+        solve=child_result(stdout=STREAM_SATISFY, stderr="", returncode=0),
     )
     target = tmp_path / "project"
     portfolio_result = _portfolio_result(checker_status="violation")
@@ -2540,8 +2645,8 @@ def test_save_verified_model_portfolio_result_failed_save_writes_nothing(
     # solve writes nothing, portfolio_result attached or not.
     _fake_check_then_solve(
         monkeypatch,
-        check=FakeCompletedProcess(stdout="", stderr="", returncode=0),
-        solve=FakeCompletedProcess(stdout=STREAM_UNSAT, stderr="", returncode=0),
+        check=child_result(stdout="", stderr="", returncode=0),
+        solve=child_result(stdout=STREAM_UNSAT, stderr="", returncode=0),
     )
     target = tmp_path / "project"
     portfolio_result = _portfolio_result()
@@ -2702,8 +2807,8 @@ def test_save_verified_model_portfolio_result_unseeded_winner_matches_unseeded_s
     # lets the save actually succeed, so this reaches the write step.
     _fake_check_then_solve(
         monkeypatch,
-        check=FakeCompletedProcess(stdout="", stderr="", returncode=0),
-        solve=FakeCompletedProcess(stdout=STREAM_SATISFY, stderr="", returncode=0),
+        check=child_result(stdout="", stderr="", returncode=0),
+        solve=child_result(stdout=STREAM_SATISFY, stderr="", returncode=0),
     )
     target = tmp_path / "project"
     portfolio_result = _portfolio_result(seed=None)
@@ -2752,8 +2857,8 @@ def test_save_verified_model_portfolio_result_checker_hash_mismatch_is_not_rejec
     )
     _fake_check_then_solve(
         monkeypatch,
-        check=FakeCompletedProcess(stdout="", stderr="", returncode=0),
-        solve=FakeCompletedProcess(stdout=solve_stdout, stderr="", returncode=0),
+        check=child_result(stdout="", stderr="", returncode=0),
+        solve=child_result(stdout=solve_stdout, stderr="", returncode=0),
     )
     target = tmp_path / "project"
     portfolio_result = _portfolio_result(checker_sha256="mismatched-hash".ljust(64, "0"))
@@ -2780,8 +2885,8 @@ def test_save_verified_model_portfolio_result_optimal_winner_does_not_bypass_fre
     is the case that actually proves the gate reads the fresh result."""
     _fake_check_then_solve(
         monkeypatch,
-        check=FakeCompletedProcess(stdout="", stderr="", returncode=0),
-        solve=FakeCompletedProcess(stdout=STREAM_UNSAT, stderr="", returncode=0),
+        check=child_result(stdout="", stderr="", returncode=0),
+        solve=child_result(stdout=STREAM_UNSAT, stderr="", returncode=0),
     )
     target = tmp_path / "project"
     portfolio_result = _portfolio_result(result_status="optimal")
@@ -2795,61 +2900,50 @@ def test_save_verified_model_portfolio_result_optimal_winner_does_not_bypass_fre
 # --- cancellable Popen runner (Capability 1, Task 1.2) ---------------------
 
 
-class _FakePopen:
-    """A subprocess.Popen stand-in exposing only what the cancellable runner reads.
+class _FakeHandle:
+    """Opaque process-handle stand-in the mocked executor hands to on_start."""
 
-    ``timeout_first_communicate`` makes the first ``communicate(timeout=...)`` raise
-    ``TimeoutExpired`` (the wall-clock cap firing); the drain call after termination
-    then returns the partial payload. ``poll()`` returns ``None`` until a wait/kill
-    sets ``returncode``, so ``_terminate_process_tree`` treats a fresh handle as live.
-    """
-
-    def __init__(
-        self,
-        *,
-        stdout: str = "",
-        stderr: str = "",
-        returncode: int = 0,
-        timeout_first_communicate: bool = False,
-    ) -> None:
+    def __init__(self) -> None:
         self.pid = 4321
-        self._stdout = stdout
-        self._stderr = stderr
-        self._final_rc = returncode
-        self.returncode: int | None = None
-        self._timeout_first = timeout_first_communicate
-        self.communicate_calls = 0
-        self.wait_calls = 0
-        self.terminate_calls = 0
-
-    def communicate(self, timeout: float | None = None) -> tuple[str, str]:
-        self.communicate_calls += 1
-        if self._timeout_first and timeout is not None and self.communicate_calls == 1:
-            raise subprocess.TimeoutExpired(cmd="minizinc", timeout=timeout)
-        self.returncode = self._final_rc
-        return self._stdout, self._stderr
-
-    def poll(self) -> int | None:
-        return self.returncode
-
-    def wait(self, timeout: float | None = None) -> int:
-        self.wait_calls += 1
-        self.returncode = self._final_rc
-        return self._final_rc
-
-    def terminate(self) -> None:
-        self.terminate_calls += 1
 
 
-def _patch_popen(monkeypatch: pytest.MonkeyPatch, fake: _FakePopen) -> list[dict[str, Any]]:
-    """Patch core.popen_process_group to record launch args and return ``fake``."""
+def _patch_cancellable_executor(
+    monkeypatch: pytest.MonkeyPatch, result: ChildExecutionResult
+) -> list[dict[str, Any]]:
+    """Patch ``minizinc.core.execute_child`` for the cancellable runner.
+
+    Records each call and returns ``result``. When the runner passes ``on_start``
+    (publish-for-cancellation), invokes it with a fake handle — mirroring the real
+    executor, which calls on_start with the live ``Popen`` right after launch. The
+    timeout / output-cap / tree-kill loop itself is covered once, in
+    ``tests/shared/test_childrun.py``.
+    """
     calls: list[dict[str, Any]] = []
 
-    def _fake_popen(*args: Any, **kwargs: Any) -> _FakePopen:
-        calls.append({"args": args, "kwargs": kwargs})
-        return fake
+    def _fake(
+        argv: list[str],
+        cwd: Any,
+        *,
+        timeout_ms: int,
+        tracker: Any = None,
+        on_start: Any = None,
+    ) -> ChildExecutionResult:
+        handle = _FakeHandle()
+        calls.append(
+            {
+                "argv": list(argv),
+                "cwd": str(cwd),
+                "timeout_ms": timeout_ms,
+                "tracker": tracker,
+                "on_start": on_start,
+                "handle": handle,
+            }
+        )
+        if on_start is not None:
+            on_start(handle)
+        return result
 
-    monkeypatch.setattr("openconstraint_mcp.minizinc.core.popen_process_group", _fake_popen)
+    monkeypatch.setattr("openconstraint_mcp.minizinc.core.execute_child", _fake)
     return calls
 
 
@@ -2861,7 +2955,7 @@ def test_solve_model_cancellable_does_not_resolve_capabilities(
     # stdFlags, so a re-resolve would also wrongly reject). A gated-control job
     # thus runs --solvers-json at most once — at admission, never in the worker.
     resolve_calls = _patch_capabilities(monkeypatch, {"cp-sat": SolverCapabilities()})
-    _patch_popen(monkeypatch, _FakePopen(stdout=STREAM_SATISFY, stderr="", returncode=0))
+    _patch_cancellable_executor(monkeypatch, child_result(stdout=STREAM_SATISFY, returncode=0))
     result = solve_model_cancellable(
         "var 1..5: x;\nsolve satisfy;",
         free_search=True,
@@ -2874,8 +2968,11 @@ def test_solve_model_cancellable_does_not_resolve_capabilities(
 def test_cancellable_runner_invokes_on_start_with_the_handle(
     fake_minizinc_binary: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    fake = _FakePopen(stdout=STREAM_SATISFY, stderr="", returncode=0)
-    _patch_popen(monkeypatch, fake)
+    # The cancellable runner forwards on_start to the executor, which calls it with
+    # the live handle so the caller can publish it for targeted cancellation.
+    calls = _patch_cancellable_executor(
+        monkeypatch, child_result(stdout=STREAM_SATISFY, returncode=0)
+    )
     seen: list[Any] = []
 
     _run_managed_minizinc_cancellable(
@@ -2886,13 +2983,15 @@ def test_cancellable_runner_invokes_on_start_with_the_handle(
         on_start=seen.append,
     )
 
-    assert seen == [fake]
+    assert seen == [calls[0]["handle"]]
 
 
 def test_cancellable_runner_clean_run_returns_outcome(
     fake_minizinc_binary: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    _patch_popen(monkeypatch, _FakePopen(stdout=STREAM_SATISFY, stderr="warn\n", returncode=0))
+    _patch_cancellable_executor(
+        monkeypatch, child_result(stdout=STREAM_SATISFY, stderr="warn\n", returncode=0)
+    )
 
     outcome = _run_managed_minizinc_cancellable(
         "var 1..5: x;\nsolve satisfy;",
@@ -2908,20 +3007,14 @@ def test_cancellable_runner_clean_run_returns_outcome(
     assert outcome.stderr == "warn\n"
 
 
-def test_cancellable_runner_timeout_terminates_tree_and_flags_timed_out(
+def test_cancellable_runner_timeout_adapts_to_timed_out_outcome(
     fake_minizinc_binary: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    # The wall-clock cap fires (first communicate raises TimeoutExpired); the runner
-    # must terminate the process tree and report a timed_out outcome with the drained
-    # partial output.
-    fake = _FakePopen(stdout="partial\n", stderr="", timeout_first_communicate=True)
-    _patch_popen(monkeypatch, fake)
-    killed: list[tuple[int, int]] = []
-    monkeypatch.setattr("openconstraint_mcp.shared.proc.os.getpgid", lambda _pid: 9999)
-    monkeypatch.setattr(
-        "openconstraint_mcp.shared.proc.os.killpg",
-        lambda pgid, sig: killed.append((pgid, sig)),
-    )
+    # The executor reports timed_out=True after its own tree-kill (covered in
+    # tests/shared/test_childrun.py); the cancellable runner's adapter must surface
+    # that as a timed_out outcome carrying the drained partial output and the -1
+    # returncode sentinel (never read while timed out).
+    _patch_cancellable_executor(monkeypatch, child_result(stdout="partial\n", timed_out=True))
 
     outcome = _run_managed_minizinc_cancellable(
         "var 1..5: x;\nsolve satisfy;",
@@ -2933,9 +3026,7 @@ def test_cancellable_runner_timeout_terminates_tree_and_flags_timed_out(
 
     assert outcome.timed_out is True
     assert outcome.stdout == "partial\n"
-    if sys.platform != "win32":
-        # SIGTERM was sent to the whole group (escalation to SIGKILL only if it survived).
-        assert (9999, signal.SIGTERM) in killed
+    assert outcome.returncode == -1
 
 
 def test_cancellable_runner_wraps_oserror_as_execution_error(
@@ -2944,7 +3035,7 @@ def test_cancellable_runner_wraps_oserror_as_execution_error(
     def _boom(*args: Any, **kwargs: Any) -> Any:
         raise OSError(8, "Exec format error")
 
-    monkeypatch.setattr("openconstraint_mcp.minizinc.core.popen_process_group", _boom)
+    monkeypatch.setattr("openconstraint_mcp.minizinc.core.execute_child", _boom)
 
     with pytest.raises(MiniZincExecutionError) as exc_info:
         _run_managed_minizinc_cancellable(

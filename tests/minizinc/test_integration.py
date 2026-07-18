@@ -178,6 +178,30 @@ def test_solve_model_all_solutions_enumerates_multiple() -> None:
     assert result.objective is None
 
 
+def test_solve_model_output_cap_truncates_large_enumeration() -> None:
+    # A high-cardinality `-a` enumeration on Gecode emits well past the 1 MiB output
+    # cap long before the 60 s timeout, so the executor tree-kills it and the runner
+    # reports a truncated-but-usable result. This proves the managed binary's stream
+    # is really capped and classified — the plumbing unit tests cannot show that.
+    result = solve_model(
+        "var 1..100000: x;\nsolve satisfy;",
+        solver="org.gecode.gecode",
+        all_solutions=True,
+        timeout_ms=60_000,
+    )
+
+    assert result.truncated is True
+    assert result.timed_out is False  # the cap fired, not the wall-clock deadline
+    assert result.status == "satisfied"  # partial enumeration, never the rc-error fallback
+    assert result.solutions  # partial solutions survive the kill
+    assert result.return_code is None  # the kill is ours, not the model's exit
+    assert result.diagnostic is not None
+    assert result.diagnostic.category == "output_truncated"
+    # The response stays bounded: stdout and stderr are each ≤ the 1 MiB cap, so a
+    # worst-case serialized SolveResult is a few MiB, not unbounded.
+    assert len(result.model_dump_json()) <= 8 * 1024 * 1024
+
+
 def test_solve_model_random_seed_runs_cleanly() -> None:
     # `random_seed` is accepted and the solve completes; the seed effect is
     # solver-internal, so assert only a clean satisfied result.

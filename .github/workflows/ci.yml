@@ -43,8 +43,11 @@ jobs:
           enable-cache: true
       - uses: extractions/setup-just@v4
       - run: just sync
-      # Unit tests only; integration tests need a real runtime and are excluded.
+      # Default suite excludes integration tests that may need a managed runtime.
       - run: just test
+      # These integration tests use only sys.executable and POSIX process groups.
+      - name: POSIX process-tree integration tests
+        run: just pytest -m integration tests/shared/
 
   build:
     runs-on: ubuntu-latest

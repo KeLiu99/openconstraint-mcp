@@ -185,7 +185,13 @@ SOLVE_MINIZINC_MODEL_DESCRIPTION = (
     "statement, and an `output` block. Optional `data` is `.dzn` text run as a "
     "data file beside the model (omit when none is needed). Returns a "
     "SolveResult: `status`, `solver`, `return_code` (null on a subprocess "
-    "timeout), `timed_out`, `elapsed_ms`, `stdout` (human-readable solution "
+    "timeout or an output-cap tree-kill; a child that overran the cap but "
+    "exited on its own keeps its genuine code), `timed_out`, `truncated` (the "
+    "child's combined stdout+stderr exceeded the 1 MiB cap — the child is "
+    "killed if still running, partial `solutions` are kept, and the "
+    "diagnostic is `output_truncated`; page with `num_solutions` on "
+    "`org.gecode.gecode`/`org.chuffed.chuffed` or shrink the model's `output`), "
+    "`elapsed_ms`, `stdout` (human-readable solution "
     "text, rebuilt from the solve stream's output sections), `stderr` "
     "(diagnostics — model/solver errors and warnings, so you can revise and "
     "retry), `solution` (best/last solution as a variable -> value map, model "
@@ -238,8 +244,10 @@ CHECK_MINIZINC_MODEL_DESCRIPTION = (
     "you can repair it before `solve_minizinc_model`. Optional `data` is `.dzn` "
     "text; a parameterized model needs the same `data` you'll pass to the solve "
     "in order to flatten (omit when none is needed). Returns a CheckResult: "
-    "`status` (`ok`/`error`/`timeout`), `solver`, raw `stdout`/`stderr`, "
-    "`elapsed_ms`. `ok` means it compiles, not that it is satisfiable."
+    "`status` (`ok`/`error`/`timeout`), `solver`, `truncated` (output exceeded "
+    "the 1 MiB cap; `stdout`/`stderr` are partial and the diagnostic is "
+    "`output_truncated`), raw `stdout`/`stderr`, `elapsed_ms`. `ok` means it "
+    "compiles, not that it is satisfiable."
 )
 
 INSPECT_MINIZINC_MODEL_DESCRIPTION = (
@@ -249,7 +257,9 @@ INSPECT_MINIZINC_MODEL_DESCRIPTION = (
     "`method` (`sat`/`min`/`max`), so you can build correct `.dzn` data before "
     "spending a solve. Optional `data` is `.dzn` text run beside the model (omit "
     "when none is needed). Returns a ModelInspectionResult: `status` "
-    "(`ok`/`error`/`timeout`), `solver`, raw `stdout`/`stderr`, `elapsed_ms`, "
+    "(`ok`/`error`/`timeout`), `solver`, `truncated` (output exceeded the "
+    "1 MiB cap; `stdout`/`stderr` are partial and the diagnostic is "
+    "`output_truncated`), raw `stdout`/`stderr`, `elapsed_ms`, "
     "and — only when `ok` — a structured `interface` with `method`, "
     "`required_parameters`, `output_variables`, `has_output_item`, `globals`, "
     "`included_files`. `required_parameters` is the set STILL needing a value "
@@ -268,7 +278,9 @@ FIND_UNSAT_CORE_DESCRIPTION = (
     "findMUS tool. Use it when solve_minizinc_model returns 'unsatisfiable'. "
     "Optional `data` is `.dzn` text; pass the SAME `data` you solved with (omit "
     "when none is needed). Returns an UnsatCoreResult: `status` "
-    "(`mus_found`/`no_core`/`error`/`timeout`), `core`, `message`, raw "
+    "(`mus_found`/`no_core`/`error`/`timeout`), `core`, `message`, `truncated` "
+    "(output exceeded the 1 MiB cap; a verdict parsed from the capped transcript "
+    "may be incomplete and the diagnostic is `output_truncated`), raw "
     "`stdout`/`stderr`, `elapsed_ms`. `core` is a best-effort structured list "
     "(source span + text) resolved from the MODEL FILE only — a decision "
     "variable assigned in `data` acts as a constraint, so a MUS member can "
@@ -344,8 +356,8 @@ CHECK_MINIZINC_FILES_DESCRIPTION = (
     "it — the path-based sibling of `check_minizinc_model`. "
     + _FILE_TOOL_SHARED_DESCRIPTION
     + " Returns the same CheckResult shape (`status` "
-    "`ok`/`error`/`timeout`, `solver`, `stdout`, `stderr`, `elapsed_ms`); "
-    "`ok` means it compiles, not that it is satisfiable."
+    "`ok`/`error`/`timeout`, `solver`, `truncated`, `stdout`, `stderr`, "
+    "`elapsed_ms`); `ok` means it compiles, not that it is satisfiable."
 )
 
 SOLVE_MINIZINC_FILES_DESCRIPTION = (
@@ -353,7 +365,8 @@ SOLVE_MINIZINC_FILES_DESCRIPTION = (
     "of `solve_minizinc_model`. "
     + _FILE_TOOL_SHARED_DESCRIPTION
     + " Returns the same SolveResult shape (`status`, `solver`, "
-    "`return_code`, `timed_out`, `elapsed_ms`, `stdout`, `stderr`, `solution`, "
+    "`return_code`, `timed_out`, `truncated` (output-cap overrun — see "
+    "`solve_minizinc_model`), `elapsed_ms`, `stdout`, `stderr`, `solution`, "
     "`solutions`, `objective`, `statistics`, `checker`) and the same "
     "model-visible `Statistics:` summary whenever the parsed map is non-empty; "
     "copy the entire section rather than summarizing selected fields. Accepts "
@@ -375,8 +388,9 @@ FIND_UNSAT_CORE_FILES_DESCRIPTION = (
     "runtime's findMUS tool — the path-based sibling of `find_unsat_core`. "
     + _FILE_TOOL_SHARED_DESCRIPTION
     + " Returns the same UnsatCoreResult shape (`status` "
-    "`mus_found`/`no_core`/`error`/`timeout`, `core`, `message`, `stdout`, "
-    "`stderr`, `elapsed_ms`). `core` resolves from the ENTRY MODEL FILE "
+    "`mus_found`/`no_core`/`error`/`timeout`, `core`, `message`, `truncated`, "
+    "`stdout`, `stderr`, `elapsed_ms`). `core` resolves from the ENTRY MODEL "
+    "FILE "
     "only, so a MUS member in an INCLUDED file appears in authoritative "
     "`stdout` but NOT in `core`. The subset is MINIMAL but not necessarily "
     "the globally smallest."
@@ -387,8 +401,9 @@ INSPECT_MINIZINC_FILES_DESCRIPTION = (
     "solving it — the path-based sibling of `inspect_minizinc_model`. "
     + _FILE_TOOL_SHARED_DESCRIPTION
     + " Returns the same ModelInspectionResult shape (`status` "
-    "`ok`/`error`/`timeout`, `solver`, `stdout`, `stderr`, `elapsed_ms`, and "
-    "the structured `interface` only when `ok`). `required_parameters` lists "
+    "`ok`/`error`/`timeout`, `solver`, `truncated`, `stdout`, `stderr`, "
+    "`elapsed_ms`, and the structured `interface` only when `ok`). "
+    "`required_parameters` lists "
     "the parameters still needing a value given any `data_path`; an empty "
     '`required_parameters` means the data is complete, but `status="ok"` '
     "alone does NOT — it means only that the interface was extracted. Enum "
