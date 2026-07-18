@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import subprocess
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
@@ -1062,8 +1063,21 @@ def test_solve_model_defaults_match_module_constants(
     assert cmd[cmd.index("--time-limit") + 1] == str(DEFAULT_SOLVE_TIMEOUT_MS)
 
 
-@pytest.mark.parametrize("bad_model", ["", "\n\n  \t\n"])
-def test_solve_model_rejects_empty_or_whitespace_model(
+_EMPTY_OR_WHITESPACE_MODEL_CASES = [
+    pytest.param(solve_model, "", id="solve_model-empty"),
+    pytest.param(solve_model, "\n\n  \t\n", id="solve_model-whitespace"),
+    pytest.param(check_model, "", id="check_model-empty"),
+    pytest.param(check_model, "\n\n  \t\n", id="check_model-whitespace"),
+    pytest.param(find_unsat_core, "", id="find_unsat_core-empty"),
+    pytest.param(find_unsat_core, "\n  \t", id="find_unsat_core-whitespace"),
+    pytest.param(inspect_model, "", id="inspect_model-empty"),
+    pytest.param(inspect_model, "\n\n  \t\n", id="inspect_model-whitespace"),
+]
+
+
+@pytest.mark.parametrize(("entry_point", "bad_model"), _EMPTY_OR_WHITESPACE_MODEL_CASES)
+def test_rejects_empty_or_whitespace_model(
+    entry_point: Callable[..., Any],
     bad_model: str,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1073,11 +1087,24 @@ def test_solve_model_rejects_empty_or_whitespace_model(
     monkeypatch.setattr("openconstraint_mcp.minizinc.core.execute_child", _fail_if_called)
 
     with pytest.raises(ValueError, match="empty"):
-        solve_model(bad_model)
+        entry_point(bad_model)
 
 
-@pytest.mark.parametrize("bad_timeout", [0, -1])
-def test_solve_model_rejects_non_positive_timeout(
+_NON_POSITIVE_TIMEOUT_CASES = [
+    pytest.param(solve_model, "solve satisfy;", 0, id="solve_model-zero"),
+    pytest.param(solve_model, "solve satisfy;", -1, id="solve_model-negative"),
+    pytest.param(check_model, "solve satisfy;", 0, id="check_model-zero"),
+    pytest.param(check_model, "solve satisfy;", -1, id="check_model-negative"),
+    pytest.param(find_unsat_core, UNSAT_CORE_MODEL, 0, id="find_unsat_core-zero"),
+    pytest.param(find_unsat_core, UNSAT_CORE_MODEL, -1, id="find_unsat_core-negative"),
+    pytest.param(inspect_model, "solve satisfy;", 0, id="inspect_model-zero"),
+]
+
+
+@pytest.mark.parametrize(("entry_point", "model", "bad_timeout"), _NON_POSITIVE_TIMEOUT_CASES)
+def test_rejects_non_positive_timeout(
+    entry_point: Callable[..., Any],
+    model: str,
     bad_timeout: int,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1087,24 +1114,49 @@ def test_solve_model_rejects_non_positive_timeout(
     monkeypatch.setattr("openconstraint_mcp.minizinc.core.execute_child", _fail_if_called)
 
     with pytest.raises(ValueError, match="positive"):
-        solve_model("solve satisfy;", timeout_ms=bad_timeout)
+        entry_point(model, timeout_ms=bad_timeout)
 
 
-def test_solve_model_timeout_validation_precedes_runtime_check(
+@pytest.mark.parametrize(
+    "entry_point",
+    [
+        pytest.param(solve_model, id="solve_model"),
+        pytest.param(check_model, id="check_model"),
+    ],
+)
+def test_timeout_validation_precedes_runtime_check(
+    entry_point: Callable[..., Any],
     fake_runtime_dir: Path,
 ) -> None:
     with pytest.raises(ValueError, match="positive"):
-        solve_model("solve satisfy;", timeout_ms=0)
+        entry_point("solve satisfy;", timeout_ms=0)
 
 
-def test_solve_model_raises_when_runtime_missing(
+_MISSING_RUNTIME_CASES = [
+    pytest.param(solve_model, "solve satisfy;", ("install-runtime", "MiniZinc"), id="solve_model"),
+    pytest.param(check_model, "solve satisfy;", ("install-runtime", "MiniZinc"), id="check_model"),
+    pytest.param(
+        find_unsat_core,
+        UNSAT_CORE_MODEL,
+        ("install-runtime", "MiniZinc"),
+        id="find_unsat_core",
+    ),
+    pytest.param(inspect_model, "solve satisfy;", ("install-runtime",), id="inspect_model"),
+]
+
+
+@pytest.mark.parametrize(("entry_point", "model", "expected_fragments"), _MISSING_RUNTIME_CASES)
+def test_raises_when_runtime_missing(
+    entry_point: Callable[..., Any],
+    model: str,
+    expected_fragments: tuple[str, ...],
     fake_runtime_dir: Path,
 ) -> None:
     with pytest.raises(RuntimeMissingError) as exc_info:
-        solve_model("solve satisfy;")
+        entry_point(model)
     message = str(exc_info.value)
-    assert "install-runtime" in message
-    assert "MiniZinc" in message
+    for fragment in expected_fragments:
+        assert fragment in message
 
 
 def test_solve_model_returns_structured_result_for_minizinc_compile_error(
@@ -1288,7 +1340,17 @@ def test_solve_model_truncated_and_timed_out_keeps_timeout_verdict() -> None:
     assert result.return_code is None
 
 
-def test_solve_model_wraps_oserror_as_execution_error(
+_OSERROR_TRANSLATION_CASES = [
+    pytest.param(solve_model, "solve satisfy;", id="solve_model"),
+    pytest.param(check_model, "solve satisfy;", id="check_model"),
+    pytest.param(find_unsat_core, UNSAT_CORE_MODEL, id="find_unsat_core"),
+]
+
+
+@pytest.mark.parametrize(("entry_point", "model"), _OSERROR_TRANSLATION_CASES)
+def test_wraps_oserror_as_execution_error(
+    entry_point: Callable[..., Any],
+    model: str,
     fake_minizinc_binary: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1298,7 +1360,7 @@ def test_solve_model_wraps_oserror_as_execution_error(
     monkeypatch.setattr("openconstraint_mcp.minizinc.core.execute_child", _fake_run)
 
     with pytest.raises(MiniZincExecutionError) as exc_info:
-        solve_model("solve satisfy;")
+        entry_point(model)
     assert "install-runtime" in str(exc_info.value)
 
 
@@ -1467,51 +1529,6 @@ def test_check_model_returns_structured_result_for_compile_error(
     assert "type error" in result.stderr
 
 
-@pytest.mark.parametrize("bad_model", ["", "\n\n  \t\n"])
-def test_check_model_rejects_empty_or_whitespace_model(
-    bad_model: str,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    def _fail_if_called(*args: Any, **kwargs: Any) -> Any:
-        raise AssertionError("subprocess.run must not be invoked for empty model")
-
-    monkeypatch.setattr("openconstraint_mcp.minizinc.core.execute_child", _fail_if_called)
-
-    with pytest.raises(ValueError, match="empty"):
-        check_model(bad_model)
-
-
-@pytest.mark.parametrize("bad_timeout", [0, -1])
-def test_check_model_rejects_non_positive_timeout(
-    bad_timeout: int,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    def _fail_if_called(*args: Any, **kwargs: Any) -> Any:
-        raise AssertionError("subprocess.run must not be invoked for bad timeout")
-
-    monkeypatch.setattr("openconstraint_mcp.minizinc.core.execute_child", _fail_if_called)
-
-    with pytest.raises(ValueError, match="positive"):
-        check_model("solve satisfy;", timeout_ms=bad_timeout)
-
-
-def test_check_model_timeout_validation_precedes_runtime_check(
-    fake_runtime_dir: Path,
-) -> None:
-    with pytest.raises(ValueError, match="positive"):
-        check_model("solve satisfy;", timeout_ms=0)
-
-
-def test_check_model_raises_when_runtime_missing(
-    fake_runtime_dir: Path,
-) -> None:
-    with pytest.raises(RuntimeMissingError) as exc_info:
-        check_model("solve satisfy;")
-    message = str(exc_info.value)
-    assert "install-runtime" in message
-    assert "MiniZinc" in message
-
-
 def test_check_model_timeout_with_bytes_payload_decodes(
     fake_minizinc_binary: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -1527,20 +1544,6 @@ def test_check_model_timeout_with_bytes_payload_decodes(
     assert result.stdout == "partial"
     assert result.stderr == ""
     assert result.elapsed_ms >= 0
-
-
-def test_check_model_wraps_oserror_as_execution_error(
-    fake_minizinc_binary: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    def _fake_run(*args: Any, **kwargs: Any) -> None:
-        raise OSError(8, "Exec format error")
-
-    monkeypatch.setattr("openconstraint_mcp.minizinc.core.execute_child", _fake_run)
-
-    with pytest.raises(MiniZincExecutionError) as exc_info:
-        check_model("solve satisfy;")
-    assert "install-runtime" in str(exc_info.value)
 
 
 def test_find_unsat_core_mus_found_preserves_raw_output(
@@ -1705,56 +1708,6 @@ def test_find_unsat_core_timeout_with_bytes_payload_decodes(
     assert result.stdout == "partial"
 
 
-@pytest.mark.parametrize("bad_model", ["", "\n  \t"])
-def test_find_unsat_core_rejects_empty_or_whitespace_model(
-    bad_model: str,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    def _fail_if_called(*args: Any, **kwargs: Any) -> Any:
-        raise AssertionError("subprocess.run must not be invoked for empty model")
-
-    monkeypatch.setattr("openconstraint_mcp.minizinc.core.execute_child", _fail_if_called)
-
-    with pytest.raises(ValueError, match="empty"):
-        find_unsat_core(bad_model)
-
-
-@pytest.mark.parametrize("bad_timeout", [0, -1])
-def test_find_unsat_core_rejects_non_positive_timeout(
-    bad_timeout: int,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    def _fail_if_called(*args: Any, **kwargs: Any) -> Any:
-        raise AssertionError("subprocess.run must not be invoked for bad timeout")
-
-    monkeypatch.setattr("openconstraint_mcp.minizinc.core.execute_child", _fail_if_called)
-
-    with pytest.raises(ValueError, match="positive"):
-        find_unsat_core(UNSAT_CORE_MODEL, timeout_ms=bad_timeout)
-
-
-def test_find_unsat_core_raises_when_runtime_missing(fake_runtime_dir: Path) -> None:
-    with pytest.raises(RuntimeMissingError) as exc_info:
-        find_unsat_core(UNSAT_CORE_MODEL)
-    message = str(exc_info.value)
-    assert "install-runtime" in message
-    assert "MiniZinc" in message
-
-
-def test_find_unsat_core_wraps_oserror_as_execution_error(
-    fake_minizinc_binary: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    def _fake_run(*args: Any, **kwargs: Any) -> None:
-        raise OSError(8, "Exec format error")
-
-    monkeypatch.setattr("openconstraint_mcp.minizinc.core.execute_child", _fake_run)
-
-    with pytest.raises(MiniZincExecutionError) as exc_info:
-        find_unsat_core(UNSAT_CORE_MODEL)
-    assert "install-runtime" in str(exc_info.value)
-
-
 def test_find_unsat_core_uses_default_timeout(
     fake_minizinc_binary: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -1913,38 +1866,6 @@ def test_inspect_model_forwards_inline_data_positionally(
     assert result.status == "ok"
     assert result.interface is not None
     assert result.interface.required_parameters == {}
-
-
-@pytest.mark.parametrize("bad_model", ["", "\n\n  \t\n"])
-def test_inspect_model_rejects_empty_or_whitespace_model(
-    bad_model: str,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    def _fail_if_called(*args: Any, **kwargs: Any) -> Any:
-        raise AssertionError("subprocess.run must not be invoked for empty model")
-
-    monkeypatch.setattr("openconstraint_mcp.minizinc.core.execute_child", _fail_if_called)
-
-    with pytest.raises(ValueError, match="empty"):
-        inspect_model(bad_model)
-
-
-def test_inspect_model_rejects_non_positive_timeout(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    def _fail_if_called(*args: Any, **kwargs: Any) -> Any:
-        raise AssertionError("subprocess.run must not be invoked for bad timeout")
-
-    monkeypatch.setattr("openconstraint_mcp.minizinc.core.execute_child", _fail_if_called)
-
-    with pytest.raises(ValueError, match="positive"):
-        inspect_model("solve satisfy;", timeout_ms=0)
-
-
-def test_inspect_model_raises_when_runtime_missing(fake_runtime_dir: Path) -> None:
-    with pytest.raises(RuntimeMissingError) as exc_info:
-        inspect_model("solve satisfy;")
-    assert "install-runtime" in str(exc_info.value)
 
 
 def test_inspect_default_timeout_aliases_check_budget() -> None:

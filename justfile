@@ -24,6 +24,11 @@ cli *args:
 test:
     @uv run pytest -ra || [ "$?" = "5" ]
 
+# Run unit tests with branch coverage and report missed lines.
+coverage:
+    uv run coverage run --branch --source=src/openconstraint_mcp -m pytest
+    uv run coverage report --show-missing
+
 # Run pytest with arbitrary args, e.g. `just pytest tests/test_cli.py::test_help_lists_all_commands -v`.
 pytest *args:
     uv run pytest {{args}}

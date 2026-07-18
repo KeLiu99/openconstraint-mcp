@@ -8,6 +8,7 @@ from unittest.mock import patch
 
 import pytest
 
+from openconstraint_mcp.pyexec.checker import run_checker
 from openconstraint_mcp.schemas.cpsat import CpsatCheckerReport, CpsatPythonResult
 from openconstraint_mcp.shared.childrun import ChildExecutionResult
 
@@ -71,8 +72,6 @@ class _SpyTracker:
 
 
 def test_checker_accepted_returns_accepted_report(monkeypatch: pytest.MonkeyPatch) -> None:
-    from openconstraint_mcp.pyexec.checker import run_checker
-
     _patch_runner(monkeypatch, _make_child_result())
     report = run_checker(
         _CHECKER_SOURCE, _OPTIMAL_RESULT, problem=None, timeout_ms=5000, tracker=None
@@ -87,8 +86,6 @@ def test_checker_accepted_returns_accepted_report(monkeypatch: pytest.MonkeyPatc
 
 
 def test_checker_rejected_returns_rejected_report(monkeypatch: pytest.MonkeyPatch) -> None:
-    from openconstraint_mcp.pyexec.checker import run_checker
-
     _patch_runner(
         monkeypatch,
         _make_child_result(stdout='{"status":"rejected","errors":["constraint violated"]}'),
@@ -104,8 +101,6 @@ def test_checker_rejected_returns_rejected_report(monkeypatch: pytest.MonkeyPatc
 
 
 def test_checker_nonzero_exit_returns_error(monkeypatch: pytest.MonkeyPatch) -> None:
-    from openconstraint_mcp.pyexec.checker import run_checker
-
     _patch_runner(monkeypatch, _make_child_result(return_code=1, stdout=""))
     report = run_checker(
         _CHECKER_SOURCE, _OPTIMAL_RESULT, problem=None, timeout_ms=5000, tracker=None
@@ -118,8 +113,6 @@ def test_checker_nonzero_exit_returns_error(monkeypatch: pytest.MonkeyPatch) -> 
 
 
 def test_checker_timeout_returns_timeout_report(monkeypatch: pytest.MonkeyPatch) -> None:
-    from openconstraint_mcp.pyexec.checker import run_checker
-
     _patch_runner(monkeypatch, _make_child_result(timed_out=True, return_code=0))
     report = run_checker(
         _CHECKER_SOURCE, _OPTIMAL_RESULT, problem=None, timeout_ms=100, tracker=None
@@ -132,8 +125,6 @@ def test_checker_timeout_returns_timeout_report(monkeypatch: pytest.MonkeyPatch)
 
 
 def test_checker_truncated_output_returns_error(monkeypatch: pytest.MonkeyPatch) -> None:
-    from openconstraint_mcp.pyexec.checker import run_checker
-
     _patch_runner(monkeypatch, _make_child_result(truncated=True, return_code=0))
     report = run_checker(
         _CHECKER_SOURCE, _OPTIMAL_RESULT, problem=None, timeout_ms=5000, tracker=None
@@ -146,8 +137,6 @@ def test_checker_truncated_output_returns_error(monkeypatch: pytest.MonkeyPatch)
 
 
 def _run_with_stdout(monkeypatch: pytest.MonkeyPatch, stdout: str) -> CpsatCheckerReport:
-    from openconstraint_mcp.pyexec.checker import run_checker
-
     _patch_runner(monkeypatch, _make_child_result(stdout=stdout))
     return run_checker(
         _CHECKER_SOURCE, _OPTIMAL_RESULT, problem=None, timeout_ms=5000, tracker=None
@@ -222,8 +211,6 @@ def test_checker_accepted_with_non_empty_errors_returns_error(
 
 def test_checker_registers_then_unregisters_subprocess() -> None:
     """Checker subprocess is registered with tracker then unregistered."""
-    from openconstraint_mcp.pyexec.checker import run_checker
-
     tracker = _SpyTracker()
     proc_handle: list[Any] = []
 
@@ -262,8 +249,6 @@ def test_checker_registers_then_unregisters_subprocess() -> None:
 def test_checker_on_start_receives_checker_child_popen(monkeypatch: pytest.MonkeyPatch) -> None:
     """run_checker forwards on_start to execute_child, which calls it with the
     checker child's Popen handle (here simulated by the fake runner)."""
-    from openconstraint_mcp.pyexec.checker import run_checker
-
     fake_proc = object()
     received: list[Any] = []
 

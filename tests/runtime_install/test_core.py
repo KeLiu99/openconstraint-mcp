@@ -199,28 +199,22 @@ def test_install_macos_arm64_smoke_check_failure_leaves_target_untouched(
     assert siblings == []
 
 
-def test_install_rejects_unsupported_platform(
+@pytest.mark.parametrize(
+    ("bad_platform", "bad_arch"),
+    [
+        pytest.param("darwin", "x86_64", id="unsupported-platform"),
+        pytest.param("linux", "aarch64", id="unsupported-arch"),
+    ],
+)
+def test_install_rejects_unsupported_platform_or_arch(
+    bad_platform: str,
+    bad_arch: str,
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setattr("openconstraint_mcp.runtime_install.download.sys.platform", "darwin")
+    monkeypatch.setattr("openconstraint_mcp.runtime_install.download.sys.platform", bad_platform)
     monkeypatch.setattr(
-        "openconstraint_mcp.runtime_install.download.platform.machine", lambda: "x86_64"
-    )
-    with pytest.raises(RuntimeInstallError) as exc_info:
-        install_managed_runtime(tmp_path / "runtime", console=_quiet_console())
-    message = str(exc_info.value)
-    assert "Linux x86_64" in message
-    assert "macOS arm64" in message
-
-
-def test_install_rejects_unsupported_arch(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    monkeypatch.setattr("openconstraint_mcp.runtime_install.download.sys.platform", "linux")
-    monkeypatch.setattr(
-        "openconstraint_mcp.runtime_install.download.platform.machine", lambda: "aarch64"
+        "openconstraint_mcp.runtime_install.download.platform.machine", lambda: bad_arch
     )
     with pytest.raises(RuntimeInstallError) as exc_info:
         install_managed_runtime(tmp_path / "runtime", console=_quiet_console())

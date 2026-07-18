@@ -12,6 +12,12 @@ import pytest
 from mcp.types import CallToolResult
 
 from openconstraint_mcp.jobs.registry import JobRegistry
+from openconstraint_mcp.schemas.cpsat import (
+    CpsatPythonExperimentAttempt,
+    CpsatPythonExperimentAttemptResult,
+    CpsatPythonExperimentResult,
+    CpsatPythonResult,
+)
 from openconstraint_mcp.schemas.minizinc import (
     SolverCapabilities,
     SolveResult,
@@ -29,6 +35,7 @@ from openconstraint_mcp.server import (
 )
 from openconstraint_mcp.shared.childrun import ChildExecutionResult
 from openconstraint_mcp.shared.job_errors import JobRejectedError
+from openconstraint_mcp.shared.save_target import EXPERIMENT_LOG_FILENAME, text_sha256
 from tests.minizinc.helpers import (
     UNSAT_CORE_MODEL,
     UNSAT_CORE_STDOUT,
@@ -535,12 +542,17 @@ async def test_solve_minizinc_model_omits_visible_statistics_when_empty(
 
 
 @pytest.mark.asyncio
-async def test_solve_minizinc_model_runtime_missing_surfaces_actionable_error(
+@pytest.mark.parametrize(
+    "tool_name",
+    ["solve_minizinc_model", "check_minizinc_model", "inspect_minizinc_model", "find_unsat_core"],
+)
+async def test_runtime_missing_surfaces_actionable_error(
+    tool_name: str,
     fake_runtime_dir: Path,
 ) -> None:
     mcp = create_mcp_server()
     with pytest.raises(Exception) as exc_info:
-        await mcp.call_tool("solve_minizinc_model", {"model": "solve satisfy;"})
+        await mcp.call_tool(tool_name, {"model": "solve satisfy;"})
 
     message = str(exc_info.value)
     assert "install-runtime" in message
@@ -548,7 +560,12 @@ async def test_solve_minizinc_model_runtime_missing_surfaces_actionable_error(
 
 
 @pytest.mark.asyncio
-async def test_solve_minizinc_model_empty_model_surfaces_actionable_error(
+@pytest.mark.parametrize(
+    "tool_name",
+    ["solve_minizinc_model", "check_minizinc_model", "inspect_minizinc_model", "find_unsat_core"],
+)
+async def test_empty_model_surfaces_actionable_error(
+    tool_name: str,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     def _fail_if_called(*args: object, **kwargs: object) -> None:
@@ -558,12 +575,21 @@ async def test_solve_minizinc_model_empty_model_surfaces_actionable_error(
 
     mcp = create_mcp_server()
     with pytest.raises(Exception) as exc_info:
-        await mcp.call_tool("solve_minizinc_model", {"model": ""})
+        await mcp.call_tool(tool_name, {"model": ""})
     assert "empty" in str(exc_info.value)
 
 
 @pytest.mark.asyncio
-async def test_solve_minizinc_model_non_positive_timeout_surfaces_actionable_error(
+@pytest.mark.parametrize(
+    ("tool_name", "model"),
+    [
+        ("solve_minizinc_model", "solve satisfy;"),
+        ("find_unsat_core", "constraint false;\nsolve satisfy;"),
+    ],
+)
+async def test_non_positive_timeout_surfaces_actionable_error(
+    tool_name: str,
+    model: str,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     def _fail_if_called(*args: object, **kwargs: object) -> None:
@@ -574,8 +600,8 @@ async def test_solve_minizinc_model_non_positive_timeout_surfaces_actionable_err
     mcp = create_mcp_server()
     with pytest.raises(Exception) as exc_info:
         await mcp.call_tool(
-            "solve_minizinc_model",
-            {"model": "solve satisfy;", "timeout_ms": 0},
+            tool_name,
+            {"model": model, "timeout_ms": 0},
         )
     assert "positive" in str(exc_info.value)
 
@@ -821,34 +847,6 @@ async def test_check_minizinc_model_compile_error_returns_structured_result(
     assert "type error" in structured["stderr"]
 
 
-@pytest.mark.asyncio
-async def test_check_minizinc_model_runtime_missing_surfaces_actionable_error(
-    fake_runtime_dir: Path,
-) -> None:
-    mcp = create_mcp_server()
-    with pytest.raises(Exception) as exc_info:
-        await mcp.call_tool("check_minizinc_model", {"model": "solve satisfy;"})
-
-    message = str(exc_info.value)
-    assert "install-runtime" in message
-    assert "MiniZinc" in message
-
-
-@pytest.mark.asyncio
-async def test_check_minizinc_model_empty_model_surfaces_actionable_error(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    def _fail_if_called(*args: object, **kwargs: object) -> None:
-        raise AssertionError("subprocess.run must not be invoked for empty model")
-
-    monkeypatch.setattr("openconstraint_mcp.minizinc.core.execute_child", _fail_if_called)
-
-    mcp = create_mcp_server()
-    with pytest.raises(Exception) as exc_info:
-        await mcp.call_tool("check_minizinc_model", {"model": ""})
-    assert "empty" in str(exc_info.value)
-
-
 _SOLVE_ONLY_CONTROLS = {"free_search", "parallel", "random_seed", "all_solutions", "num_solutions"}
 
 # A single-line interface object as the managed binary emits under
@@ -938,34 +936,6 @@ async def test_inspect_minizinc_model_happy_path(
 
 
 @pytest.mark.asyncio
-async def test_inspect_minizinc_model_runtime_missing_surfaces_actionable_error(
-    fake_runtime_dir: Path,
-) -> None:
-    mcp = create_mcp_server()
-    with pytest.raises(Exception) as exc_info:
-        await mcp.call_tool("inspect_minizinc_model", {"model": "solve satisfy;"})
-
-    message = str(exc_info.value)
-    assert "install-runtime" in message
-    assert "MiniZinc" in message
-
-
-@pytest.mark.asyncio
-async def test_inspect_minizinc_model_empty_model_surfaces_actionable_error(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    def _fail_if_called(*args: object, **kwargs: object) -> None:
-        raise AssertionError("subprocess.run must not be invoked for empty model")
-
-    monkeypatch.setattr("openconstraint_mcp.minizinc.core.execute_child", _fail_if_called)
-
-    mcp = create_mcp_server()
-    with pytest.raises(Exception) as exc_info:
-        await mcp.call_tool("inspect_minizinc_model", {"model": ""})
-    assert "empty" in str(exc_info.value)
-
-
-@pytest.mark.asyncio
 async def test_find_unsat_core_tool_is_listed() -> None:
     mcp = create_mcp_server()
     tools = await mcp.list_tools()
@@ -1019,52 +989,6 @@ async def test_find_unsat_core_threads_inline_data_to_runtime(
 
     assert calls[0]["data_contents"] == "lo = 5;"
     assert _structured(result)["status"] == "mus_found"
-
-
-@pytest.mark.asyncio
-async def test_find_unsat_core_runtime_missing_surfaces_actionable_error(
-    fake_runtime_dir: Path,
-) -> None:
-    mcp = create_mcp_server()
-    with pytest.raises(Exception) as exc_info:
-        await mcp.call_tool("find_unsat_core", {"model": "solve satisfy;"})
-
-    message = str(exc_info.value)
-    assert "install-runtime" in message
-    assert "MiniZinc" in message
-
-
-@pytest.mark.asyncio
-async def test_find_unsat_core_empty_model_surfaces_actionable_error(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    def _fail_if_called(*args: object, **kwargs: object) -> None:
-        raise AssertionError("subprocess.run must not be invoked for empty model")
-
-    monkeypatch.setattr("openconstraint_mcp.minizinc.core.execute_child", _fail_if_called)
-
-    mcp = create_mcp_server()
-    with pytest.raises(Exception) as exc_info:
-        await mcp.call_tool("find_unsat_core", {"model": ""})
-    assert "empty" in str(exc_info.value)
-
-
-@pytest.mark.asyncio
-async def test_find_unsat_core_non_positive_timeout_surfaces_actionable_error(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    def _fail_if_called(*args: object, **kwargs: object) -> None:
-        raise AssertionError("subprocess.run must not be invoked for bad timeout")
-
-    monkeypatch.setattr("openconstraint_mcp.minizinc.core.execute_child", _fail_if_called)
-
-    mcp = create_mcp_server()
-    with pytest.raises(Exception) as exc_info:
-        await mcp.call_tool(
-            "find_unsat_core",
-            {"model": "constraint false;\nsolve satisfy;", "timeout_ms": 0},
-        )
-    assert "positive" in str(exc_info.value)
 
 
 # --- path-based file tools -------------------------------------------------
@@ -1794,54 +1718,33 @@ async def test_solve_minizinc_model_with_checker_reports_checker_stage_messages(
 
 
 @pytest.mark.asyncio
-async def test_check_minizinc_model_reports_stage_schedule(
+@pytest.mark.parametrize(
+    ("tool_name", "fake_stdout", "model", "final_message"),
+    [
+        ("check_minizinc_model", "", "solve satisfy;", "Check complete"),
+        ("inspect_minizinc_model", _INSPECT_STDOUT, "solve satisfy;", "Inspection complete"),
+        ("find_unsat_core", UNSAT_CORE_STDOUT, UNSAT_CORE_MODEL, "Unsat-core analysis complete"),
+    ],
+    ids=["check_minizinc_model", "inspect_minizinc_model", "find_unsat_core"],
+)
+async def test_reports_stage_schedule(
+    tool_name: str,
+    fake_stdout: str,
+    model: str,
+    final_message: str,
     fake_minizinc_binary: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr(
         "openconstraint_mcp.minizinc.core.execute_child",
-        lambda *a, **k: child_result(stdout="", stderr="", returncode=0),
+        lambda *a, **k: child_result(stdout=fake_stdout, stderr="", returncode=0),
     )
     mcp = create_mcp_server()
     ctx = _FakeStatusContext()
 
-    await _tool_fn(mcp, "check_minizinc_model")(model="solve satisfy;", ctx=ctx)
+    await _tool_fn(mcp, tool_name)(model=model, ctx=ctx)
 
-    _assert_dual_channel_schedule(ctx, "Check complete")
-
-
-@pytest.mark.asyncio
-async def test_inspect_minizinc_model_reports_stage_schedule(
-    fake_minizinc_binary: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    monkeypatch.setattr(
-        "openconstraint_mcp.minizinc.core.execute_child",
-        lambda *a, **k: child_result(stdout=_INSPECT_STDOUT, stderr="", returncode=0),
-    )
-    mcp = create_mcp_server()
-    ctx = _FakeStatusContext()
-
-    await _tool_fn(mcp, "inspect_minizinc_model")(model="solve satisfy;", ctx=ctx)
-
-    _assert_dual_channel_schedule(ctx, "Inspection complete")
-
-
-@pytest.mark.asyncio
-async def test_find_unsat_core_reports_stage_schedule(
-    fake_minizinc_binary: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    monkeypatch.setattr(
-        "openconstraint_mcp.minizinc.core.execute_child",
-        lambda *a, **k: child_result(stdout=UNSAT_CORE_STDOUT, stderr="", returncode=0),
-    )
-    mcp = create_mcp_server()
-    ctx = _FakeStatusContext()
-
-    await _tool_fn(mcp, "find_unsat_core")(model=UNSAT_CORE_MODEL, ctx=ctx)
-
-    _assert_dual_channel_schedule(ctx, "Unsat-core analysis complete")
+    _assert_dual_channel_schedule(ctx, final_message)
 
 
 @pytest.mark.asyncio
@@ -2054,7 +1957,6 @@ async def test_save_verified_minizinc_model_with_portfolio_result_writes_experim
         PortfolioSolveControls,
         PortfolioSolveResult,
     )
-    from openconstraint_mcp.shared.save_target import text_sha256
 
     _fake_save_subprocess(
         monkeypatch,
@@ -2496,8 +2398,6 @@ async def test_background_portfolio_provenance_threads_to_save(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    from openconstraint_mcp.shared.save_target import EXPERIMENT_LOG_FILENAME, text_sha256
-
     model = _SAVE_TOOL_MODEL
     data = "n = 3;\n"
     checker = "% portfolio checker\n"
@@ -2709,8 +2609,6 @@ async def test_run_cpsat_python_tool_is_listed() -> None:
 async def test_run_cpsat_python_routes_to_cpsat_result(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from openconstraint_mcp.schemas.cpsat import CpsatPythonResult
-
     fake_result = CpsatPythonResult(
         status="optimal",
         solution={"x": 3},
@@ -2770,13 +2668,6 @@ async def test_run_cpsat_python_experiment_tool_is_listed() -> None:
 async def test_run_cpsat_python_experiment_routes_to_experiment_result(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from openconstraint_mcp.schemas.cpsat import (
-        CpsatPythonExperimentAttempt,
-        CpsatPythonExperimentAttemptResult,
-        CpsatPythonExperimentResult,
-        CpsatPythonResult,
-    )
-
     winner = CpsatPythonResult(
         status="optimal",
         solution={"x": 4},
@@ -2859,13 +2750,6 @@ async def test_run_cpsat_python_experiment_routes_to_experiment_result(
 async def test_run_cpsat_python_experiment_forwards_include_winner_stdout(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from openconstraint_mcp.schemas.cpsat import (
-        CpsatPythonExperimentAttempt,
-        CpsatPythonExperimentAttemptResult,
-        CpsatPythonExperimentResult,
-        CpsatPythonResult,
-    )
-
     winner = CpsatPythonResult(
         status="optimal",
         solution={"x": 4},
@@ -2932,13 +2816,6 @@ async def test_run_cpsat_python_experiment_forwards_include_winner_stdout(
 async def test_run_cpsat_python_experiment_prints_warnings_section(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from openconstraint_mcp.schemas.cpsat import (
-        CpsatPythonExperimentAttempt,
-        CpsatPythonExperimentAttemptResult,
-        CpsatPythonExperimentResult,
-        CpsatPythonResult,
-    )
-
     winner = CpsatPythonResult(
         status="optimal",
         solution={"x": 4},
@@ -3013,12 +2890,6 @@ async def test_run_cpsat_python_experiment_attempt_line_shows_best_objective_bou
     """An unknown/rejected attempt's best_objective_bound must be visible in the
     plain-text attempt table too, not just structuredContent — otherwise a
     text-only client loses the diagnostic this field exists for."""
-    from openconstraint_mcp.schemas.cpsat import (
-        CpsatPythonExperimentAttempt,
-        CpsatPythonExperimentAttemptResult,
-        CpsatPythonExperimentResult,
-    )
-
     fake_result = CpsatPythonExperimentResult(
         status="no_winner",
         attempts=[
@@ -3082,10 +2953,6 @@ async def test_run_cpsat_python_file_tool_is_listed() -> None:
 async def test_run_cpsat_python_file_routes_path_to_cpsat_result(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from pathlib import Path
-
-    from openconstraint_mcp.schemas.cpsat import CpsatPythonResult
-
     fake_result = CpsatPythonResult(
         status="optimal",
         solution={"x": 3},
@@ -3190,8 +3057,6 @@ async def test_run_cpsat_python_file_without_seed_or_config_clears_both_env_vars
 
 
 def _fake_cpsat_result(status: str = "optimal") -> Any:
-    from openconstraint_mcp.schemas.cpsat import CpsatPythonResult
-
     return CpsatPythonResult(
         status=status,  # type: ignore[arg-type]
         solution={"x": 1},
@@ -3379,8 +3244,6 @@ def _fake_cpsat_run_result(
     stdout: str = '{"status":"optimal","objective":3,"solution":{"x":3}}',
     duration_ms: int = 10,
 ) -> Any:
-    from openconstraint_mcp.schemas.cpsat import CpsatPythonResult
-
     return CpsatPythonResult(
         status=status,  # type: ignore[arg-type]
         solution=solution if solution is not None else {"x": 3},

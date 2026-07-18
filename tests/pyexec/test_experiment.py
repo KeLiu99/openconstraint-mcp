@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import json
+import threading
+import time
 from pathlib import Path
 from typing import Any
 
@@ -845,9 +847,6 @@ def test_results_are_ordered_by_attempt_order_not_completion_order(
 
 
 def test_max_parallel_attempts_runs_concurrently(monkeypatch: pytest.MonkeyPatch) -> None:
-    import threading
-    import time
-
     concurrent_count = 0
     max_seen = 0
     lock = threading.Lock()
@@ -874,9 +873,6 @@ def test_max_parallel_attempts_runs_concurrently(monkeypatch: pytest.MonkeyPatch
 
 
 def test_max_parallel_attempts_defaults_to_serial(monkeypatch: pytest.MonkeyPatch) -> None:
-    import threading
-    import time
-
     concurrent_count = 0
     max_seen = 0
     lock = threading.Lock()
@@ -1237,25 +1233,20 @@ def test_oversubscription_warning_flags_offending_attempt(
     assert "num_workers=8" in warning
 
 
-def test_oversubscription_warning_ignores_bool_num_workers(
+@pytest.mark.parametrize(
+    "ignored_num_workers",
+    [pytest.param(True, id="bool"), pytest.param("eight", id="non-int")],
+)
+def test_oversubscription_warning_ignores_non_int_num_workers(
+    ignored_num_workers: object,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr(experiment.os, "cpu_count", lambda: 1)
-    attempts = [_attempt("a", config={"num_workers": True})]
+    attempts = [_attempt("a", config={"num_workers": ignored_num_workers})]
     names = ["a"]
 
     # Would otherwise trip (max_parallel_attempts=4 * num_workers=1 > cpu_count=1)
-    # if the bool were mistakenly treated as an int.
-    assert experiment._oversubscription_warning(attempts, names, 4) is None
-
-
-def test_oversubscription_warning_ignores_non_int_num_workers(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    monkeypatch.setattr(experiment.os, "cpu_count", lambda: 1)
-    attempts = [_attempt("a", config={"num_workers": "eight"})]
-    names = ["a"]
-
+    # if the value were mistakenly treated as an int.
     assert experiment._oversubscription_warning(attempts, names, 4) is None
 
 

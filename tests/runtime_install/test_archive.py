@@ -70,55 +70,47 @@ def test_extract_bundle_rejects_two_top_level_dirs(tmp_path: Path) -> None:
         _extract_tgz_bundle(archive, dest)
 
 
-def test_extract_bundle_rejects_parent_traversal(tmp_path: Path) -> None:
-    archive = tmp_path / "traversal.tgz"
-
-    wrapper = tarfile.TarInfo(name="wrapper")
-    wrapper.type = tarfile.DIRTYPE
-    wrapper.mode = 0o755
-
+def _traversal_member() -> tarfile.TarInfo:
     escape = tarfile.TarInfo(name="wrapper/../../etc/evil")
     escape.size = 0
     escape.mode = 0o644
-
-    _make_tar(archive, [wrapper, escape])
-    dest = tmp_path / "runtime"
-    dest.mkdir()
-    with pytest.raises(RuntimeInstallError):
-        _extract_tgz_bundle(archive, dest)
+    return escape
 
 
-def test_extract_bundle_rejects_absolute_path_member(tmp_path: Path) -> None:
-    archive = tmp_path / "abspath.tgz"
-
-    wrapper = tarfile.TarInfo(name="wrapper")
-    wrapper.type = tarfile.DIRTYPE
-    wrapper.mode = 0o755
-
+def _absolute_path_member() -> tarfile.TarInfo:
     escape = tarfile.TarInfo(name="/etc/passwd")
     escape.size = 0
     escape.mode = 0o644
-
-    _make_tar(archive, [wrapper, escape])
-    dest = tmp_path / "runtime"
-    dest.mkdir()
-    with pytest.raises(RuntimeInstallError):
-        _extract_tgz_bundle(archive, dest)
+    return escape
 
 
-def test_extract_bundle_rejects_symlink_with_absolute_target(tmp_path: Path) -> None:
-    archive = tmp_path / "symlink.tgz"
-
-    wrapper = tarfile.TarInfo(name="wrapper")
-    wrapper.type = tarfile.DIRTYPE
-    wrapper.mode = 0o755
-
+def _absolute_symlink_member() -> tarfile.TarInfo:
     link = tarfile.TarInfo(name="wrapper/evil")
     link.type = tarfile.SYMTYPE
     link.linkname = "/etc/passwd"
     link.mode = 0o777
+    return link
 
-    _make_tar(archive, [wrapper, link])
+
+@pytest.mark.parametrize(
+    "unsafe_member",
+    [
+        pytest.param(_traversal_member, id="parent-traversal"),
+        pytest.param(_absolute_path_member, id="absolute-path"),
+        pytest.param(_absolute_symlink_member, id="absolute-symlink"),
+    ],
+)
+def test_extract_bundle_rejects_unsafe_archive_member(
+    unsafe_member: Callable[[], tarfile.TarInfo],
+    tmp_path: Path,
+) -> None:
+    archive = tmp_path / "unsafe.tgz"
+
+    wrapper = tarfile.TarInfo(name="wrapper")
+    wrapper.type = tarfile.DIRTYPE
+    wrapper.mode = 0o755
+
+    _make_tar(archive, [wrapper, unsafe_member()])
     dest = tmp_path / "runtime"
     dest.mkdir()
     with pytest.raises(RuntimeInstallError):
