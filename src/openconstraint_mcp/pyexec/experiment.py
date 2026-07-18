@@ -33,11 +33,9 @@ from __future__ import annotations
 
 import math
 import os
-import tempfile
 import time
 from collections.abc import Sequence
 from concurrent.futures import ThreadPoolExecutor
-from pathlib import Path
 from typing import NamedTuple, cast
 
 from ..schemas.cpsat import (
@@ -57,11 +55,10 @@ from .core import (
     canonical_json_byte_length,
     config_sha256,
     effective_checker_timeout_ms,
+    replay_env_scope,
     run_cpsat_python,
-    seed_config_env,
     validate_checker_args,
     validate_cpsat_random_seed,
-    write_config_file,
 )
 from .diagnostics import experiment_attempt_diagnostic, experiment_diagnostic
 from .eligibility import diagnostic_incumbent_eligibility
@@ -451,24 +448,16 @@ def _run_attempt(
     """Run one attempt end to end; return its result row and, if accepted, its raw result.
 
     The config temp file (when ``attempt.config`` is non-empty) lives in a
-    ``tempfile.TemporaryDirectory()`` scoped to exactly this call: it is created
-    right before the child runs and removed right after ``run_cpsat_python``
-    returns, whether the child exited cleanly, errored, or was tree-killed on
-    timeout — no config temp file outlives its attempt.
+    ``replay_env_scope`` block scoped to exactly this call: it is created right
+    before the child runs and removed right after ``run_cpsat_python`` returns,
+    whether the child exited cleanly, errored, or was tree-killed on timeout —
+    no config temp file outlives its attempt.
     """
     timeout_ms = _effective_timeout_ms(attempt, default_timeout_ms)
     source_hash = text_sha256(attempt.source)
     config_hash = config_sha256(attempt.config)
 
-    if attempt.config:
-        with tempfile.TemporaryDirectory() as tmp_dir:
-            config_path = write_config_file(Path(tmp_dir), attempt.config)
-            env = seed_config_env(seed=attempt.seed, config_path=config_path)
-            result = run_cpsat_python(
-                attempt.source, timeout_ms=timeout_ms, tracker=tracker, env=env
-            )
-    else:
-        env = seed_config_env(seed=attempt.seed, config_path=None)
+    with replay_env_scope(seed=attempt.seed, config=attempt.config) as env:
         result = run_cpsat_python(attempt.source, timeout_ms=timeout_ms, tracker=tracker, env=env)
 
     base_eligible, base_reject_reason = _attempt_eligibility(result, objective_sense)

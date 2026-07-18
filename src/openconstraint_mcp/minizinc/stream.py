@@ -162,81 +162,6 @@ def _parse_solution_object(obj: dict[str, Any]) -> _SolutionParse:
     return _SolutionParse(variables, objective, _human_block(output, variables))
 
 
-class _StreamAccumulator:
-    """Folds ``--json-stream`` objects into the fields of a `_StreamParse`.
-
-    One ``_on_*`` handler per object ``type``; `consume` routes by type and ignores
-    any unknown type (forward-compatible). The seven running fields live here rather
-    than as locals in the parse loop, so each object type's effect is isolated and the
-    loop itself stays a trivial fold.
-    """
-
-    def __init__(self) -> None:
-        self._solutions: list[dict[str, Any]] = []
-        self._blocks: list[str] = []
-        self._statistics: dict[str, str] = {}
-        self._messages: list[str] = []
-        self._objective: int | float | None = None
-        self._status_raw: str | None = None
-        self._error_seen = False
-
-    def consume(self, obj: dict[str, Any]) -> None:
-        obj_type = obj.get("type")
-        if obj_type == "solution":
-            self._on_solution(obj)
-        elif obj_type == "status":
-            self._on_status(obj)
-        elif obj_type == "statistics":
-            self._on_statistics(obj)
-        elif obj_type in ("error", "warning"):
-            self._on_diagnostic(obj, is_error=obj_type == "error")
-        # any other object type is ignored (forward-compatible)
-
-    def _on_solution(self, obj: dict[str, Any]) -> None:
-        sol = _parse_solution_object(obj)
-        if sol.variables is not None:
-            self._solutions.append(sol.variables)
-        if sol.objective is not None:
-            self._objective = sol.objective
-        if sol.block is not None:
-            self._blocks.append(sol.block)
-
-    def _on_status(self, obj: dict[str, Any]) -> None:
-        raw = obj.get("status")
-        if isinstance(raw, str):
-            self._status_raw = raw
-
-    def _on_statistics(self, obj: dict[str, Any]) -> None:
-        stats = obj.get("statistics")
-        if isinstance(stats, dict):
-            self._statistics.update(_stringify_statistics(stats))
-
-    def _on_diagnostic(self, obj: dict[str, Any], *, is_error: bool) -> None:
-        if is_error:
-            self._error_seen = True
-        line_msg = _diagnostic_line(obj)
-        if line_msg is not None:
-            self._messages.append(line_msg)
-
-    def result(self) -> _StreamParse:
-        # An `error` object (seen at any point) forces "error"; else the mapped
-        # `{"type":"status"}` verdict; else None for the caller's return-code fallback.
-        if self._error_seen:
-            status: SolveStatus | None = "error"
-        elif self._status_raw is not None:
-            status = _map_status(self._status_raw, has_solution=bool(self._solutions))
-        else:
-            status = None
-        return _StreamParse(
-            status=status,
-            solutions=self._solutions,
-            objective=self._objective,
-            statistics=self._statistics,
-            stdout=_reconstruct_stdout(self._blocks),
-            messages=self._messages,
-        )
-
-
 def _parse_solve_stream(stdout: str) -> _StreamParse:
     """Parse a ``--json-stream`` solve transcript into structured fields.
 
@@ -246,7 +171,14 @@ def _parse_solve_stream(stdout: str) -> _StreamParse:
     map, and the last solution's value becomes ``objective`` (None for satisfaction,
     where no solution carries one).
     """
-    acc = _StreamAccumulator()
+    solutions: list[dict[str, Any]] = []
+    blocks: list[str] = []
+    statistics: dict[str, str] = {}
+    messages: list[str] = []
+    objective: int | float | None = None
+    status_raw: str | None = None
+    error_seen = False
+
     for raw_line in stdout.splitlines():
         line = raw_line.strip()
         if not line:
@@ -255,6 +187,48 @@ def _parse_solve_stream(stdout: str) -> _StreamParse:
             obj = json.loads(line)
         except ValueError:
             continue  # not a JSON object (truncated tail / stray text)
-        if isinstance(obj, dict):
-            acc.consume(obj)
-    return acc.result()
+        if not isinstance(obj, dict):
+            continue
+
+        obj_type = obj.get("type")
+        if obj_type == "solution":
+            sol = _parse_solution_object(obj)
+            if sol.variables is not None:
+                solutions.append(sol.variables)
+            if sol.objective is not None:
+                objective = sol.objective
+            if sol.block is not None:
+                blocks.append(sol.block)
+        elif obj_type == "status":
+            raw = obj.get("status")
+            if isinstance(raw, str):
+                status_raw = raw
+        elif obj_type == "statistics":
+            stats = obj.get("statistics")
+            if isinstance(stats, dict):
+                statistics.update(_stringify_statistics(stats))
+        elif obj_type in ("error", "warning"):
+            if obj_type == "error":
+                error_seen = True
+            line_msg = _diagnostic_line(obj)
+            if line_msg is not None:
+                messages.append(line_msg)
+        # any other object type is ignored (forward-compatible)
+
+    # An `error` object (seen at any point) forces "error"; else the mapped
+    # `{"type":"status"}` verdict; else None for the caller's return-code fallback.
+    if error_seen:
+        status: SolveStatus | None = "error"
+    elif status_raw is not None:
+        status = _map_status(status_raw, has_solution=bool(solutions))
+    else:
+        status = None
+
+    return _StreamParse(
+        status=status,
+        solutions=solutions,
+        objective=objective,
+        statistics=statistics,
+        stdout=_reconstruct_stdout(blocks),
+        messages=messages,
+    )

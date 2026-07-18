@@ -276,6 +276,7 @@ def _invoke_minizinc(
     timeout_ms: int,
     cwd: str,
     tracker: ChildProcessTracker | None = None,
+    on_start: Callable[[subprocess.Popen[str]], None] | None = None,
 ) -> _RunOutcome:
     """Run a fully-built MiniZinc ``cmd`` (blocking) and capture the raw outcome.
 
@@ -286,10 +287,14 @@ def _invoke_minizinc(
     child tracker) so an abrupt server teardown terminates this in-flight child
     instead of orphaning it. A reaped leader is unregistered; one that survives
     termination stays registered for teardown to retry. With no ``tracker`` the
-    behaviour is identical, just untracked.
+    behaviour is identical, just untracked. ``on_start`` publishes the live process
+    handle (e.g. for a job registry's targeted cancellation); the executor supports
+    both lifecycles natively, so a caller may pass either, both, or neither.
     """
     return _outcome_from_child(
-        _execute_minizinc_child(cmd, timeout_ms=timeout_ms, cwd=cwd, tracker=tracker)
+        _execute_minizinc_child(
+            cmd, timeout_ms=timeout_ms, cwd=cwd, tracker=tracker, on_start=on_start
+        )
     )
 
 
@@ -344,15 +349,17 @@ def _run_managed_minizinc(
     data: str | None = None,
     checker: str | None = None,
     tracker: ChildProcessTracker | None = None,
+    on_start: Callable[[subprocess.Popen[str]], None] | None = None,
 ) -> _RunOutcome:
     """Run the managed MiniZinc binary on ``model`` and report the raw outcome.
 
-    Shared by ``solve_model`` (``extra_args=()``) and ``check_model``
-    (``extra_args=("-c",)``). The model is written into a private temp dir and
-    ``subprocess.run`` is pinned to that dir via ``cwd`` so cwd-relative
-    ``include`` statements resolve onto emptiness rather than the server's
-    working directory. With no data the model file is the last command
-    argument.
+    Shared by ``solve_model`` (``extra_args=()``), ``check_model``
+    (``extra_args=("-c",)``), and ``solve_model_cancellable`` (which passes
+    ``on_start`` only, leaving ``tracker`` untracked as before). The model is
+    written into a private temp dir and ``subprocess.run`` is pinned to that dir
+    via ``cwd`` so cwd-relative ``include`` statements resolve onto emptiness
+    rather than the server's working directory. With no data the model file is
+    the last command argument.
 
     When ``data`` is not ``None`` it is written verbatim to a sibling
     ``data.dzn`` in the same temp dir and appended as a positional argument
@@ -381,7 +388,9 @@ def _run_managed_minizinc(
             data=data,
             checker=checker,
         )
-        return _invoke_minizinc(cmd, timeout_ms=timeout_ms, cwd=str(tmp_dir), tracker=tracker)
+        return _invoke_minizinc(
+            cmd, timeout_ms=timeout_ms, cwd=str(tmp_dir), tracker=tracker, on_start=on_start
+        )
 
 
 def _build_inline_cmd(
@@ -397,15 +406,14 @@ def _build_inline_cmd(
 ) -> list[str]:
     """Write the inline model/data/checker into ``tmp_dir`` and build the argv.
 
-    The temp-dir file contract shared by the blocking runner
-    (``_run_managed_minizinc``) and the cancellable runner
-    (``_run_managed_minizinc_cancellable``): ``model.mzn`` always; ``data.dzn``
+    The temp-dir file contract for ``_run_managed_minizinc``, shared by its
+    tracked (``solve_model``/``check_model``) and cancellable
+    (``solve_model_cancellable``) callers: ``model.mzn`` always; ``data.dzn``
     when ``data`` is not ``None`` (appended positionally after the model, MiniZinc's
     ``<model>.mzn <data>.dzn`` order); ``checker.mzc.mzn`` when ``checker`` is given
     (added to ``extra_args`` via ``--solution-checker`` before the positional
-    arguments). Kept in one place so the two runners can't drift on filenames,
-    positioning, or the checker flag; argv assembly itself stays in
-    ``_build_minizinc_cmd``.
+    arguments). Kept in one place so callers can't drift on filenames, positioning,
+    or the checker flag; argv assembly itself stays in ``_build_minizinc_cmd``.
     """
     model_file = tmp_dir / _MODEL_FILENAME
     model_file.write_text(model, encoding="utf-8")
@@ -431,46 +439,6 @@ def _build_inline_cmd(
         model_arg=str(model_file),
         data_args=data_args,
     )
-
-
-def _run_managed_minizinc_cancellable(
-    model: str,
-    *,
-    solver: str,
-    timeout_ms: int,
-    extra_args: Sequence[str],
-    data: str | None = None,
-    checker: str | None = None,
-    on_start: Callable[[subprocess.Popen[str]], None],
-) -> _RunOutcome:
-    """Cancellable mirror of ``_run_managed_minizinc`` (terminable).
-
-    Same temp-dir / model-data-checker file contract (via ``_build_inline_cmd``)
-    and same output/wall-clock caps as the blocking runner, but launched through
-    ``_execute_minizinc_child`` with ``on_start``, which the shared executor calls
-    with the live process handle so the caller can terminate the whole tree to
-    cancel. Returns the same ``_RunOutcome``, so ``_build_solve_result`` consumes
-    it unchanged.
-    """
-    validate_model_and_timeout(model, timeout_ms)
-    binary = _require_minizinc_binary()
-
-    with tempfile.TemporaryDirectory(prefix="openconstraint-mcp-") as tmp:
-        tmp_dir = Path(tmp)
-        cmd = _build_inline_cmd(
-            binary,
-            tmp_dir,
-            model=model,
-            solver=solver,
-            timeout_ms=timeout_ms,
-            extra_args=extra_args,
-            data=data,
-            checker=checker,
-        )
-        child = _execute_minizinc_child(
-            cmd, timeout_ms=timeout_ms, cwd=str(tmp_dir), on_start=on_start
-        )
-        return _outcome_from_child(child)
 
 
 def _merge_stderr(real_stderr: str, messages: Sequence[str]) -> str:
@@ -1020,15 +988,16 @@ def solve_model_cancellable(
 ) -> SolveResult:
     """Cancellable counterpart of ``solve_model`` for background jobs.
 
-    Identical solve semantics and ``SolveResult`` shape, but executed through the
-    terminable ``_run_managed_minizinc_cancellable`` runner: the live child handle
-    is published to ``on_start`` so a caller (the job registry) can terminate the
-    whole process tree to cancel the solve. Reuses ``build_solve_extra_args`` for
-    validation/argv and ``_build_solve_result`` / ``_build_checker_report`` for the
-    parse, so a job's result is byte-for-byte what the synchronous tool would
-    return for the same inputs.
+    Identical solve semantics and ``SolveResult`` shape, but executed through
+    ``_run_managed_minizinc`` with ``on_start`` (no ``tracker``): the live child
+    handle is published to ``on_start`` so a caller (the job registry) can
+    terminate the whole process tree to cancel the solve, and the run stays
+    untracked as before. Reuses ``build_solve_extra_args`` for validation/argv and
+    ``_build_solve_result`` / ``_build_checker_report`` for the parse, so a job's
+    result is byte-for-byte what the synchronous tool would return for the same
+    inputs.
     """
-    outcome = _run_managed_minizinc_cancellable(
+    outcome = _run_managed_minizinc(
         model,
         solver=solver,
         timeout_ms=timeout_ms,

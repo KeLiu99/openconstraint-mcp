@@ -62,8 +62,10 @@ from __future__ import annotations
 
 import json
 import math
+import sys
 import tempfile
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
+from contextlib import contextmanager
 from pathlib import Path
 from subprocess import Popen
 from typing import Any
@@ -73,7 +75,6 @@ from ..shared.childproc import ChildProcessTracker
 from ..shared.childrun import ChildExecutionResult, execute_child
 from ..shared.save_target import text_sha256
 from .diagnostics import cpsat_result_diagnostic
-from .runner import python_script_argv as _python_script_argv
 
 DEFAULT_PYEXEC_TIMEOUT_MS: int = 30_000
 
@@ -199,6 +200,27 @@ def seed_config_env(*, seed: int | None, config_path: Path | None) -> dict[str, 
         CPSAT_SEED_ENV_VAR: str(seed) if seed is not None else None,
         CPSAT_CONFIG_ENV_VAR: str(config_path) if config_path is not None else None,
     }
+
+
+@contextmanager
+def replay_env_scope(
+    *, seed: int | None, config: dict[str, Any] | None
+) -> Iterator[dict[str, str | None]]:
+    """Yield the child env overlay for a seed/config replay run.
+
+    A non-empty ``config`` is written into a ``tempfile.TemporaryDirectory()``
+    scoped to the block, torn down on every exit path (clean return, error, or a
+    timeout tree-kill); an empty or absent ``config`` yields the seed-only
+    overlay with no temp directory at all. ``{}`` and ``None`` are treated
+    identically ("no config") — the same normalization ``config_sha256`` documents
+    — so a caller does not need to pre-normalize ``{}`` to ``None`` before calling.
+    """
+    if config:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            config_path = write_config_file(Path(tmp_dir), config)
+            yield seed_config_env(seed=seed, config_path=config_path)
+    else:
+        yield seed_config_env(seed=seed, config_path=None)
 
 
 def normalize_status(raw: object) -> CpsatStatus:
@@ -367,6 +389,14 @@ def _validate_script_path(script_path: Path) -> Path:
     if not text.strip():
         raise ValueError(f"script file is empty: {script_path}")
     return script_path
+
+
+def _python_script_argv(script: Path) -> list[str]:
+    # -u: unbuffered child stdout/stderr so prints reach the capture files as
+    # they happen (not on a full buffer). This is what lets a flushed
+    # intermediate result block survive a timeout kill (see the partial
+    # recovery on the timeout path above).
+    return [sys.executable, "-u", str(script)]
 
 
 def run_cpsat_python(
