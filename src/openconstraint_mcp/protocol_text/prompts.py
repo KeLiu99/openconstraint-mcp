@@ -26,8 +26,14 @@ validate -> solve -> present loop through the path-based tools:
 `model_path` (and `data_path` when a data file exists) rather than pasting
 file contents into the string tools — the path-based tools run from the
 model's own directory, so a relative `include` resolves. They return the
-same `CheckResult` / `SolveResult` shapes, so steps 4-7 apply with
-`model_path` / `data_path` in place of `model` / `data`.
+same `CheckResult` / `SolveResult` shapes, so follow steps 4-7
+substituting the TOOL, not just the argument: wherever step 4 says
+`check_minizinc_model`, call `check_minizinc_files(model_path=<path>,
+data_path=<path, when a data file exists>, solver=<chosen solver id>)`;
+wherever steps 5-6 say `solve_minizinc_model`, call
+`solve_minizinc_files(model_path=<path>, data_path=<path, when a data
+file exists>, solver=<solver id>, timeout_ms=<milliseconds>)`. Never
+pass `model_path` to the string tools.
 
 Otherwise:
 
@@ -51,24 +57,28 @@ Otherwise:
    objective expression to that value, switch to `solve satisfy;`, and
    enumerate with one of those supported solvers plus `num_solutions`.
 
-4. Validate before solving: call `check_minizinc_model` and branch on the
-   returned `status`; never solve ahead of a clean check. The recommended
-   loop is
+4. Validate before solving: call `check_minizinc_model(model=<model text>,
+   data=<dzn text, omitted when there is none>, solver=<chosen solver id>)`
+   and branch on the returned `status`; never solve before a check has
+   returned `"ok"`. The recommended loop is
    `draft -> check_minizinc_model -> repair -> solve_minizinc_model -> explain`.
-   Pass the same `data` to both the check and the solve so you validate the
-   instance you solve.
+   Pass the same `data` and `solver` to both the check and the solve so you
+   validate the instance and configuration you solve.
    - `"ok"`: the model compiles; proceed to solving.
    - `"error"`: read the `stderr` diagnostics, repair, and re-check until
      `"ok"`.
    - `"timeout"`: validation itself — not the solve — timed out. Do not
      auto-solve. Explain this and let the user choose: simplify the model,
-     raise `timeout_ms`, or solve anyway.
+     raise `timeout_ms`, or solve anyway — the one exception to the
+     `"ok"`-before-solve rule, taken only on the user's explicit choice.
 
 5. Execute the model:
-   - If `solve_minizinc_model` is available, call it by that exact name (do
-     not invent a different tool or extra arguments) and let the local
+   - If `solve_minizinc_model` is listed among the tools you can call,
+     invoke it as `solve_minizinc_model(model=<model text>, data=<same
+     data>, solver=<chosen solver id>, timeout_ms=<milliseconds>)` — that
+     exact name, no invented tools or extra arguments — and let the local
      managed runtime solve.
-   - If it is not available, do not fabricate a tool call, and do not tell
+   - If it is not listed, do not fabricate a tool call, and do not tell
      the user to run a bare `minizinc` from their PATH — that bypasses the
      managed runtime and can pick up a different version. Instead walk them
      through the CLI:
@@ -84,15 +94,18 @@ Otherwise:
           e.g. `--solver cp-sat`.
 
 6. On a syntax, type, or solver error, revise and retry — but only through
-   `solve_minizinc_model` when that tool is actually available; never
-   fabricate solver output. For a HARD problem — `status` comes back
-   `unknown`, the solve times out, or the best modeling/solving choice is
-   unclear — explore rather than settle for one run. On a cleanly-checked
-   model, race alternatives with a background portfolio via
-   `submit_portfolio_job` (poll `get_portfolio_job` for the winner and the
-   full per-attempt table), varying any of: model formulations (`models`, a
-   list — e.g. a different variable encoding, redundant constraints, or
-   symmetry-breaking constraints), `solvers`, seeds (`seed_count` or an
+   `solve_minizinc_model` when that tool is listed; never fabricate solver
+   output. For a HARD problem — the solve returned `status` `unknown` or
+   `timeout`, or `satisfied` on an optimization when the user needs a
+   proven optimum, or several plausible formulation/solver choices remain —
+   explore rather than settle for one run. Once the latest check has
+   returned `"ok"`, race alternatives with a background portfolio via
+   `submit_portfolio_job(models=[<model texts>], solvers=[<solver ids>],
+   data=<same data>)`, polling `get_portfolio_job(job_id=<returned id>)`
+   for the winner and the full per-attempt table, varying any of: model
+   formulations (`models`, a list — e.g. a different variable encoding,
+   redundant constraints, or symmetry-breaking constraints), `solvers`,
+   seeds (`seed_count` or an
    explicit `seeds` list), and search controls (`free_search`, `parallel`,
    and each attempt's `per_attempt_timeout_ms` budget).
    For an especially hard instance, also consider the OR-Tools CP-SAT
@@ -126,7 +139,8 @@ Otherwise:
      subprocess cap killed the run (`return_code` null, `status` `timeout`,
      and `stdout` may be truncated). A non-zero `return_code` with `error`
      means MiniZinc itself failed — read `stderr`.
-   - the solution, only when `status` carries one (`satisfied` / `optimal`):
+   - the solution, only when the result carries one (`satisfied` /
+     `optimal`; for `timeout` see the diagnostic branch below):
      show it as a block read verbatim from raw `stdout` — the `output`
      block text is authoritative, so do not restate the values yourself.
      Use the structured fields to organize that display, never to replace
@@ -144,8 +158,12 @@ Otherwise:
      fewer), one row per item with the item index/name, relevant
      attributes, and the selected/count value; for larger sets, a compact
      table of selected items plus totals.
-     An `unsatisfiable`, `error`, or `timeout` result has no solution to
-     show: say so plainly, and for `error` point at `stderr`.
+     An `unsatisfiable` or `error` result has no solution to show: say so
+     plainly, and for `error` point at `stderr`. For `timeout`, branch on
+     the diagnostic: `timeout_with_incumbent` means `solution` /
+     `solutions` / `objective` hold the best found before the cap killed
+     the run — present that as an unproven best-so-far, never as optimal;
+     `timeout_no_incumbent` means there is no solution to show.
    - the complete model-visible `Statistics:` section is required whenever
      the `statistics` map is non-empty — do not omit it, summarize it, or
      replace it with only selected fields such as `solveTime` and
@@ -160,19 +178,25 @@ Otherwise:
    analysis.
 
 8. Persist only if the user asks to save the model: call
-   `save_verified_minizinc_model` with the final model/data/checker text
-   exactly as last checked and solved, the original problem text as
-   `problem`, and the user's chosen save directory as an explicit absolute
-   `target_dir`. You ask the user for that path (or use your client's own
-   file picker); the server opens no file dialog, and it re-verifies the
-   artifacts through the managed runtime before writing anything.
+   `save_verified_minizinc_model(model=<final model text>, data=<final
+   data>, checker=<checker, when one was used>, problem=<original problem
+   text>, target_dir=<explicit absolute save directory>)` with the text
+   exactly as last checked and solved. You ask the user for that path (or
+   use your client's own file picker); the server opens no file dialog,
+   and it re-verifies the artifacts through the managed runtime before
+   writing anything.
    Replacing a previously saved directory needs `overwrite=true`, and only
    a directory written by a prior save can be replaced. If you explored via
    `submit_portfolio_job`, also pass that job's `PortfolioSolveResult` as
    `portfolio_result` so the winning race's full attempt table (every
    formulation/solver/seed tried, and why) is persisted alongside the saved
-   model as `experiment-log.json` — the server still re-verifies
-   independently and never trusts the attached result as proof.
+   model as `experiment-log.json`, and replay the winner's configuration in
+   the save call itself: set `solver` and `random_seed` to the winning
+   attempt's `solver` and `seed`, and `free_search` / `parallel` /
+   `all_solutions` / `num_solutions` to the race's `solve_controls` values —
+   the server rejects a save whose arguments do not match the winning
+   attempt's configuration (`timeout_ms` is not compared). The server still
+   re-verifies independently and never trusts the attached result as proof.
 
 Boundaries:
 - You draft the MiniZinc model; openconstraint-mcp does not.
@@ -211,37 +235,58 @@ User problem:
    `OPENCONSTRAINT_MCP_CPSAT_CONFIG` protocol (step 6) for EXPLICIT
    multi-attempt or configured experiments — it is not the default modeling
    style for a one-off save.
-   - Import `from ortools.sat.python import cp_model` and `import json`.
-   - Build the model with `cp_model.CpModel()`, declare variables, add
-     constraints, set the objective.
-   - Create a solver: `solver = cp_model.CpSolver()`.
    - For a REPRODUCIBLE saved artifact, READ the seed from the environment
-     (falling back to 42) and prefer a single search worker:
-       `import os`
-       `solver.parameters.random_seed = int(os.environ.get("OPENCONSTRAINT_MCP_CPSAT_SEED", "42"))`
-       `solver.parameters.num_workers = 1`
-     `save_verified_cpsat_python`'s optional `seed` argument sets this
-     environment variable for the replay re-run; a script that hardcodes
-     the seed instead silently ignores the replay — the server cannot force
-     a seed into arbitrary Python.
-   - Solve: `status_code = solver.solve(model)`.
-   - Emit exactly ONE JSON object as the LAST line of stdout:
+     (falling back to 42) and keep a single search worker, exactly as the
+     example below does. `save_verified_cpsat_python`'s optional `seed`
+     argument sets the `OPENCONSTRAINT_MCP_CPSAT_SEED` environment variable
+     for the replay re-run; a script that hardcodes the seed instead
+     silently ignores the replay — the server cannot force a seed into
+     arbitrary Python.
+   - Emit exactly ONE JSON object as the LAST line of stdout. Complete
+     runnable example — replace the toy model with the real one and keep
+     the emitted JSON contract exactly:
      ```
+     import json
+     import os
+
+     from ortools.sat.python import cp_model
+
+     model = cp_model.CpModel()
+     x = model.new_int_var(0, 10, "x")
+     y = model.new_int_var(0, 10, "y")
+     model.add(x + y <= 12)
+     model.maximize(x + 2 * y)
+
+     solver = cp_model.CpSolver()
+     solver.parameters.random_seed = int(
+         os.environ.get("OPENCONSTRAINT_MCP_CPSAT_SEED", "42")
+     )
+     solver.parameters.num_workers = 1
+     status_code = solver.solve(model)
+
      status_map = {{
          cp_model.OPTIMAL: "optimal",
          cp_model.FEASIBLE: "feasible",
          cp_model.INFEASIBLE: "infeasible",
          cp_model.UNKNOWN: "unknown",
      }}
+     has_solution = status_code in (cp_model.OPTIMAL, cp_model.FEASIBLE)
      solution = {{}}
-     if status_code in (cp_model.OPTIMAL, cp_model.FEASIBLE):
-         solution = {{"var1": solver.value(var1), ...}}
+     if has_solution:
+         solution = {{"x": solver.value(x), "y": solver.value(y)}}
+     bound_states = (cp_model.OPTIMAL, cp_model.FEASIBLE, cp_model.UNKNOWN)
      print(json.dumps({{
          "status": status_map.get(status_code, "error"),
-         "objective": float(solver.objective_value) if model.has_objective() else None,
+         "objective": (
+             float(solver.objective_value)
+             if model.has_objective() and has_solution
+             else None
+         ),
          "solution": solution,
          "best_objective_bound": (
-             float(solver.best_objective_bound) if model.has_objective() else None
+             float(solver.best_objective_bound)
+             if model.has_objective() and status_code in bound_states
+             else None
          ),
      }}))
      ```
@@ -249,21 +294,29 @@ User problem:
      PROPERTY, not a method) is a diagnostic bound, not a proven objective.
      Include it for every optimization model so a `status="unknown"` result
      still carries search-progress information even with no incumbent.
-     CRITICAL for a PURE FEASIBILITY problem (no `model.minimize`/`maximize`
-     call): `model.has_objective()` is `False`, and BOTH
-     `solver.objective_value` AND `solver.best_objective_bound` then return
-     `0.0` WITHOUT raising. Never drop the `if model.has_objective() else
-     None` guard — there is no meaningful bound for a satisfaction-only
-     problem, so `null`, not `0.0`, is the correct value.
+     CRITICAL: neither property raises when it has nothing meaningful to
+     report — it returns `0.0` or another arbitrary number instead.
+     `solver.objective_value` is meaningless without an incumbent: for a
+     PURE FEASIBILITY problem (no `model.minimize`/`maximize` call, so
+     `model.has_objective()` is `False`), and for an optimization run that
+     ends `infeasible` or `unknown` with no solution.
+     `solver.best_objective_bound` is meaningless for a pure feasibility
+     problem and for `infeasible`/`error`, but on `unknown` it is genuine
+     search progress. Never drop the example's guards: emit `objective`
+     only for a solution-bearing status (`optimal`/`feasible`), emit
+     `best_objective_bound` only for `optimal`/`feasible`/`unknown`, and
+     emit `null`, not a fabricated number, in every other case.
    - For a long or optimization run that may hit `timeout_ms`, ALSO emit an
      intermediate JSON object of the SAME shape on each improved solution,
-     from a `cp_model.CpSolverSolutionCallback`, e.g.:
+     from a `cp_model.CpSolverSolutionCallback`. Replace the example's plain
+     `status_code = solver.solve(model)` line with:
      ```
      class _Best(cp_model.CpSolverSolutionCallback):
          def __init__(self, variables, has_objective):
              super().__init__()
              self._variables = variables
              self._has_objective = has_objective
+
          def on_solution_callback(self):
              print(json.dumps({{
                  "status": "feasible",
@@ -273,7 +326,8 @@ User problem:
                      self.best_objective_bound if self._has_objective else None
                  ),
              }}))
-     solver.solve(model, _Best({{"var1": var1, ...}}, model.has_objective()))
+
+     status_code = solver.solve(model, _Best({{"x": x, "y": y}}, model.has_objective()))
      ```
      Pass `model.has_objective()` into the callback so the same
      `0.0`-vs-`null` guard applies there too — a feasibility problem's
@@ -286,19 +340,21 @@ User problem:
      explicitly requested it. The server executes this code locally in a
      child process and does not sandbox it.
 
-4. Call `run_cpsat_python` with the script as `source`. The server runs it
-   locally in a child process (not remote, not sandboxed) and returns a
-   `CpsatPythonResult` with `status`, `solution`, `objective`,
-   `best_objective_bound` (diagnostic only — see step 3), `stdout`,
-   `stderr`, `timed_out`, `truncated`, `duration_ms`, and a structured
-   `diagnostic` (`null` on a clean success).
+4. Call `run_cpsat_python(source=<complete script>,
+   timeout_ms=<milliseconds>)`. The server runs it locally in a child
+   process (not remote, not sandboxed) and returns a `CpsatPythonResult`
+   with `status`, `solution`, `objective`, `best_objective_bound`
+   (diagnostic only — see step 3), `stdout`, `stderr`, `return_code`,
+   `timed_out`, `truncated`, `duration_ms`, and a structured `diagnostic`
+   (`null` on a clean success).
 
 5. Present the result clearly:
    - Read `diagnostic` first when present: `diagnostic.category` is a stable
      enum (`infeasible`, `timeout_no_incumbent`, `timeout_with_incumbent`,
-     `output_truncated`, `child_process_error`, `checker_failed`, …) to branch
-     on before scraping raw `stdout`/`stderr`. Treat it and `status` as the
-     primary signals, the raw streams as supporting evidence.
+     `output_truncated`, `child_process_error`, `checker_failed`, …) you
+     branch on before reading raw `stdout`/`stderr`. Treat `status` and
+     `diagnostic.category` as the primary signals and raw `stdout`/`stderr`
+     as supporting evidence, never the primary status signal.
    - Distinguish `optimal` (proven best) from `feasible` (valid but
      unproven optimal). Never describe a `feasible` result as optimal.
    - For `infeasible` or `error`, say so plainly; point at `stderr` on
@@ -310,9 +366,10 @@ User problem:
      diagnostic hint, not a solution.
    - Describe the solution in the user's own terms (task names, variable
      semantics), not as a raw JSON dump.
-   - For a HARD instance where CP-SAT's result quality is unclear, also
-     consider the MiniZinc portfolio path (`solve_constraint_problem`
-     prompt, `submit_portfolio_job`) on the same problem — neither backend
+   - For a HARD instance — `status` is `unknown` or `timeout`, or
+     `feasible` when the user needs a proven optimum — also consider the
+     MiniZinc portfolio path (`solve_constraint_problem` prompt,
+     `submit_portfolio_job`) on the same problem — neither backend
      dominates every problem shape, and the structured results and checkers
      from both let you compare outcomes before committing to one. When the
      user instead wants SEVERAL candidate formulations raced against each
@@ -322,10 +379,12 @@ User problem:
 
 6. For MULTIPLE explicit attempts — comparing model/source variants, or the
    same source under different cooperative configs — use
-   `run_cpsat_python_experiment` instead of calling `run_cpsat_python`
-   repeatedly yourself. YOU always write every attempt's complete `source`;
-   the server never generates, diffs, or merges attempts — it only executes
-   what you give it, verifies acceptance, and selects a winner.
+   `run_cpsat_python_experiment(attempts=[<attempt objects>],
+   objective_sense=<"minimize" | "maximize"; omit for pure feasibility>)`
+   instead of calling `run_cpsat_python` repeatedly yourself. YOU always
+   write every attempt's complete `source`; the server never generates,
+   diffs, or merges attempts — it only executes what you give it, verifies
+   acceptance, and selects a winner.
    - Each attempt is `{{name, source, seed, config, timeout_ms}}`. `source`
      is a full, independent script (same SAFETY rule as step 3). `seed` and
      `config` are optional cooperative protocols: a script must opt in to
@@ -349,9 +408,9 @@ User problem:
      not yet savable — re-run just that attempt with a larger `timeout_ms`
      first.
 
-7. Persist only if the user asks. Call `save_verified_cpsat_python` with
-   the script as `source`, the original problem text as `problem`, and the
-   user's chosen save directory as an explicit absolute `target_dir`. You
+7. Persist only if the user asks: call
+   `save_verified_cpsat_python(source=<final script>, problem=<original
+   problem text>, target_dir=<explicit absolute save directory>)`. You
    ask the user for that path; the server opens no file dialog, and it
    re-runs the script to evaluate the save gate before writing anything.
    Replacing a previously saved directory needs `overwrite=true`.
@@ -401,13 +460,14 @@ User problem:
    valuable.
 
 8. To replay a saved artifact later, read its
-   `.openconstraint-model.json` manifest and call `run_cpsat_python_file`
-   with the saved `solution.py` path, passing the manifest's
-   `verification.replay_seed` as `seed` and, when a `replay-config.json`
-   sibling exists, its parsed contents as `config` — no manual environment
-   variables needed. `run_cpsat_python_file` has no checker parameter, so
-   this only re-verifies at the `reported` level even for a `checked`-level
-   save. For full checked replay, call `save_verified_cpsat_python` again
+   `.openconstraint-model.json` manifest and call
+   `run_cpsat_python_file(script_path=<saved solution.py path>,
+   seed=<manifest verification.replay_seed>, config=<parsed
+   replay-config.json contents, when that sibling file exists>)` — no
+   manual environment variables needed. `run_cpsat_python_file` has no
+   checker parameter, so this only re-verifies at the `reported` level
+   even for a `checked`-level save. For full checked replay, call
+   `save_verified_cpsat_python` again
    with the saved source/checker/seed/config, a scratch `target_dir`, AND —
    whenever the manifest or saved directory has them — the original
    `problem` (read from `problem.txt` if a `problem` artifact is listed),
@@ -505,6 +565,16 @@ save-tool provenance.
 4. Create a tiny smoke instance and use it ONLY to reject structurally broken
    candidates: `inspect_minizinc_model` then `check_minizinc_model` for each
    MiniZinc candidate, and one short `run_cpsat_python` per CP-SAT candidate.
+   Call shapes: `inspect_minizinc_model(model=<candidate>, data=<smoke
+   dzn>, solver=<a solver it will race with>)`, then
+   `check_minizinc_model(model=<candidate>, data=<smoke dzn>, solver=<a
+   solver it will race with>)`;
+   `run_cpsat_python(source=<smoke script>, timeout_ms=<short budget>)`.
+   For a candidate that already exists on disk (step 2), use the path-based
+   tools instead — `inspect_minizinc_files`/`check_minizinc_files` with
+   `model_path`/`data_path`, and `run_cpsat_python_file(script_path=<the
+   existing solution.py>, timeout_ms=<short budget>)` — they run from the
+   file's own directory, so relative includes and sibling data resolve.
    This step never ranks or selects a winner among the candidates that pass.
 
 5. Call `list_available_solvers` before any MiniZinc portfolio work.
@@ -531,8 +601,12 @@ save-tool provenance.
 
 8. Select the PROVISIONAL MiniZinc candidate by submitting ONE
    `submit_portfolio_job` call PER smoke-surviving MiniZinc candidate (one
-   model, with any solver/seed variants). Attach the checker when comparing
-   candidates. Compare decisive, checker-accepted results across jobs: for an
+   model, with any solver/seed variants). Call shape:
+   `submit_portfolio_job(models=[<one candidate>], solvers=[<solver ids>],
+   data=<tuning dzn>, checker=<the MiniZinc checker>, seeds=[<tuning
+   seeds>], per_attempt_timeout_ms=<budget>)`. Attach the checker when
+   comparing candidates. Compare decisive, checker-accepted results
+   across jobs: for an
    OPTIMIZATION problem, rank by best `objective`, then elapsed time; for a
    pure feasibility (`solve satisfy;`) problem there is no `objective`, so
    rank by `status` instead (`satisfied` outranks `unsatisfiable`), then elapsed
@@ -544,21 +618,32 @@ save-tool provenance.
 
 9. Select the PROVISIONAL CP-SAT candidate with ONE
    `run_cpsat_python_experiment` call across the smoke-surviving CP-SAT
-   candidates. Attach the checker when comparing candidates. The tool accepts
-   only attempts with a present solution and, when supplied, an `"accepted"`
-   checker result, so it is NOT required to split into per-candidate calls.
+   candidates. Call shape:
+   `run_cpsat_python_experiment(attempts=[<attempt objects>],
+   objective_sense=<"minimize" | "maximize"; omit for pure feasibility>,
+   checker=<the CP-SAT checker>, problem=<original problem text>)`, where
+   each attempt is `{{name, source, seed, config, timeout_ms}}` with a
+   complete, independent `source`. Attach the checker when comparing
+   candidates. The tool accepts only attempts with a present solution
+   and, when supplied, an `"accepted"` checker result, so it is NOT
+   required to split into per-candidate calls.
 
 10. Do not present a provisional candidate as the answer, and do not use its
     result as save-tool provenance.
 
 11. Re-check each provisional formulation on the FULL instance:
     - MiniZinc: use a BOUNDED `solve_minizinc_model`/`solve_minizinc_files` call
-      with full `data`, a short `timeout_ms`, and the checker. Never
+      with full `data`, a short `timeout_ms`, and the checker —
+      `solve_minizinc_model(model=<finalist>, data=<full data>, checker=<the
+      checker>, solver=<winning solver>, timeout_ms=<short budget>)`. Never
       `check_minizinc_model`/`check_minizinc_files`: "`ok` means it compiles,
       not that it is satisfiable."
     - CP-SAT: REWRITE the provisional approach with the full instance's values
       hardcoded, then use `submit_cpsat_python_job` with the checker and poll
-      `get_cpsat_python_job` until terminal. `run_cpsat_python` has no `checker`
+      `get_cpsat_python_job` until terminal. Call shape:
+      `submit_cpsat_python_job(source=<full-instance script>, checker=<the
+      CP-SAT checker>, problem=<original problem text>,
+      timeout_ms=<budget>)`. `run_cpsat_python` has no `checker`
       parameter at all. Keep this exact full-instance `source` for the final
       job and any save.
     - Stop on MiniZinc's `unsatisfiable`/`error` or CP-SAT's
@@ -584,20 +669,28 @@ save-tool provenance.
     middle ground.
 
 13. Submit the full-instance final solve:
-    - MiniZinc: use `submit_portfolio_job` if `portfolio_result` provenance
-      will be saved, even for one model/solver; otherwise use
-      `submit_solve_job` — its `SolveResult` carries no `portfolio_result`
-      field.
-    - CP-SAT: use the SYNCHRONOUS `run_cpsat_python_experiment` if
-      `experiment_result` provenance will be saved. If that cannot fit a
-      synchronous call, use `submit_cpsat_python_job` and save without
-      `experiment_result`; there is no background experiment tool.
+    - MiniZinc: if `portfolio_result` provenance will be saved, use
+      `submit_portfolio_job(models=[<the finalist model>],
+      solvers=[<winning solver>], data=<FULL-instance dzn>, checker=<the
+      checker>, seeds=[<winning seed>], per_attempt_timeout_ms=<final
+      budget>)`, even for one model/solver — not step 8's shape: the save's
+      data-hash consistency check rejects a `portfolio_result` produced
+      with tuning data; otherwise use `submit_solve_job(model=<finalist>,
+      data=<full data>, checker=<the checker>, solver=<winning solver>,
+      random_seed=<winning seed>, timeout_ms=<final budget>)` — its
+      `SolveResult` carries no `portfolio_result` field.
+    - CP-SAT: use the SYNCHRONOUS `run_cpsat_python_experiment` (step 9's
+      call shape) if `experiment_result` provenance will be saved. If that
+      cannot fit a synchronous call, use `submit_cpsat_python_job` (step
+      11's call shape) and save without `experiment_result`; there is no
+      background experiment tool.
     Pass the relevant checker to the finalist call.
 
 14. Poll the matching tool: `submit_portfolio_job` polls with
     `get_portfolio_job`; `submit_solve_job` polls with `get_solve_job`;
-    `submit_cpsat_python_job` polls with `get_cpsat_python_job`. Read a
-    synchronous experiment directly. Only this terminal result is presented.
+    `submit_cpsat_python_job` polls with `get_cpsat_python_job`. Each getter
+    takes `job_id=<the id returned by its submit call>`. Read a synchronous
+    experiment directly. Only this terminal result is presented.
 
     Before presenting a solution, apply step 12. A portfolio winner's
     `checker_status` is OBSERVATIONAL; `submit_solve_job`'s
@@ -611,21 +704,33 @@ save-tool provenance.
     A terminal `timeout`/`unknown` without an incumbent has nothing for the
     checker to check. MiniZinc reports `checker.status` of `no_solution`;
     CP-SAT sets `checker_skipped_reason` instead of `checker`. Present that
-    result (flagged as unproven). Otherwise lead with the actual solve result,
-    explain it in the user's terms, and include the complete Statistics
-    section when present; do not narrate the workflow or tool names you used
-    unless the user asks for those implementation details.
+    result (flagged as unproven). Otherwise lead with the actual solve result
+    and explain it in the user's terms: read `diagnostic.category` before raw
+    `stdout`/`stderr` when a diagnostic exists (the raw streams are supporting
+    evidence, never the primary status signal), describe `status` in the
+    presenting backend's own vocabulary, never describe a result whose status
+    is not `optimal` as optimal, and present a solution only when the status
+    actually carries one. Include the complete `Statistics:` section whenever
+    a MiniZinc result's `statistics` map is non-empty; CP-SAT results have no
+    statistics map, so report none. Do not narrate the workflow or tool names
+    you used unless the user asks for those implementation details.
 
-15. Save only when the user asks, using an explicit absolute `target_dir` and
-    the full-instance final run's result as provenance — never a smoke or
-    representative-tuning result.
+15. Save only when the user asks — `save_verified_minizinc_model` for a
+    MiniZinc finalist, `save_verified_cpsat_python` for a CP-SAT finalist —
+    using an explicit absolute `target_dir` and the full-instance final
+    run's result as provenance — never a smoke or representative-tuning
+    result.
     `portfolio_result`/`experiment_result` are PROVENANCE ONLY; the save call
     hash-verifies provenance against the exact artifact and re-verifies it. It
     reaches checked verification only when the SAME `checker` you attached to
     the finalist run is passed directly to the save call itself.
     Dropping `checker` from the save call silently saves at a weaker level.
-    - MiniZinc: pass the exact model/data/solver/seed, the SAME `checker` (when
-      one was drafted for the finalist run), and the original problem text as
+    - MiniZinc: pass the exact model/data/solver/seed (and, with
+      `portfolio_result`, the race's
+      `free_search`/`parallel`/`all_solutions`/`num_solutions` — the server
+      rejects a save that does not replay the winning configuration), the
+      SAME `checker` (when one was drafted for the finalist run), and the
+      original problem text as
       `problem`; plus `portfolio_result` ONLY when the final run used
       `submit_portfolio_job`. A final run made through `submit_solve_job` has no
       `portfolio_result` to pass.
