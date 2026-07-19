@@ -313,8 +313,8 @@ async def test_list_available_solvers_text_points_to_structured_capabilities_wit
 
     text = _content_text(await mcp.call_tool("list_available_solvers", {}))
 
-    assert "ask for them explicitly" in text
     assert "Detailed solver capabilities are available on request" in text
+    assert "structured result includes" in text
     assert "capabilities.supports_all_solutions" in text
     assert "for each solver" in text
     assert "std_flags" in text
