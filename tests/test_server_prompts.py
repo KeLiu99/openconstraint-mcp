@@ -4,11 +4,11 @@ import pytest
 
 from openconstraint_mcp.protocol_text.descriptions import (
     AUTO_TUNE_CONSTRAINT_PROBLEM_PROMPT_DESCRIPTION,
+    CPSAT_PYTHON_SOLUTION_WORKFLOW_PROMPT_DESCRIPTION,
     LIST_AVAILABLE_SOLVERS_DESCRIPTION,
     MCP_SERVER_INSTRUCTIONS,
+    MINIZINC_SOLUTION_WORKFLOW_PROMPT_DESCRIPTION,
     RUN_CPSAT_PYTHON_DESCRIPTION,
-    SOLVE_CONSTRAINT_PROBLEM_PROMPT_DESCRIPTION,
-    SOLVE_CPSAT_PYTHON_PROMPT_DESCRIPTION,
     SOLVE_MINIZINC_FILES_DESCRIPTION,
     SOLVE_MINIZINC_MODEL_DESCRIPTION,
 )
@@ -97,7 +97,7 @@ def test_mcp_server_instructions_route_constraint_tasks() -> None:
         "constraint programming",
         "optimization",
         "knapsack",
-        "solve_constraint_problem",
+        "minizinc_solution_workflow",
         "check_minizinc_model",
         "solve_minizinc_model",
         "inspect_minizinc_model",
@@ -114,7 +114,7 @@ def test_mcp_server_instructions_present_solution_in_problem_terms() -> None:
     instructions = mcp.instructions or ""
 
     # The non-prompt fallback path must carry the same presentation contract as
-    # the solve_constraint_problem prompt: state the solution in the terms of
+    # the minizinc_solution_workflow prompt: state the solution in the terms of
     # the user's problem rather than dumping the raw JSON SolveResult, plus the
     # complete Statistics section when present.
     lower = instructions.lower()
@@ -136,28 +136,28 @@ async def _get_prompt_text(prompt_name: str, arguments: dict[str, str]) -> str:
 
 
 @pytest.mark.asyncio
-async def test_solve_constraint_problem_prompt_is_listed() -> None:
+async def test_minizinc_solution_workflow_prompt_is_listed() -> None:
     mcp = create_mcp_server()
     prompts = await mcp.list_prompts()
 
     names = {prompt.name for prompt in prompts}
-    assert "solve_constraint_problem" in names
+    assert "minizinc_solution_workflow" in names
 
-    prompt = next(p for p in prompts if p.name == "solve_constraint_problem")
+    prompt = next(p for p in prompts if p.name == "minizinc_solution_workflow")
     argument_names = {arg.name for arg in (prompt.arguments or [])}
     assert "problem" in argument_names
 
 
 @pytest.mark.asyncio
-async def test_solve_constraint_problem_prompt_echoes_user_problem() -> None:
-    text = await _get_prompt_text("solve_constraint_problem", {"problem": SAMPLE_PROBLEM})
+async def test_minizinc_solution_workflow_prompt_echoes_user_problem() -> None:
+    text = await _get_prompt_text("minizinc_solution_workflow", {"problem": SAMPLE_PROBLEM})
 
     assert SAMPLE_PROBLEM in text
 
 
 @pytest.mark.asyncio
-async def test_solve_constraint_problem_prompt_guides_minizinc_drafting() -> None:
-    text = await _get_prompt_text("solve_constraint_problem", {"problem": SAMPLE_PROBLEM})
+async def test_minizinc_solution_workflow_prompt_guides_minizinc_drafting() -> None:
+    text = await _get_prompt_text("minizinc_solution_workflow", {"problem": SAMPLE_PROBLEM})
 
     for substring in (
         "you",
@@ -172,8 +172,8 @@ async def test_solve_constraint_problem_prompt_guides_minizinc_drafting() -> Non
 
 
 @pytest.mark.asyncio
-async def test_solve_constraint_problem_prompt_steers_num_solutions_to_supported_solver() -> None:
-    text = await _get_prompt_text("solve_constraint_problem", {"problem": SAMPLE_PROBLEM})
+async def test_minizinc_solution_workflow_prompt_steers_num_solutions_to_supported_solver() -> None:
+    text = await _get_prompt_text("minizinc_solution_workflow", {"problem": SAMPLE_PROBLEM})
 
     # The recommended flow defaults to cp-sat, which does not support num_solutions;
     # without explicit steering an "N solutions" request lands on the gated solver.
@@ -183,8 +183,8 @@ async def test_solve_constraint_problem_prompt_steers_num_solutions_to_supported
 
 
 @pytest.mark.asyncio
-async def test_solve_constraint_problem_prompt_guides_multiple_optimal_solutions() -> None:
-    text = await _get_prompt_text("solve_constraint_problem", {"problem": SAMPLE_PROBLEM})
+async def test_minizinc_solution_workflow_prompt_guides_multiple_optimal_solutions() -> None:
+    text = await _get_prompt_text("minizinc_solution_workflow", {"problem": SAMPLE_PROBLEM})
     normalized = " ".join(text.split())
 
     assert "multiple optimal solutions" in normalized
@@ -198,14 +198,14 @@ def test_backend_routing_presents_minizinc_and_cpsat_as_peers() -> None:
     # may reinstate a blanket "prefer X" default for natural-language problems.
     combined = (
         MCP_SERVER_INSTRUCTIONS
-        + SOLVE_CONSTRAINT_PROBLEM_PROMPT_DESCRIPTION
-        + SOLVE_CPSAT_PYTHON_PROMPT_DESCRIPTION
+        + MINIZINC_SOLUTION_WORKFLOW_PROMPT_DESCRIPTION
+        + CPSAT_PYTHON_SOLUTION_WORKFLOW_PROMPT_DESCRIPTION
     )
     assert "prefer" not in combined.lower()
 
     # The server instructions route both backend prompts and both run paths.
-    assert "solve_constraint_problem" in MCP_SERVER_INSTRUCTIONS
-    assert "solve_cpsat_python" in MCP_SERVER_INSTRUCTIONS
+    assert "minizinc_solution_workflow" in MCP_SERVER_INSTRUCTIONS
+    assert "cpsat_python_solution_workflow" in MCP_SERVER_INSTRUCTIONS
     assert "run_cpsat_python" in MCP_SERVER_INSTRUCTIONS
 
     # Selection heuristic markers: CP-SAT Python (zero-install) vs MiniZinc
@@ -216,8 +216,8 @@ def test_backend_routing_presents_minizinc_and_cpsat_as_peers() -> None:
     assert ".dzn" in MCP_SERVER_INSTRUCTIONS
 
     # Each prompt description names the other backend's prompt as its peer.
-    assert "solve_cpsat_python" in SOLVE_CONSTRAINT_PROBLEM_PROMPT_DESCRIPTION
-    assert "solve_constraint_problem" in SOLVE_CPSAT_PYTHON_PROMPT_DESCRIPTION
+    assert "cpsat_python_solution_workflow" in MINIZINC_SOLUTION_WORKFLOW_PROMPT_DESCRIPTION
+    assert "minizinc_solution_workflow" in CPSAT_PYTHON_SOLUTION_WORKFLOW_PROMPT_DESCRIPTION
 
 
 def test_mcp_server_instructions_route_num_solutions_and_multiple_optima() -> None:
@@ -230,8 +230,8 @@ def test_mcp_server_instructions_route_num_solutions_and_multiple_optima() -> No
 
 
 @pytest.mark.asyncio
-async def test_solve_constraint_problem_prompt_does_not_recommend_bare_path_minizinc() -> None:
-    text = await _get_prompt_text("solve_constraint_problem", {"problem": SAMPLE_PROBLEM})
+async def test_minizinc_solution_workflow_prompt_does_not_recommend_bare_path_minizinc() -> None:
+    text = await _get_prompt_text("minizinc_solution_workflow", {"problem": SAMPLE_PROBLEM})
 
     # The managed-runtime invariant in AGENTS.md forbids recommending an
     # arbitrary `$PATH`-resolved `minizinc`. The fallback must route users
@@ -242,17 +242,17 @@ async def test_solve_constraint_problem_prompt_does_not_recommend_bare_path_mini
 
 
 @pytest.mark.asyncio
-async def test_solve_constraint_problem_prompt_passes_through_brace_input() -> None:
+async def test_minizinc_solution_workflow_prompt_passes_through_brace_input() -> None:
     problem_with_braces = "Allocate workers across shifts {1..3} with budget constraints"
 
-    text = await _get_prompt_text("solve_constraint_problem", {"problem": problem_with_braces})
+    text = await _get_prompt_text("minizinc_solution_workflow", {"problem": problem_with_braces})
 
     assert problem_with_braces in text
 
 
 @pytest.mark.asyncio
-async def test_solve_constraint_problem_prompt_preserves_local_first_boundary() -> None:
-    text = await _get_prompt_text("solve_constraint_problem", {"problem": SAMPLE_PROBLEM})
+async def test_minizinc_solution_workflow_prompt_preserves_local_first_boundary() -> None:
+    text = await _get_prompt_text("minizinc_solution_workflow", {"problem": SAMPLE_PROBLEM})
 
     for forbidden in (
         "the server will generate",
@@ -267,8 +267,8 @@ async def test_solve_constraint_problem_prompt_preserves_local_first_boundary() 
 
 
 @pytest.mark.asyncio
-async def test_solve_constraint_problem_prompt_orders_check_before_solve() -> None:
-    text = await _get_prompt_text("solve_constraint_problem", {"problem": SAMPLE_PROBLEM})
+async def test_minizinc_solution_workflow_prompt_orders_check_before_solve() -> None:
+    text = await _get_prompt_text("minizinc_solution_workflow", {"problem": SAMPLE_PROBLEM})
 
     # Pin the order on the single recommended-loop line that names both tools,
     # not a whole-prompt first-index comparison: the execute step and CLI
@@ -285,8 +285,8 @@ async def test_solve_constraint_problem_prompt_orders_check_before_solve() -> No
 
 
 @pytest.mark.asyncio
-async def test_solve_constraint_problem_prompt_notes_inline_data_for_check_and_solve() -> None:
-    text = await _get_prompt_text("solve_constraint_problem", {"problem": SAMPLE_PROBLEM})
+async def test_minizinc_solution_workflow_prompt_notes_inline_data_for_check_and_solve() -> None:
+    text = await _get_prompt_text("minizinc_solution_workflow", {"problem": SAMPLE_PROBLEM})
 
     # The prompt as a whole still references inline data and names both tools.
     assert "data" in text
@@ -299,8 +299,8 @@ async def test_solve_constraint_problem_prompt_notes_inline_data_for_check_and_s
 
 
 @pytest.mark.asyncio
-async def test_solve_constraint_problem_prompt_routes_existing_files_to_file_tools() -> None:
-    text = await _get_prompt_text("solve_constraint_problem", {"problem": SAMPLE_PROBLEM})
+async def test_minizinc_solution_workflow_prompt_routes_existing_files_to_file_tools() -> None:
+    text = await _get_prompt_text("minizinc_solution_workflow", {"problem": SAMPLE_PROBLEM})
 
     # When the user already has MiniZinc files (.mzn + optional .dzn) on disk,
     # the prompt should route to the path-based tools and pass paths — not the
@@ -316,8 +316,8 @@ async def test_solve_constraint_problem_prompt_routes_existing_files_to_file_too
 
 
 @pytest.mark.asyncio
-async def test_solve_constraint_problem_prompt_timeout_branch_does_not_auto_solve() -> None:
-    text = await _get_prompt_text("solve_constraint_problem", {"problem": SAMPLE_PROBLEM})
+async def test_minizinc_solution_workflow_prompt_timeout_branch_does_not_auto_solve() -> None:
+    text = await _get_prompt_text("minizinc_solution_workflow", {"problem": SAMPLE_PROBLEM})
 
     # The timeout branch must not silently regress to "treat timeout as ok".
     # Anchor on stable keywords for the three options the LLM should offer the
@@ -327,8 +327,8 @@ async def test_solve_constraint_problem_prompt_timeout_branch_does_not_auto_solv
 
 
 @pytest.mark.asyncio
-async def test_solve_constraint_problem_prompt_explains_result_fields() -> None:
-    text = await _get_prompt_text("solve_constraint_problem", {"problem": SAMPLE_PROBLEM})
+async def test_minizinc_solution_workflow_prompt_explains_result_fields() -> None:
+    text = await _get_prompt_text("minizinc_solution_workflow", {"problem": SAMPLE_PROBLEM})
 
     # The explain step must guide the LLM to read the new deterministic fields.
     # Keyword presence, not exact wording, to avoid brittleness. `timed_out` and
@@ -342,8 +342,8 @@ async def test_solve_constraint_problem_prompt_explains_result_fields() -> None:
 
 
 @pytest.mark.asyncio
-async def test_solve_constraint_problem_prompt_explains_structured_solution_fields() -> None:
-    text = await _get_prompt_text("solve_constraint_problem", {"problem": SAMPLE_PROBLEM})
+async def test_minizinc_solution_workflow_prompt_explains_structured_solution_fields() -> None:
+    text = await _get_prompt_text("minizinc_solution_workflow", {"problem": SAMPLE_PROBLEM})
 
     # The explain step must name the new structured SolveResult fields so the
     # client builds tables and comparisons from them rather than re-parsing
@@ -354,8 +354,8 @@ async def test_solve_constraint_problem_prompt_explains_structured_solution_fiel
 
 
 @pytest.mark.asyncio
-async def test_solve_constraint_problem_prompt_instructs_structured_result_presentation() -> None:
-    text = await _get_prompt_text("solve_constraint_problem", {"problem": SAMPLE_PROBLEM})
+async def test_minizinc_solution_workflow_prompt_instructs_structured_result_presentation() -> None:
+    text = await _get_prompt_text("minizinc_solution_workflow", {"problem": SAMPLE_PROBLEM})
 
     # The explain step must frame the final answer as a structured summary the
     # client presents to the user, not just "interpret these fields". Pin the
@@ -370,8 +370,8 @@ async def test_solve_constraint_problem_prompt_instructs_structured_result_prese
 
 
 @pytest.mark.asyncio
-async def test_solve_constraint_problem_prompt_solution_block_is_status_conditioned() -> None:
-    text = await _get_prompt_text("solve_constraint_problem", {"problem": SAMPLE_PROBLEM})
+async def test_minizinc_solution_workflow_prompt_solution_block_is_status_conditioned() -> None:
+    text = await _get_prompt_text("minizinc_solution_workflow", {"problem": SAMPLE_PROBLEM})
 
     # The solution must be shown as a block read verbatim from stdout, never
     # paraphrased or inferred by the model.
@@ -389,8 +389,8 @@ async def test_solve_constraint_problem_prompt_solution_block_is_status_conditio
 
 
 @pytest.mark.asyncio
-async def test_solve_constraint_problem_prompt_leads_with_result_not_workflow_narration() -> None:
-    text = await _get_prompt_text("solve_constraint_problem", {"problem": SAMPLE_PROBLEM})
+async def test_minizinc_solution_workflow_prompt_leads_with_result_not_workflow_narration() -> None:
+    text = await _get_prompt_text("minizinc_solution_workflow", {"problem": SAMPLE_PROBLEM})
 
     # The user-facing answer must open with the result, not with MCP prompt,
     # workflow, or tool names. Pin the directive on a single "lead with" line.
@@ -405,8 +405,8 @@ async def test_solve_constraint_problem_prompt_leads_with_result_not_workflow_na
 
 
 @pytest.mark.asyncio
-async def test_solve_constraint_problem_prompt_requires_statistics_when_present() -> None:
-    text = await _get_prompt_text("solve_constraint_problem", {"problem": SAMPLE_PROBLEM})
+async def test_minizinc_solution_workflow_prompt_requires_statistics_when_present() -> None:
+    text = await _get_prompt_text("minizinc_solution_workflow", {"problem": SAMPLE_PROBLEM})
 
     # Real clients dropped or compressed the statistics summary when the prompt
     # framed it as a soft, best-effort nicety. The directive must make the full
@@ -426,8 +426,8 @@ async def test_solve_constraint_problem_prompt_requires_statistics_when_present(
 
 
 @pytest.mark.asyncio
-async def test_solve_constraint_problem_prompt_forbids_compressed_statistics() -> None:
-    text = await _get_prompt_text("solve_constraint_problem", {"problem": SAMPLE_PROBLEM})
+async def test_minizinc_solution_workflow_prompt_forbids_compressed_statistics() -> None:
+    text = await _get_prompt_text("minizinc_solution_workflow", {"problem": SAMPLE_PROBLEM})
 
     statistics_lines = [line.lower() for line in text.splitlines() if "statistics" in line.lower()]
     assert statistics_lines
@@ -436,8 +436,8 @@ async def test_solve_constraint_problem_prompt_forbids_compressed_statistics() -
 
 
 @pytest.mark.asyncio
-async def test_solve_constraint_problem_prompt_avoids_repeated_headings() -> None:
-    text = await _get_prompt_text("solve_constraint_problem", {"problem": SAMPLE_PROBLEM})
+async def test_minizinc_solution_workflow_prompt_avoids_repeated_headings() -> None:
+    text = await _get_prompt_text("minizinc_solution_workflow", {"problem": SAMPLE_PROBLEM})
 
     # A real client (Claude Code) emitted the "Solver statistics" heading twice.
     # The prompt must tell the client to use each heading at most once.
@@ -450,8 +450,8 @@ async def test_solve_constraint_problem_prompt_avoids_repeated_headings() -> Non
 
 
 @pytest.mark.asyncio
-async def test_solve_constraint_problem_prompt_avoids_speculative_commentary() -> None:
-    text = await _get_prompt_text("solve_constraint_problem", {"problem": SAMPLE_PROBLEM})
+async def test_minizinc_solution_workflow_prompt_avoids_speculative_commentary() -> None:
+    text = await _get_prompt_text("minizinc_solution_workflow", {"problem": SAMPLE_PROBLEM})
 
     # A real client (Claude Code) padded the default answer with value-density
     # and greedy commentary. The prompt must discourage speculative algorithm
@@ -468,8 +468,8 @@ async def test_solve_constraint_problem_prompt_avoids_speculative_commentary() -
 
 
 @pytest.mark.asyncio
-async def test_solve_constraint_problem_prompt_requires_item_table_when_applicable() -> None:
-    text = await _get_prompt_text("solve_constraint_problem", {"problem": SAMPLE_PROBLEM})
+async def test_minizinc_solution_workflow_prompt_requires_item_table_when_applicable() -> None:
+    text = await _get_prompt_text("minizinc_solution_workflow", {"problem": SAMPLE_PROBLEM})
 
     # When the user problem supplies item-like data and the solution selects
     # among it, the client should render a compact table, not degrade to a
@@ -487,8 +487,8 @@ async def test_solve_constraint_problem_prompt_requires_item_table_when_applicab
 
 
 @pytest.mark.asyncio
-async def test_solve_constraint_problem_prompt_step6_broadens_hard_problem_exploration() -> None:
-    text = await _get_prompt_text("solve_constraint_problem", {"problem": SAMPLE_PROBLEM})
+async def test_minizinc_solution_workflow_prompt_step6_broadens_hard_problem_exploration() -> None:
+    text = await _get_prompt_text("minizinc_solution_workflow", {"problem": SAMPLE_PROBLEM})
 
     # Step 6 must frame exploration around the general "hard problem, best
     # approach not knowable in advance" case, not just "one solver too slow",
@@ -505,8 +505,8 @@ async def test_solve_constraint_problem_prompt_step6_broadens_hard_problem_explo
 
 
 @pytest.mark.asyncio
-async def test_solve_constraint_problem_prompt_step6_nudges_cross_backend() -> None:
-    text = await _get_prompt_text("solve_constraint_problem", {"problem": SAMPLE_PROBLEM})
+async def test_minizinc_solution_workflow_prompt_step6_nudges_cross_backend() -> None:
+    text = await _get_prompt_text("minizinc_solution_workflow", {"problem": SAMPLE_PROBLEM})
 
     # Step 6 should point at the CP-SAT Python path for an especially hard
     # instance, since neither backend dominates for every problem shape.
@@ -514,8 +514,8 @@ async def test_solve_constraint_problem_prompt_step6_nudges_cross_backend() -> N
 
 
 @pytest.mark.asyncio
-async def test_solve_constraint_problem_prompt_offers_save_only_on_user_request() -> None:
-    text = await _get_prompt_text("solve_constraint_problem", {"problem": SAMPLE_PROBLEM})
+async def test_minizinc_solution_workflow_prompt_offers_save_only_on_user_request() -> None:
+    text = await _get_prompt_text("minizinc_solution_workflow", {"problem": SAMPLE_PROBLEM})
 
     # The save tool appears, but only as the optional post-success step gated
     # on the user's explicit ask — never as a required part of the solve loop.
@@ -526,8 +526,8 @@ async def test_solve_constraint_problem_prompt_offers_save_only_on_user_request(
 
 
 @pytest.mark.asyncio
-async def test_solve_constraint_problem_prompt_save_step_follows_result_presentation() -> None:
-    text = await _get_prompt_text("solve_constraint_problem", {"problem": SAMPLE_PROBLEM})
+async def test_minizinc_solution_workflow_prompt_save_step_follows_result_presentation() -> None:
+    text = await _get_prompt_text("minizinc_solution_workflow", {"problem": SAMPLE_PROBLEM})
 
     # The save mention lives after the result-presentation step, so it cannot
     # read as a pre-solve requirement.
@@ -535,8 +535,8 @@ async def test_solve_constraint_problem_prompt_save_step_follows_result_presenta
 
 
 @pytest.mark.asyncio
-async def test_solve_constraint_problem_prompt_save_step_mentions_portfolio_result() -> None:
-    text = await _get_prompt_text("solve_constraint_problem", {"problem": SAMPLE_PROBLEM})
+async def test_minizinc_solution_workflow_prompt_save_step_mentions_portfolio_result() -> None:
+    text = await _get_prompt_text("minizinc_solution_workflow", {"problem": SAMPLE_PROBLEM})
 
     # The portfolio_result mention belongs in the save step, after the save
     # tool itself is introduced, not earlier as a pre-solve requirement.
@@ -545,8 +545,8 @@ async def test_solve_constraint_problem_prompt_save_step_mentions_portfolio_resu
 
 
 @pytest.mark.asyncio
-async def test_solve_constraint_problem_prompt_save_step_keeps_path_choice_client_side() -> None:
-    text = await _get_prompt_text("solve_constraint_problem", {"problem": SAMPLE_PROBLEM})
+async def test_minizinc_solution_workflow_prompt_save_step_keeps_path_choice_client_side() -> None:
+    text = await _get_prompt_text("minizinc_solution_workflow", {"problem": SAMPLE_PROBLEM})
 
     # The client obtains the explicit absolute directory from the user (or its
     # own picker); the server never opens a dialog — no OS UI is implied
@@ -562,31 +562,31 @@ async def test_solve_constraint_problem_prompt_save_step_keeps_path_choice_clien
 
 
 @pytest.mark.asyncio
-async def test_solve_cpsat_python_prompt_is_registered() -> None:
+async def test_cpsat_python_solution_workflow_prompt_is_registered() -> None:
     mcp = create_mcp_server()
     prompts = await mcp.list_prompts()
     names = {p.name for p in prompts}
-    assert "solve_cpsat_python" in names
+    assert "cpsat_python_solution_workflow" in names
 
 
 @pytest.mark.asyncio
-async def test_solve_cpsat_python_prompt_substitutes_problem() -> None:
-    text = await _get_prompt_text("solve_cpsat_python", {"problem": SAMPLE_PROBLEM})
+async def test_cpsat_python_solution_workflow_prompt_substitutes_problem() -> None:
+    text = await _get_prompt_text("cpsat_python_solution_workflow", {"problem": SAMPLE_PROBLEM})
     assert SAMPLE_PROBLEM in text
 
 
 @pytest.mark.asyncio
-async def test_solve_cpsat_python_prompt_mentions_run_cpsat_python() -> None:
-    text = await _get_prompt_text("solve_cpsat_python", {"problem": SAMPLE_PROBLEM})
+async def test_cpsat_python_solution_workflow_prompt_mentions_run_cpsat_python() -> None:
+    text = await _get_prompt_text("cpsat_python_solution_workflow", {"problem": SAMPLE_PROBLEM})
     assert "run_cpsat_python" in text
 
 
 @pytest.mark.asyncio
-async def test_solve_cpsat_python_prompt_teaches_seed_protocol() -> None:
+async def test_cpsat_python_solution_workflow_prompt_teaches_seed_protocol() -> None:
     # The client-facing protocol must not drift from the env-var contract the
     # save replay relies on: read OPENCONSTRAINT_MCP_CPSAT_SEED, fall back to
     # 42, single worker.
-    text = await _get_prompt_text("solve_cpsat_python", {"problem": SAMPLE_PROBLEM})
+    text = await _get_prompt_text("cpsat_python_solution_workflow", {"problem": SAMPLE_PROBLEM})
     assert "OPENCONSTRAINT_MCP_CPSAT_SEED" in text
     assert "42" in text
     assert "num_workers = 1" in text
@@ -594,8 +594,8 @@ async def test_solve_cpsat_python_prompt_teaches_seed_protocol() -> None:
 
 
 @pytest.mark.asyncio
-async def test_solve_cpsat_python_prompt_nudges_cross_backend() -> None:
-    text = await _get_prompt_text("solve_cpsat_python", {"problem": SAMPLE_PROBLEM})
+async def test_cpsat_python_solution_workflow_prompt_nudges_cross_backend() -> None:
+    text = await _get_prompt_text("cpsat_python_solution_workflow", {"problem": SAMPLE_PROBLEM})
 
     # The result-presentation step should point at the MiniZinc portfolio path
     # for an especially hard instance, since neither backend dominates for
@@ -604,8 +604,8 @@ async def test_solve_cpsat_python_prompt_nudges_cross_backend() -> None:
 
 
 @pytest.mark.asyncio
-async def test_solve_cpsat_python_prompt_states_json_output_contract() -> None:
-    text = await _get_prompt_text("solve_cpsat_python", {"problem": SAMPLE_PROBLEM})
+async def test_cpsat_python_solution_workflow_prompt_states_json_output_contract() -> None:
+    text = await _get_prompt_text("cpsat_python_solution_workflow", {"problem": SAMPLE_PROBLEM})
     # Must describe the required JSON output format
     assert '"status"' in text
     assert '"solution"' in text
@@ -613,23 +613,23 @@ async def test_solve_cpsat_python_prompt_states_json_output_contract() -> None:
 
 
 @pytest.mark.asyncio
-async def test_solve_cpsat_python_prompt_forbids_network_and_file_mutation() -> None:
-    text = await _get_prompt_text("solve_cpsat_python", {"problem": SAMPLE_PROBLEM})
+async def test_cpsat_python_solution_workflow_prompt_forbids_network_and_file_mutation() -> None:
+    text = await _get_prompt_text("cpsat_python_solution_workflow", {"problem": SAMPLE_PROBLEM})
     lower = text.lower()
     assert "network" in lower
     assert "file" in lower
 
 
 @pytest.mark.asyncio
-async def test_solve_cpsat_python_prompt_states_local_child_process_execution() -> None:
-    text = await _get_prompt_text("solve_cpsat_python", {"problem": SAMPLE_PROBLEM})
+async def test_cpsat_python_solution_workflow_prompt_states_local_child_process_execution() -> None:
+    text = await _get_prompt_text("cpsat_python_solution_workflow", {"problem": SAMPLE_PROBLEM})
     lower = text.lower()
     assert "child process" in lower or "subprocess" in lower or "local" in lower
 
 
 @pytest.mark.asyncio
-async def test_solve_cpsat_python_prompt_documents_save_gate_options() -> None:
-    text = await _get_prompt_text("solve_cpsat_python", {"problem": SAMPLE_PROBLEM})
+async def test_cpsat_python_solution_workflow_prompt_documents_save_gate_options() -> None:
+    text = await _get_prompt_text("cpsat_python_solution_workflow", {"problem": SAMPLE_PROBLEM})
     # All three gates must be named in the save step
     assert "reported" in text
     assert "expectation" in text.lower()
@@ -638,8 +638,8 @@ async def test_solve_cpsat_python_prompt_documents_save_gate_options() -> None:
 
 
 @pytest.mark.asyncio
-async def test_solve_cpsat_python_prompt_expectation_gate_documents_no_optimality_proof() -> None:
-    text = await _get_prompt_text("solve_cpsat_python", {"problem": SAMPLE_PROBLEM})
+async def test_cpsat_python_solution_workflow_prompt_expectation_gate_no_optimality_proof() -> None:
+    text = await _get_prompt_text("cpsat_python_solution_workflow", {"problem": SAMPLE_PROBLEM})
     lower = text.lower()
     # The prompt must explicitly state the threshold is NOT a proof of global optimality.
     assert "does not prove" in lower or "not prove" in lower or "not an optimality proof" in lower
@@ -649,8 +649,8 @@ async def test_solve_cpsat_python_prompt_expectation_gate_documents_no_optimalit
 
 
 @pytest.mark.asyncio
-async def test_solve_cpsat_python_prompt_checker_gate_documents_payload_format() -> None:
-    text = await _get_prompt_text("solve_cpsat_python", {"problem": SAMPLE_PROBLEM})
+async def test_cpsat_python_solution_workflow_prompt_checker_gate_payload_format() -> None:
+    text = await _get_prompt_text("cpsat_python_solution_workflow", {"problem": SAMPLE_PROBLEM})
     # Checker receives the payload path as sys.argv[1]
     assert "sys.argv[1]" in text
     # Payload keys that the checker must read
@@ -659,8 +659,8 @@ async def test_solve_cpsat_python_prompt_checker_gate_documents_payload_format()
 
 
 @pytest.mark.asyncio
-async def test_solve_cpsat_python_prompt_checker_gate_documents_output_contract() -> None:
-    text = await _get_prompt_text("solve_cpsat_python", {"problem": SAMPLE_PROBLEM})
+async def test_cpsat_python_solution_workflow_prompt_checker_gate_output_contract() -> None:
+    text = await _get_prompt_text("cpsat_python_solution_workflow", {"problem": SAMPLE_PROBLEM})
     # Checker must emit JSON with status/errors/details
     assert '"accepted"' in text or "accepted" in text
     assert '"rejected"' in text or "rejected" in text
@@ -671,8 +671,8 @@ async def test_solve_cpsat_python_prompt_checker_gate_documents_output_contract(
 
 
 @pytest.mark.asyncio
-async def test_solve_cpsat_python_prompt_checker_gate_safety_boundary() -> None:
-    text = await _get_prompt_text("solve_cpsat_python", {"problem": SAMPLE_PROBLEM})
+async def test_cpsat_python_solution_workflow_prompt_checker_gate_safety_boundary() -> None:
+    text = await _get_prompt_text("cpsat_python_solution_workflow", {"problem": SAMPLE_PROBLEM})
     lower = text.lower()
     # The server executes the checker locally and does not sandbox it — this
     # must be documented so the client knows to generate safe validation code.
@@ -682,8 +682,8 @@ async def test_solve_cpsat_python_prompt_checker_gate_safety_boundary() -> None:
 
 
 @pytest.mark.asyncio
-async def test_solve_cpsat_python_prompt_discourages_replay_config_for_ordinary_solves() -> None:
-    text = await _get_prompt_text("solve_cpsat_python", {"problem": SAMPLE_PROBLEM})
+async def test_cpsat_python_solution_workflow_prompt_discourages_replay_for_ordinary() -> None:
+    text = await _get_prompt_text("cpsat_python_solution_workflow", {"problem": SAMPLE_PROBLEM})
     normalized = " ".join(text.split()).lower()
 
     # For a single problem instance, the prompt must steer toward a concrete,
@@ -696,8 +696,8 @@ async def test_solve_cpsat_python_prompt_discourages_replay_config_for_ordinary_
 
 
 @pytest.mark.asyncio
-async def test_solve_cpsat_python_prompt_documents_file_replay_workflow() -> None:
-    text = await _get_prompt_text("solve_cpsat_python", {"problem": SAMPLE_PROBLEM})
+async def test_cpsat_python_solution_workflow_prompt_documents_file_replay_workflow() -> None:
+    text = await _get_prompt_text("cpsat_python_solution_workflow", {"problem": SAMPLE_PROBLEM})
 
     # The manual replay workflow must route through the existing file tool
     # instead of promising a dedicated inspect/rerun tool, and must name the
@@ -711,8 +711,8 @@ async def test_solve_cpsat_python_prompt_documents_file_replay_workflow() -> Non
 
 
 @pytest.mark.asyncio
-async def test_solve_cpsat_python_prompt_save_step_gated_on_user_request() -> None:
-    text = await _get_prompt_text("solve_cpsat_python", {"problem": SAMPLE_PROBLEM})
+async def test_cpsat_python_solution_workflow_prompt_save_step_gated_on_user_request() -> None:
+    text = await _get_prompt_text("cpsat_python_solution_workflow", {"problem": SAMPLE_PROBLEM})
     normalized = " ".join(text.split()).lower()
     # Save is optional — the user must ask
     assert "only if" in normalized or "if the user" in normalized
@@ -822,7 +822,7 @@ async def test_auto_tune_constraint_problem_prompt_cpsat_default_safety() -> Non
     lower = " ".join(text.split()).lower()
 
     # Every drafted/rewritten CP-SAT candidate carries the same no-network,
-    # no-file-mutation default as the single-backend solve_cpsat_python prompt.
+    # no-file-mutation default as the single-backend cpsat_python_solution_workflow prompt.
     assert "no network access, no file writes or deletes" in lower
     assert "unless the user explicitly requested it" in lower
 
@@ -1259,5 +1259,5 @@ def test_auto_tune_constraint_problem_named_in_instructions_and_sibling_prompts(
     assert "auto_tune_constraint_problem" in SOLVE_CONSTRAINT_PROBLEM_PROMPT
     assert "auto_tune_constraint_problem" in SOLVE_CPSAT_PYTHON_PROMPT
 
-    assert "solve_constraint_problem" in AUTO_TUNE_CONSTRAINT_PROBLEM_PROMPT_DESCRIPTION
-    assert "solve_cpsat_python" in AUTO_TUNE_CONSTRAINT_PROBLEM_PROMPT_DESCRIPTION
+    assert "minizinc_solution_workflow" in AUTO_TUNE_CONSTRAINT_PROBLEM_PROMPT_DESCRIPTION
+    assert "cpsat_python_solution_workflow" in AUTO_TUNE_CONSTRAINT_PROBLEM_PROMPT_DESCRIPTION

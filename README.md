@@ -563,7 +563,7 @@ produced solution against a checker model without changing result shape:
   `structuredContent` still carries the complete validated `SolveResult` for
   clients that consume structured output directly.
 
-  **Division of labor.** The `solve_constraint_problem` MCP prompt (below)
+  **Division of labor.** The `minizinc_solution_workflow` MCP prompt (below)
   guides the client LLM to draft a MiniZinc model; `solve_minizinc_model`
   executes that drafted model locally and returns the runtime's verbatim
   output. `LLM proposes, server verifies.`
@@ -1039,7 +1039,7 @@ server runs it in a **local child process**.
   ```
 
   Valid `status` values: `optimal`, `feasible`, `infeasible`, `unknown`,
-  `error`. Use the `solve_cpsat_python` prompt to generate conforming scripts.
+  `error`. Use the `cpsat_python_solution_workflow` prompt to generate conforming scripts.
 
   The child process runs under the server's own Python interpreter (the
   project venv, which already ships `ortools`), launched unbuffered (`-u`).
@@ -1692,7 +1692,7 @@ of the **full** profile only — start the server with
 `openconstraint-mcp stdio --toolset full` to expose them (the default `core`
 profile registers no prompts; see [CLI](#cli)):
 
-- **`solve_constraint_problem(problem: str)`** — a guided template for the
+- **`minizinc_solution_workflow(problem: str)`** — a guided template for the
   MCP client's LLM. Given a natural-language constraint or optimization
   problem, the prompt instructs the client's model to:
 
@@ -1743,7 +1743,7 @@ profile registers no prompts; see [CLI](#cli)):
   verified by the local managed MiniZinc runtime via
   `solve_minizinc_model`. `LLM proposes, local MiniZinc verifies.`
 
-- **`solve_cpsat_python(problem: str)`** — a guided template for the MCP
+- **`cpsat_python_solution_workflow(problem: str)`** — a guided template for the MCP
   client's LLM to write OR-Tools CP-SAT Python and run it via
   `run_cpsat_python`. The prompt instructs the client's model to:
 
@@ -1794,8 +1794,8 @@ profile registers no prompts; see [CLI](#cli)):
 - **`auto_tune_constraint_problem(problem: str)`** — client-side
   orchestration for comparing *several* candidate formulations (MiniZinc
   and/or CP-SAT Python) before presenting one winner, rather than solving a
-  single drafted model. A peer of `solve_constraint_problem` and
-  `solve_cpsat_python` — pick it when the user's own framing asks for
+  single drafted model. A peer of `minizinc_solution_workflow` and
+  `cpsat_python_solution_workflow` — pick it when the user's own framing asks for
   formulations to be compared ("try a few approaches", "which formulation is
   fastest", "compare MiniZinc vs CP-SAT"), not as an automatic escalation
   from a single hard-instance result. The prompt instructs the client's
