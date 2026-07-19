@@ -678,7 +678,11 @@ save-tool provenance.
       with tuning data; otherwise use `submit_solve_job(model=<finalist>,
       data=<full data>, checker=<the checker>, solver=<winning solver>,
       random_seed=<winning seed>, timeout_ms=<final budget>)` — its
-      `SolveResult` carries no `portfolio_result` field.
+      `SolveResult` carries no `portfolio_result` field. When the winning
+      attempt's `seed` is null (a race run without explicit `seeds`),
+      omit `seeds` / `random_seed` from these calls entirely — `seeds`
+      accepts only integers, and an unseeded winner has no seed to
+      replay.
     - CP-SAT: use the SYNCHRONOUS `run_cpsat_python_experiment` (step 9's
       call shape) if `experiment_result` provenance will be saved. If that
       cannot fit a synchronous call, use `submit_cpsat_python_job` (step
