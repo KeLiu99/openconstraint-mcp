@@ -9,7 +9,9 @@ from openconstraint_mcp.protocol_text.results import (
     format_tabular_data_content,
 )
 from openconstraint_mcp.schemas.cpsat import (
+    CpsatPythonExperimentAttemptResult,
     CpsatPythonExperimentResult,
+    CpsatPythonResult,
 )
 from openconstraint_mcp.schemas.diagnostics import Diagnostic
 from openconstraint_mcp.schemas.minizinc import SolveResult
@@ -53,6 +55,57 @@ def test_experiment_text_leads_with_no_winner_diagnostic() -> None:
     )
     text = format_cpsat_experiment_content(result)
     assert text.startswith("Diagnostic: no_winner — no attempt was accepted\n\n")
+
+
+def test_experiment_timeout_winner_is_best_so_far_and_not_savable_until_rerun() -> None:
+    # A timeout winner is only an incumbent: the text must flag it as best-so-far,
+    # not savable, and direct a rerun *until* the status gate is met — "rerun once"
+    # is not enough, a rerun that times out again is still not savable.
+    winner = CpsatPythonResult(
+        status="timeout",
+        solution={"x": 4},
+        objective=4,
+        stdout="",
+        stderr="",
+        return_code=0,
+        timed_out=True,
+        truncated=False,
+        duration_ms=1000,
+    )
+    result = CpsatPythonExperimentResult(
+        status="winner",
+        winner_index=0,
+        winner_name="baseline",
+        winner=winner,
+        attempts=[
+            CpsatPythonExperimentAttemptResult(
+                index=0,
+                name="baseline",
+                seed=None,
+                config_sha256=None,
+                source_sha256="abc123",
+                timeout_ms=1000,
+                status="timeout",
+                objective=4,
+                accepted=True,
+                timed_out=True,
+                truncated=False,
+                duration_ms=1000,
+            )
+        ],
+        elapsed_ms=1000,
+        objective_sense="maximize",
+        selection_policy=(
+            "best_accepted_incumbent_objective_then_status_then_duration_then_attempt_order"
+        ),
+        source_sha256=["abc123"],
+    )
+
+    text = format_cpsat_experiment_content(result)
+
+    assert "best-so-far" in text
+    assert "NOT savable" in text
+    assert "until it reports optimal/feasible" in text
 
 
 def _tabular(headers: list[str], available_sheets: list[str] | None = None) -> TabularData:

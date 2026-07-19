@@ -50,21 +50,20 @@ SOLVER_NUM_SOLUTIONS_NOTE = (
 )
 SOLVER_RUNTIME_CONFIG_CAUTION = (
     "Caution: solver entries come from the MiniZinc runtime configuration. "
-    "Commercial or external MIP solvers such as CPLEX, Gurobi, Xpress, SCIP, and "
-    "COIN-BC may still require separate installed binaries, licenses, or "
-    "solver-specific setup before they can successfully solve a model."
+    "Commercial or external MIP solvers (CPLEX, Gurobi, Xpress, SCIP, COIN-BC) "
+    "may still require separate installed binaries, licenses, or "
+    "solver-specific setup to run."
 )
 SOLUTION_CHECK_NON_ADJUDICATION_NOTE = (
-    "Note: a checker's author `CORRECT`/`INCORRECT` text is surfaced verbatim in "
-    "each `checks` entry and is NOT interpreted by the server — only a "
-    "constraint-style rejection (a nested UNSATISFIABLE) counts as a `violation`. "
-    "`solve.solutions` includes checker-rejected solutions, so on a violation "
-    "consult the per-solution `checks`. The checker never proves optimality; "
-    "`solve.status` remains the proof of completeness."
+    "Note: checker `CORRECT`/`INCORRECT` text is author output, surfaced "
+    "verbatim in each `checks` entry and NOT interpreted by the server; only a "
+    "nested UNSATISFIABLE (a constraint-style rejection) counts as a `violation`. "
+    "`solve.solutions` includes checker-rejected solutions — on a violation, "
+    "consult each solution's `checks`. Only `solve.status` proves "
+    "completeness/optimality."
 )
 SOLVER_CAPABILITY_METADATA_NOTE = (
-    "To inspect detailed solver capabilities, ask for them explicitly. The "
-    "structured result includes `capabilities.supports_all_solutions`, "
+    "The structured result includes `capabilities.supports_all_solutions`, "
     "`supports_free_search`, `supports_parallel`, `supports_random_seed`, "
     "`supports_num_solutions`, and advisory `std_flags` for each solver."
 )
@@ -165,10 +164,10 @@ def format_cpsat_experiment_content(result: CpsatPythonExperimentResult) -> str:
         ]
         if result.winner.status == "timeout":
             lines.append(
-                "Note: the winner is a best-so-far incumbent (status=timeout) and is "
-                "NOT savable as-is — save_verified_cpsat_python requires "
+                "Note: the winner is a best-so-far incumbent (status=timeout), NOT "
+                "savable as-is — save_verified_cpsat_python requires "
                 "optimal/feasible. Re-run this attempt with a larger timeout_ms "
-                "until it reports optimal/feasible, then save it."
+                "until it reports optimal/feasible, then save."
             )
     else:
         lines = ["Experiment status: no_winner (no attempt was accepted)"]
