@@ -1,4 +1,4 @@
-"""The solve_cpsat_python prompt's code examples must be copyable as-is.
+"""The cpsat_python_solution_workflow prompt's code examples must be copyable as-is.
 
 These tests validate the examples AFTER template rendering (when doubled
 braces have become normal Python braces) and run them in-process against the

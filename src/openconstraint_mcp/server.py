@@ -44,6 +44,7 @@ from .protocol_text.descriptions import (
     CHECK_MINIZINC_FILES_DESCRIPTION,
     CHECK_MINIZINC_MODEL_DESCRIPTION,
     CHECK_RUNTIME_DESCRIPTION,
+    CPSAT_PYTHON_SOLUTION_WORKFLOW_PROMPT_DESCRIPTION,
     FIND_UNSAT_CORE_DESCRIPTION,
     FIND_UNSAT_CORE_FILES_DESCRIPTION,
     GET_CPSAT_PYTHON_JOB_DESCRIPTION,
@@ -58,6 +59,7 @@ from .protocol_text.descriptions import (
     LOAD_TABULAR_DATA_DESCRIPTION,
     MCP_SERVER_INSTRUCTIONS,
     MCP_SERVER_INSTRUCTIONS_CORE,
+    MINIZINC_SOLUTION_WORKFLOW_PROMPT_DESCRIPTION,
     RUN_CPSAT_PYTHON_DESCRIPTION,
     RUN_CPSAT_PYTHON_DESCRIPTION_CORE,
     RUN_CPSAT_PYTHON_EXPERIMENT_DESCRIPTION,
@@ -65,8 +67,6 @@ from .protocol_text.descriptions import (
     RUN_CPSAT_PYTHON_FILE_DESCRIPTION_CORE,
     SAVE_VERIFIED_CPSAT_PYTHON_DESCRIPTION,
     SAVE_VERIFIED_MINIZINC_MODEL_DESCRIPTION,
-    SOLVE_CONSTRAINT_PROBLEM_PROMPT_DESCRIPTION,
-    SOLVE_CPSAT_PYTHON_PROMPT_DESCRIPTION,
     SOLVE_MINIZINC_FILES_DESCRIPTION,
     SOLVE_MINIZINC_MODEL_DESCRIPTION,
     SOLVE_MINIZINC_MODEL_DESCRIPTION_CORE,
@@ -1161,17 +1161,17 @@ def create_mcp_server(toolset: str = "full") -> FastMCP:
         return mcp
 
     @mcp.prompt(
-        name="solve_constraint_problem",
-        description=SOLVE_CONSTRAINT_PROBLEM_PROMPT_DESCRIPTION,
+        name="minizinc_solution_workflow",
+        description=MINIZINC_SOLUTION_WORKFLOW_PROMPT_DESCRIPTION,
     )
-    def solve_constraint_problem(problem: str) -> str:
+    def minizinc_solution_workflow(problem: str) -> str:
         return SOLVE_CONSTRAINT_PROBLEM_PROMPT.format(problem=problem)
 
     @mcp.prompt(
-        name="solve_cpsat_python",
-        description=SOLVE_CPSAT_PYTHON_PROMPT_DESCRIPTION,
+        name="cpsat_python_solution_workflow",
+        description=CPSAT_PYTHON_SOLUTION_WORKFLOW_PROMPT_DESCRIPTION,
     )
-    def solve_cpsat_python_prompt(problem: str) -> str:
+    def cpsat_python_solution_workflow(problem: str) -> str:
         return SOLVE_CPSAT_PYTHON_PROMPT.format(problem=problem)
 
     @mcp.prompt(

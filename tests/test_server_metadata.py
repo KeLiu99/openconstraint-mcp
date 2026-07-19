@@ -230,8 +230,8 @@ FULL_TOOL_NAMES = CORE_TOOL_NAMES | {
 }
 
 FULL_PROMPT_NAMES = {
-    "solve_constraint_problem",
-    "solve_cpsat_python",
+    "minizinc_solution_workflow",
+    "cpsat_python_solution_workflow",
     "auto_tune_constraint_problem",
 }
 
@@ -303,7 +303,7 @@ async def test_full_profile_descriptions_advertise_full_only_cross_references() 
     tools = await _tools_by_name("full")
     assert "submit_portfolio_job" in tools["solve_minizinc_model"].description
     run_cpsat_python_desc = tools["run_cpsat_python"].description
-    assert "solve_cpsat_python" in run_cpsat_python_desc
+    assert "cpsat_python_solution_workflow" in run_cpsat_python_desc
     assert "submit_portfolio_job" in run_cpsat_python_desc
     assert "save_verified_cpsat_python" in tools["run_cpsat_python_file"].description
 

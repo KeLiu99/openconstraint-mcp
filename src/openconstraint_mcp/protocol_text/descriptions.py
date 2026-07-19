@@ -109,7 +109,7 @@ MCP_SERVER_INSTRUCTIONS = (
     "verification, portfolio racing, and `num_solutions` enumeration.\n"
     "\n"
     "PROMPTS (when the client supports MCP prompts): for a natural-language "
-    "problem use solve_constraint_problem (MiniZinc) or solve_cpsat_python "
+    "problem use minizinc_solution_workflow (MiniZinc) or cpsat_python_solution_workflow "
     "(CP-SAT Python). To compare several candidate formulations before "
     "committing to one, use auto_tune_constraint_problem instead — a "
     "three-tier smoke/tuning/full-instance workflow that races candidates "
@@ -663,9 +663,9 @@ _RUN_CPSAT_PYTHON_HEAD = (
     "Valid `status` values: `optimal`, `feasible`, `infeasible`, `unknown`, `error`. "
 )
 
-# Full-only: names the `solve_cpsat_python` prompt, which the core profile hides.
+# Full-only: names the `cpsat_python_solution_workflow` prompt, which the core profile hides.
 _RUN_CPSAT_PYTHON_PROMPT_REF = (
-    "Use the `solve_cpsat_python` prompt to generate conforming scripts. "
+    "Use the `cpsat_python_solution_workflow` prompt to generate conforming scripts. "
 )
 
 _RUN_CPSAT_PYTHON_MID = (
@@ -774,14 +774,14 @@ RUN_CPSAT_PYTHON_FILE_DESCRIPTION_CORE = (
     + _CPSAT_CHILD_POSTURE
 )
 
-SOLVE_CONSTRAINT_PROBLEM_PROMPT_DESCRIPTION = (
+MINIZINC_SOLUTION_WORKFLOW_PROMPT_DESCRIPTION = (
     "Guide the MCP client's LLM through translating a natural-language "
     "constraint or optimization problem into MiniZinc and running it "
     "through the local managed runtime (via solve_minizinc_model when "
     "available, otherwise by walking the user through the "
     "openconstraint-mcp CLI to set up and invoke the managed runtime "
     "manually — never via a bare PATH-based minizinc). The MiniZinc peer "
-    "of the solve_cpsat_python prompt: pick it for expressive global "
+    "of the cpsat_python_solution_workflow prompt: pick it for expressive global "
     "constraints, `.dzn` data files, checker verification, portfolio "
     "racing, or `num_solutions` enumeration."
 )
@@ -949,11 +949,11 @@ SAVE_VERIFIED_CPSAT_PYTHON_DESCRIPTION = (
     + _CPSAT_CHILD_POSTURE
 )
 
-SOLVE_CPSAT_PYTHON_PROMPT_DESCRIPTION = (
+CPSAT_PYTHON_SOLUTION_WORKFLOW_PROMPT_DESCRIPTION = (
     "Guide the MCP client's LLM through writing an OR-Tools CP-SAT Python "
     "script that conforms to the run_cpsat_python output contract and "
     "running it via run_cpsat_python. The CP-SAT peer of the "
-    "solve_constraint_problem prompt: pick it for zero-install solving (no "
+    "minizinc_solution_workflow prompt: pick it for zero-install solving (no "
     "managed runtime needed), pure integer/scheduling problems, imperative "
     "pre-processing, or custom data structures."
 )
@@ -967,7 +967,7 @@ AUTO_TUNE_CONSTRAINT_PROBLEM_PROMPT_DESCRIPTION = (
     "run_cpsat_python_experiment to a provisional per-backend candidate, and "
     "a full-instance re-check plus final solve that alone supplies the "
     "presented result and any save-tool provenance. A peer of "
-    "solve_constraint_problem and solve_cpsat_python: pick it when the "
+    "minizinc_solution_workflow and cpsat_python_solution_workflow: pick it when the "
     "user's own framing asks for formulations to be compared before "
     "committing to one, not as an automatic escalation from a single hard "
     "run inside either single-backend prompt."

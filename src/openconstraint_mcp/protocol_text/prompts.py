@@ -109,7 +109,7 @@ Otherwise:
    explicit `seeds` list), and search controls (`free_search`, `parallel`,
    and each attempt's `per_attempt_timeout_ms` budget).
    For an especially hard instance, also consider the OR-Tools CP-SAT
-   Python path (`solve_cpsat_python` prompt, `run_cpsat_python`) on the
+   Python path (`cpsat_python_solution_workflow` prompt, `run_cpsat_python`) on the
    same problem — neither backend dominates every problem shape, and the
    structured results and checkers from both let you compare outcomes
    before committing to one. When the user instead wants SEVERAL candidate
@@ -368,7 +368,7 @@ User problem:
      semantics), not as a raw JSON dump.
    - For a HARD instance — `status` is `unknown` or `timeout`, or
      `feasible` when the user needs a proven optimum — also consider the
-     MiniZinc portfolio path (`solve_constraint_problem` prompt,
+     MiniZinc portfolio path (`minizinc_solution_workflow` prompt,
      `submit_portfolio_job`) on the same problem — neither backend
      dominates every problem shape, and the structured results and checkers
      from both let you compare outcomes before committing to one. When the

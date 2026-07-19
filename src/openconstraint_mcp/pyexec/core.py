@@ -28,7 +28,7 @@ meaningless ``best_objective_bound: 0.0`` instead of ``null`` for a
 feasibility problem. The executor cannot detect or correct this server-side
 (it only parses whatever number the script prints) — the guard must live in
 the script itself, which is why the canonical snippet and the
-``solve_cpsat_python`` prompt both apply it.
+``cpsat_python_solution_workflow`` prompt both apply it.
 
 The executor parses the last JSON object it finds in stdout and maps the
 ``status`` field to ``CpsatStatus``; any unrecognized value becomes ``"error"``.
