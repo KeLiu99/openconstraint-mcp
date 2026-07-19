@@ -27,10 +27,9 @@ UNSAT_CORE_STAGES = (
     "Unsat-core analysis complete",
 )
 # The save family re-verifies (check, then solve) and commits inside one
-# blocking call, so stage 2 spans the whole pipeline and stages 3-4 are honest
-# for both outcomes — a committed save and a not_verified refusal.
-# The optional experiment-log write rides inside this same commit step; it
-# gets no stage of its own.
+# blocking call, so stage 2 spans the whole pipeline and stages 3-4 hold for
+# both outcomes — a committed save and a not_verified refusal. The optional
+# experiment-log write rides inside the commit step, with no stage of its own.
 SAVE_STAGES = (
     "Validating save request",
     "MiniZinc verification (check, then solve) and save are running",
@@ -53,17 +52,15 @@ CPSAT_EXPERIMENT_STAGES = (
 
 def cpsat_save_stages(with_checker: bool) -> tuple[str, str, str, str]:
     """Return the CP-SAT save milestone messages, checker-aware at stage 2."""
-    if with_checker:
-        return (
-            "Validating save request and CP-SAT Python source",
-            "Re-running CP-SAT Python and any configured checker "
-            "if earlier gates pass to evaluate the save gate",
-            "Child finished; save decision made",
-            "Save complete",
-        )
+    rerun = (
+        "Re-running CP-SAT Python, then the checker if earlier gates pass, "
+        "to evaluate the save gate"
+        if with_checker
+        else "Re-running CP-SAT Python to evaluate the save gate"
+    )
     return (
         "Validating save request and CP-SAT Python source",
-        "Re-running CP-SAT Python to evaluate the save gate",
+        rerun,
         "Child finished; save decision made",
         "Save complete",
     )
@@ -72,15 +69,9 @@ def cpsat_save_stages(with_checker: bool) -> tuple[str, str, str, str]:
 def solve_stages(with_checker: bool) -> tuple[str, str, str, str]:
     """Return the solve-family milestone messages, checker-aware at stages 2-3."""
     if with_checker:
-        return (
-            "Validating solve request",
-            "MiniZinc solve with solution checker is running",
-            "MiniZinc finished; parsing solve and checker streams",
-            "Solve complete",
-        )
-    return (
-        "Validating solve request",
-        "MiniZinc solve is running",
-        "MiniZinc finished; parsing solve stream",
-        "Solve complete",
-    )
+        running = "MiniZinc solve with solution checker is running"
+        parsing = "MiniZinc finished; parsing solve and checker streams"
+    else:
+        running = "MiniZinc solve is running"
+        parsing = "MiniZinc finished; parsing solve stream"
+    return "Validating solve request", running, parsing, "Solve complete"
