@@ -45,7 +45,7 @@ from .core import (
 )
 from .diagnostics import save_failure_diagnostic
 
-SCRIPT_FILENAME: str = "solution.py"
+SCRIPT_FILENAME: str = "model.py"
 PROBLEM_FILENAME: str = "problem.txt"
 CHECKER_FILENAME: str = "checker.py"
 SOLUTION_FILENAME: str = "solution.json"
@@ -281,7 +281,7 @@ def _write_staged_artifacts(
     if checker_timeout_ms is not None:
         verification["checker_timeout_ms"] = checker_timeout_ms
     if seed is not None:
-        # The saved solution.py is byte-for-byte the client's script: the seed lives
+        # The saved model.py is byte-for-byte the client's script: the seed lives
         # in the manifest, not the code. A manual re-run without the env var hits the
         # script's own fallback and may not reproduce this incumbent.
         verification["replay_seed"] = seed

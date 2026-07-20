@@ -94,9 +94,9 @@ def test_save_verified_cpsat_python_optimal_saves_files(
 
     assert result.saved is True
     assert result.status in VERIFIED_STATUSES
-    assert (target / "solution.py").is_file()
+    assert (target / "model.py").is_file()
     assert (target / MANIFEST_FILENAME).is_file()
-    assert (target / "solution.py").read_text() == _SCRIPT
+    assert (target / "model.py").read_text() == _SCRIPT
 
 
 # (a2) manifest has correct structure
@@ -112,7 +112,7 @@ def test_save_verified_cpsat_python_manifest_structure(
     assert manifest["managed_by"] == "openconstraint-mcp"
     assert isinstance(manifest["artifacts"], list)
     artifact_names = [a["path"] for a in manifest["artifacts"]]
-    assert "solution.py" in artifact_names
+    assert "model.py" in artifact_names
 
 
 # (a2b) manifest names the backend so a client can choose replay tooling without guessing
@@ -307,7 +307,7 @@ def test_save_verified_cpsat_python_overwrite_replaces_managed_dir(
     new_script = "# updated script"
     save_verified_cpsat_python(new_script, target_dir=target, overwrite=True)
 
-    assert (target / "solution.py").read_text() == new_script
+    assert (target / "model.py").read_text() == new_script
     assert (target / MANIFEST_FILENAME).is_file()
 
 
@@ -745,7 +745,7 @@ def test_save_verified_cpsat_python_integration(tmp_path: Path) -> None:
     result = save_verified_cpsat_python(source, target_dir=target)
 
     assert result.saved is True
-    assert (target / "solution.py").is_file()
+    assert (target / "model.py").is_file()
     assert (target / MANIFEST_FILENAME).is_file()
 
 
