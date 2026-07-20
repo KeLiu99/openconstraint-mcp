@@ -1116,7 +1116,7 @@ server runs it in a **local child process**.
      validation code (no network, no file mutations).
 
   `target_dir` must be an explicit absolute local path; the server never
-  opens a file dialog. Fixed filenames: `solution.py` (always); `problem.txt`
+  opens a file dialog. Fixed filenames: `model.py` (always); `problem.txt`
   when `problem` is supplied; `checker.py` and `solution.json` when a checker
   is supplied; `.openconstraint-model.json` (always, the manifest). Overwrite
   is marker-gated (prior-save manifest required,
@@ -1142,7 +1142,7 @@ server runs it in a **local child process**.
   `OPENCONSTRAINT_MCP_CPSAT_SEED` so a cooperating script uses that seed, and the
   manifest records it as `verification.replay_seed`. The save gates are
   **unchanged** — a `timeout` result still fails the reported gate even with
-  its seed replayed. The saved `solution.py` is byte-for-byte the script and
+  its seed replayed. The saved `model.py` is byte-for-byte the script and
   carries only its own seed fallback, so to reproduce a seeded save by hand
   you must set `OPENCONSTRAINT_MCP_CPSAT_SEED` to the recorded seed — or use
   `run_cpsat_python_file`'s `seed`/`config` parameters instead; see
@@ -1285,7 +1285,7 @@ folder, and its manifest is a JSON file a client can read directly.
    `replay_seed` when the save was seeded, `replay_config_sha256` when it was
    configured, and `checker_timeout_ms` when one was explicitly supplied.
 2. Call `run_cpsat_python_file` with `script_path` pointing at the saved
-   `solution.py`, `timeout_ms` from the manifest, `seed` from
+   `model.py`, `timeout_ms` from the manifest, `seed` from
    `verification.replay_seed` when present, and — when a `replay-config.json`
    sibling file exists — its parsed JSON contents as `config`. No manual
    environment variables are needed; the tool builds the
@@ -1300,7 +1300,7 @@ replaying a `checked`-level save this way only re-verifies at the `reported`
 level. For full checked replay — re-running every original gate, including
 the checker with the manifest's `verification.checker_timeout_ms` — call
 `save_verified_cpsat_python` again with the saved source (read from
-`solution.py`), checker (read from `checker.py`), `seed`, `config`, and a
+`model.py`), checker (read from `checker.py`), `seed`, `config`, and a
 scratch `target_dir`. This is not a new tool; it is the same save path
 already documented above, applied to a saved artifact's own inputs.
 
@@ -1804,7 +1804,7 @@ profile registers no prompts; see [CLI](#cli)):
   1. Identify decision variables, domains, constraints, and the objective;
      ask clarifying questions only when required data is missing. Check for
      an existing on-disk model (a MiniZinc `.mzn`/`.dzn` pair or a CP-SAT
-     `solution.py`) and, if found, review it and include it as one candidate
+     `model.py`) and, if found, review it and include it as one candidate
      rather than ignoring it or treating it as the only candidate.
   2. Draft a small set of MiniZinc and/or CP-SAT candidates, plus the
      existing on-disk candidate when present. Every MiniZinc candidate fixes
@@ -2030,7 +2030,7 @@ listed, not that it is exhaustive.
 | `examples/cpsat_python/assignment.py` | assignment/allocation | CP-SAT direct solve | `run_cpsat_python` | `tests/pyexec/test_core_integration.py::test_run_cpsat_python_solves_assignment_example` | none |
 | `examples/cpsat_python/scheduling.py` | scheduling/rostering | CP-SAT direct solve | `run_cpsat_python` | `tests/pyexec/test_core_integration.py::test_run_cpsat_python_solves_scheduling_example` | none |
 | `examples/cpsat_python/graph_coloring.py` + `graph_coloring_checker.py` | assignment/allocation | checker-backed solve, incl. a violation | `run_cpsat_python`, checker protocol | `tests/test_cpsat_python_examples.py::test_graph_coloring_checker_*` | none |
-| `examples/cpsat_python/clinic_roster_checker.py` | scheduling/rostering | checker rejecting a plausible-looking wrong answer | checker protocol | `tests/test_cpsat_python_examples.py::test_clinic_roster_checker_*` | exercised standalone against synthetic payloads; no paired `solution.py` producing a live solve |
+| `examples/cpsat_python/clinic_roster_checker.py` | scheduling/rostering | checker rejecting a plausible-looking wrong answer | checker protocol | `tests/test_cpsat_python_examples.py::test_clinic_roster_checker_*` | exercised standalone against synthetic payloads; no paired `model.py` producing a live solve |
 | `examples/golomb_ruler/cpsat_python` | general CSP | checked save (expectation + checker gates) | `save_verified_cpsat_python` | none (manually re-verified live during this closeout, see `problem.txt`) | the saved objective is not exactly reproducible run to run (documented in `problem.txt`) — an expected CP-SAT property, not a bug; the manifest fixture was also dropped when `examples/` was untracked, so `test_examples_manifest.py` no longer covers this example |
 | `examples/social_golfers/cpsat` + `cpsat_best` | scheduling/rostering | CP-SAT background job, saved artifact, and file-based replay | `submit_cpsat_python_file_job`, `get_cpsat_python_job`, `save_verified_cpsat_python` | `tests/pyexec/test_jobs_integration.py::test_submit_file_with_real_checker_reaches_optimal_and_accepted` | `cpsat/` (reported gate only, no checker) is superseded by `cpsat_best`; kept only for the reported-vs-checked contrast. `cpsat_best/replay-config.json` came from a `config`-only save, not an attached `experiment_result`, so this directory has no `experiment-log.json` — `RESULT.md` is a hand-written substitute for that provenance, not the generated artifact; see the explicit-experiment row below |
 | `examples/social_golfers/cpsat_24` | scheduling/rostering | CP-SAT saved artifact for the 8-3-11 boundary instance | `save_verified_cpsat_python` | none | reported gate only; no checker or live replay integration test; the manifest fixture was also dropped when `examples/` was untracked, so `test_examples_manifest.py` no longer covers this example |

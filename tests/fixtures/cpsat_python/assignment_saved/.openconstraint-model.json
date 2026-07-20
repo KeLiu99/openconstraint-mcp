@@ -17,7 +17,7 @@
   "artifacts": [
     {
       "role": "model",
-      "path": "solution.py",
+      "path": "model.py",
       "sha256": "4f77914fd3ff82bad4986c1943cd78fe7b470e6dda553311e600f37afa91a67e"
     }
   ]

@@ -1,0 +1,12 @@
+{
+  "name": "readme_example",
+  "source": "OR-Tools job shop tutorial (3 jobs, 3 machines): https://developers.google.com/optimization/scheduling/job_shop",
+  "num_jobs": 3,
+  "num_machines": 3,
+  "jobs": [
+    [[0, 3], [1, 2], [2, 2]],
+    [[0, 2], [2, 1], [1, 4]],
+    [[1, 4], [2, 3]]
+  ],
+  "known_optimal_makespan": 11
+}

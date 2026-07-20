@@ -419,7 +419,7 @@ User problem:
    `timeout` result still fails the reported gate regardless of `seed` —
    re-run it to optimal/feasible first. A saved seeded model reproduces by
    hand only when you set `OPENCONSTRAINT_MCP_CPSAT_SEED` to the recorded
-   seed; the saved `solution.py` carries only its own seed fallback.
+   seed; the saved `model.py` carries only its own seed fallback.
    If the script came from `run_cpsat_python_experiment` — the winner, or
    another attempt you chose to save — also pass that attempt's exact
    `config` (`{{}}`/omitted if it ran without one) and the tool's result as
@@ -461,7 +461,7 @@ User problem:
 
 8. To replay a saved artifact later, read its
    `.openconstraint-model.json` manifest and call
-   `run_cpsat_python_file(script_path=<saved solution.py path>,
+   `run_cpsat_python_file(script_path=<saved model.py path>,
    seed=<manifest verification.replay_seed>, config=<parsed
    replay-config.json contents, when that sibling file exists>)` — no
    manual environment variables needed. `run_cpsat_python_file` has no
@@ -517,7 +517,7 @@ save-tool provenance.
    concise questions if required values, bounds, tie-breakers, or the objective
    are missing; do not invent them.
 
-2. Look for an existing `.mzn`/`.dzn` pair or CP-SAT `solution.py`. If found,
+2. Look for an existing `.mzn`/`.dzn` pair or CP-SAT `model.py`. If found,
    review it (revise only with the user's agreement) and include it as ONE
    candidate formulation in the drafted set. Do not ignore it, and do not
    treat it as the only candidate.
@@ -552,7 +552,7 @@ save-tool provenance.
    - CP-SAT: hardcode the smoke values first. It will be REWRITTEN, not reused
      verbatim, at the representative tuning and full-instance stages; the
      provisional candidate is an approach, not a fixed source string. Use an
-     existing `solution.py` as-is for smoke, but the original file is never
+     existing `model.py` as-is for smoke, but the original file is never
      overwritten in place by a stage rewrite; the only write to the original
      file's path remains the explicit final save step. For search strategy,
      `solver.parameters.num_workers` above 1 enables OR-Tools' portfolio,
@@ -573,7 +573,7 @@ save-tool provenance.
    For a candidate that already exists on disk (step 2), use the path-based
    tools instead — `inspect_minizinc_files`/`check_minizinc_files` with
    `model_path`/`data_path`, and `run_cpsat_python_file(script_path=<the
-   existing solution.py>, timeout_ms=<short budget>)` — they run from the
+   existing model.py>, timeout_ms=<short budget>)` — they run from the
    file's own directory, so relative includes and sibling data resolve.
    This step never ranks or selects a winner among the candidates that pass.
 

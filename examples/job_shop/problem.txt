@@ -1,0 +1,16 @@
+Job shop scheduling. Each job is a sequence of tasks that must run in a fixed
+order; each task must run on a specific machine for a specific duration.
+A machine processes one task at a time, and a started task runs to
+completion. The goal is to minimize the makespan: the time the last task
+finishes across all jobs.
+
+data_ft06.json is the classic Muth & Thompson (1963) 6-job x 6-machine
+benchmark ("ft06"), widely used to validate job shop solvers. Its jobs are
+each a list of [machine, duration] pairs in the order the job must visit
+them. The known optimal makespan is 55.
+
+data_ft10.json is the larger 10-job x 10-machine "ft10" instance from the
+same source (100 tasks vs. ft06's 36; known optimal makespan 930) for
+scale testing. Run it with `python model.py data_ft10.json`. Both files come
+from the OR-Library benchmark set (J.E. Beasley), jobshop1.txt:
+http://people.brunel.ac.uk/~mastjjb/jeb/orlib/files/jobshop1.txt
