@@ -128,7 +128,12 @@ def check_payload(payload: dict[str, Any]) -> dict[str, Any]:
                     errors.append(f"machine {machine} overlaps job {job_a} and job {job_b}")
 
         objective = payload.get("objective")
-        if isinstance(objective, int | float) and int(objective) != max_end:
+        if not isinstance(objective, int | float) or isinstance(objective, bool):
+            errors.append(
+                f"objective must be a number equal to the schedule makespan {max_end}, "
+                f"got {objective!r}"
+            )
+        elif objective != max_end:
             errors.append(f"objective {objective} does not match schedule makespan {max_end}")
 
     status = "accepted" if not errors else "rejected"
