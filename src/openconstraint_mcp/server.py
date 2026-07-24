@@ -120,6 +120,7 @@ from .schemas.minizinc import (
     UnsatCoreResult,
 )
 from .schemas.portfolio import PortfolioJobStatus, PortfolioSolveResult
+from .schemas.problem_text import ProblemText
 from .schemas.runtime import RuntimeStatus
 from .schemas.tabular import TabularCell, TabularData, TabularWriteResult
 from .shared.childproc import ChildProcessTracker
@@ -693,7 +694,7 @@ def create_mcp_server(toolset: str = "full") -> FastMCP:
         target_dir: str,
         data: str | None = None,
         checker: str | None = None,
-        problem: str | None = None,
+        problem: ProblemText = None,
         solver: str = DEFAULT_SOLVER,
         timeout_ms: int = DEFAULT_SOLVE_TIMEOUT_MS,
         free_search: bool = False,
@@ -941,7 +942,7 @@ def create_mcp_server(toolset: str = "full") -> FastMCP:
     def submit_cpsat_python_job(
         source: str,
         timeout_ms: int = DEFAULT_PYEXEC_TIMEOUT_MS,
-        problem: str | None = None,
+        problem: ProblemText = None,
         checker: str | None = None,
         checker_timeout_ms: int | None = None,
     ) -> CpsatPythonJobStatus:
@@ -962,7 +963,7 @@ def create_mcp_server(toolset: str = "full") -> FastMCP:
     def submit_cpsat_python_file_job(
         script_path: str,
         timeout_ms: int = DEFAULT_PYEXEC_TIMEOUT_MS,
-        problem: str | None = None,
+        problem: ProblemText = None,
         checker: str | None = None,
         checker_timeout_ms: int | None = None,
     ) -> CpsatPythonJobStatus:
@@ -1046,7 +1047,7 @@ def create_mcp_server(toolset: str = "full") -> FastMCP:
         objective_sense: CpsatObjectiveSense | None = None,
         default_timeout_ms: int = DEFAULT_PYEXEC_TIMEOUT_MS,
         max_parallel_attempts: int = 1,
-        problem: str | None = None,
+        problem: ProblemText = None,
         checker: str | None = None,
         checker_timeout_ms: int | None = None,
         include_winner_stdout: bool = True,
@@ -1075,7 +1076,7 @@ def create_mcp_server(toolset: str = "full") -> FastMCP:
     async def save_verified_cpsat_python_tool(
         source: str,
         target_dir: str,
-        problem: str | None = None,
+        problem: ProblemText = None,
         expectation: CpsatExpectation | None = None,
         checker: str | None = None,
         checker_timeout_ms: int | None = None,

@@ -682,6 +682,34 @@ async def test_cpsat_python_solution_workflow_prompt_checker_gate_safety_boundar
 
 
 @pytest.mark.asyncio
+async def test_cpsat_python_solution_workflow_prompt_combines_request_and_instance() -> None:
+    """`problem` is both the checker payload's instance source and the value persisted
+    as `problem.txt`, so a data-driven checker must not cost the user's original
+    request — one flat JSON object carries both."""
+    text = await _get_prompt_text("cpsat_python_solution_workflow", {"problem": SAMPLE_PROBLEM})
+    lower = " ".join(text.split()).lower()
+
+    assert (
+        "pass as `problem` a single json object holding the machine-readable "
+        "instance and the user's original request verbatim under its own key" in lower
+    )
+    assert "never drop the original request to make room for the instance" in lower
+
+
+@pytest.mark.asyncio
+async def test_cpsat_python_solution_workflow_prompt_accepts_object_or_text_problem() -> None:
+    """The `problem` tool parameter serializes a JSON object for the caller, so the
+    prompt must not tell the client that an object fails validation — that stale
+    warning would push it into hand-serializing, the spelling that produced
+    double-encoded text the checker cannot parse with one `json.loads`."""
+    text = await _get_prompt_text("cpsat_python_solution_workflow", {"problem": SAMPLE_PROBLEM})
+    lower = " ".join(text.split()).lower()
+
+    assert "send it either as that object or as its serialized text" in lower
+    assert "fails tool validation" not in lower
+
+
+@pytest.mark.asyncio
 async def test_cpsat_python_solution_workflow_prompt_discourages_replay_for_ordinary() -> None:
     text = await _get_prompt_text("cpsat_python_solution_workflow", {"problem": SAMPLE_PROBLEM})
     normalized = " ".join(text.split()).lower()
@@ -1089,7 +1117,24 @@ async def test_auto_tune_constraint_problem_prompt_requires_two_checkers_cross_b
     assert "draft two backend-specific checkers that enforce the same problem constraints" in lower
     assert "not interchangeable source" in lower
     assert "inline minizinc solution-checker source" in lower
-    assert "reads the solution as json from `sys.argv[1]`" in lower
+    assert "reads a payload json path from `sys.argv[1]`" in lower
+
+
+@pytest.mark.asyncio
+async def test_auto_tune_constraint_problem_prompt_rebuilds_problem_payload_per_tier() -> None:
+    """Auto-tune solves a DIFFERENT instance per tier, so a data-driven CP-SAT checker's
+    combined request+instance payload has to be rebuilt for each tier. Handing a
+    tuning-stage run the full instance would make the checker reject a correct solution."""
+    text = await _get_prompt_text("auto_tune_constraint_problem", {"problem": SAMPLE_PROBLEM})
+    lower = " ".join(text.split()).lower()
+
+    assert 'a cp-sat checker that reads its instance from `payload["problem"]`' in lower
+    assert "pass as `problem` one flat json object" in lower
+    assert (
+        "carrying both the user's original request verbatim and "
+        "the machine-readable instance that run solves" in lower
+    )
+    assert "each tier solves a different instance, so rebuild that value per tier" in lower
 
 
 @pytest.mark.asyncio
@@ -1140,10 +1185,14 @@ async def test_auto_tune_constraint_problem_prompt_save_replays_checker_not_just
         "to the save call itself" in lower
     )
     assert "dropping `checker` from the save call silently saves at a weaker" in lower
-    # Both backend save bullets must carry the finalist's checker and problem text
-    # forward, not only their provenance object.
+    # Both backend save bullets must carry the finalist's checker and problem forward,
+    # not only their provenance object. The backends differ in what `problem` may hold:
+    # a MiniZinc checker never reads it (it reads the `.dzn` interface), so that bullet
+    # keeps the original text, while CP-SAT's must replay the finalist run's value —
+    # which is the combined request+instance JSON when the checker parses it.
     assert lower.count("the same `checker` (when one was drafted for the finalist run)") == 2
-    assert lower.count("the original problem text as `problem`") == 2
+    assert "the original problem text as `problem`" in lower
+    assert "as `problem` the same value the full-instance finalist run used" in lower
 
 
 @pytest.mark.asyncio

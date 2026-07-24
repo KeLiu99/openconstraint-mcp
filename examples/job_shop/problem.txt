@@ -14,3 +14,10 @@ same source (100 tasks vs. ft06's 36; known optimal makespan 930) for
 scale testing. Run it with `python model.py data_ft10.json`. Both files come
 from the OR-Library benchmark set (J.E. Beasley), jobshop1.txt:
 http://people.brunel.ac.uk/~mastjjb/jeb/orlib/files/jobshop1.txt
+
+checker.py reads the instance from the checker payload's `problem` field, so
+it validates whichever instance was solved (ft06, ft10, or another), given
+that the instance JSON is passed as `problem`. It reads only `num_machines`
+and `jobs` and ignores every other key, so that same JSON can also carry the
+user's original request verbatim: `problem` is the value persisted as
+`problem.txt`, and keeping both in one object preserves that provenance.

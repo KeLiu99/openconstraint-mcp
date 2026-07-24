@@ -3191,6 +3191,44 @@ async def test_submit_cpsat_python_job_accepts_checker_inputs_and_echoes_timeout
 
 
 @pytest.mark.asyncio
+async def test_submit_cpsat_python_job_serializes_json_object_problem(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A `problem` sent as a JSON object reaches the checker as serialized text.
+
+    An MCP call is one JSON document, so a caller with a machine-readable
+    instance may spell `problem` as an object rather than as a string. The tool
+    boundary serializes it instead of rejecting the call.
+    """
+    seen: dict[str, Any] = {}
+    checked = threading.Event()
+
+    def _capture_checker(checker: str, result: Any, **kwargs: Any) -> Any:
+        seen["problem"] = kwargs["problem"]
+        checked.set()
+        return _fake_checker_report()
+
+    monkeypatch.setattr(
+        "openconstraint_mcp.pyexec.jobs.run_cpsat_python",
+        lambda source, *, on_start, **kw: _fake_cpsat_result(),
+    )
+    monkeypatch.setattr("openconstraint_mcp.pyexec.jobs.run_checker", _capture_checker)
+    mcp = create_mcp_server()
+    instance = {"request": "schedule ft06", "num_machines": 6, "jobs": [[[2, 1], [0, 3]]]}
+    await mcp.call_tool(
+        "submit_cpsat_python_job",
+        {
+            "source": "x=1",
+            "problem": instance,
+            "checker": 'print(\'{"status":"accepted","errors":[]}\')',
+        },
+    )
+
+    assert checked.wait(3.0), "checker never ran"
+    assert json.loads(seen["problem"]) == instance
+
+
+@pytest.mark.asyncio
 async def test_submit_cpsat_python_job_rejects_bad_checker_args_before_admission(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

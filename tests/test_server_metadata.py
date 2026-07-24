@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+from pydantic import ValidationError
 
 from openconstraint_mcp.jobs.registry import JobRegistry
 from openconstraint_mcp.pyexec.jobs import CpsatJobRegistry
@@ -271,6 +272,49 @@ async def test_full_profile_retains_the_current_thirty_tool_set() -> None:
     tools = await _tools_by_name("full")
     assert set(tools) == FULL_TOOL_NAMES
     assert len(FULL_TOOL_NAMES) == 30
+
+
+def _tools_declaring_problem() -> list[Any]:
+    """Full-profile tools exposing a `problem` parameter.
+
+    Reads the tool manager rather than the public `list_tools()`: protocol tools
+    carry the published schema but not the pydantic arg model, and one of these
+    guards has to validate arguments against it.
+    """
+    mcp = create_mcp_server("full")
+    return [
+        tool
+        for tool in mcp._tool_manager.list_tools()
+        if "problem" in tool.parameters.get("properties", {})
+    ]
+
+
+def test_every_problem_parameter_publishes_string_or_null() -> None:
+    # Text is the canonical form callers should send; accepting the object
+    # spelling is runtime leniency, not an advertised second shape.
+    tools = _tools_declaring_problem()
+    assert tools, "no tool declares `problem` — this guard would pass vacuously"
+    for tool in tools:
+        assert tool.parameters["properties"]["problem"]["anyOf"] == [
+            {"type": "string"},
+            {"type": "null"},
+        ], tool.name
+
+
+def test_every_problem_parameter_accepts_a_json_object() -> None:
+    # EVERY tool taking `problem` accepts the object spelling, so this asserts the
+    # coercion and not the schema: a tool added with a plain `str | None` publishes
+    # a byte-identical schema and fails only at call time. Validating arguments
+    # must therefore raise nothing AT `problem` — the other parameters are absent
+    # here and are expected to error.
+    tools = _tools_declaring_problem()
+    assert tools, "no tool declares `problem` — this guard would pass vacuously"
+    for tool in tools:
+        try:
+            tool.fn_metadata.arg_model.model_validate({"problem": {"num_machines": 6}})
+        except ValidationError as exc:
+            rejected = [error for error in exc.errors() if error["loc"] == ("problem",)]
+            assert not rejected, f"{tool.name} rejects an object `problem`: {rejected}"
 
 
 @pytest.mark.asyncio

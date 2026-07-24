@@ -409,8 +409,9 @@ User problem:
      first.
 
 7. Persist only if the user asks: call
-   `save_verified_cpsat_python(source=<final script>, problem=<original
-   problem text>, target_dir=<explicit absolute save directory>)`. You
+   `save_verified_cpsat_python(source=<final script>, problem=<the original
+   problem text, or the combined JSON object of 7c when a data-driven checker must
+   parse it>, target_dir=<explicit absolute save directory>)`. You
    ask the user for that path; the server opens no file dialog, and it
    re-runs the script to evaluate the save gate before writing anything.
    Replacing a previously saved directory needs `overwrite=true`.
@@ -454,6 +455,26 @@ User problem:
         mutations, no subprocess spawning — unless the user explicitly
         requested it. The server executes this code locally and does not
         sandbox it.
+      A data-driven checker reads the problem instance from
+      `payload["problem"]` — the only caller-controlled field the sealed
+      checker process sees, and the same single value that is persisted as
+      `problem.txt`. It therefore has to carry BOTH, so when you write one,
+      pass as `problem` a single JSON object holding the machine-readable
+      instance AND the user's original request verbatim under its own key:
+      `{{"request": "<the user's own words>", "num_machines": 6, "jobs":
+      [...]}}`. Send it either as that object or as its serialized text —
+      the server serializes an object for you, and the checker receives text
+      to `json.loads` either way.
+      Keep those keys FLAT and alongside each other, the way this
+      repo's `examples/job_shop/data_*.json` sit human-readable
+      `name`/`source` next to the instance — a checker reads only the keys
+      it needs and ignores the rest, so carrying provenance costs it
+      nothing. Never drop the original request to make room for the
+      instance (`name`/`source` describe the benchmark, not what the user
+      asked for), and never pass free-form prose alone as `problem` when the
+      checker must parse it. Prefer this to hardcoding one instance's data in
+      the checker script, so the checker validates whatever instance was
+      actually solved and stays reusable across instances.
    Write a checker when the user asks for independent validation, when the
    problem has structural constraints the reported `status` alone cannot
    confirm, or when the result will be reused and higher confidence is
@@ -592,7 +613,17 @@ save-tool provenance.
    cross-backend comparison, draft TWO backend-specific checkers that enforce
    the same problem constraints. They are NOT interchangeable source:
    MiniZinc uses inline MiniZinc solution-checker source; CP-SAT uses a Python
-   script that reads the solution as JSON from `sys.argv[1]`. Compare each
+   script that reads a payload JSON path from `sys.argv[1]` (keys `problem`,
+   `solution`, `objective`, `solver_status`). A CP-SAT checker that reads its
+   instance from `payload["problem"]` instead of hardcoding it constrains
+   every call that attaches it: pass as `problem` ONE flat JSON object
+   carrying BOTH the user's original request verbatim AND the
+   machine-readable instance THAT run solves — the checker reads the keys it
+   needs and ignores the rest, so the request rides along as provenance. Each
+   tier solves a DIFFERENT instance, so rebuild that value per tier; handing
+   a tuning-stage run the full instance makes the checker reject a
+   correct solution. A MiniZinc checker never sees `problem` (it reads the
+   `.dzn` interface), so `problem` stays the original text there. Compare each
    backend's final, checker-validated result across backends only when both
    represent the SAME objective and objective sense. When the objectives or
    senses don't match, ask the user which backend/result to keep instead of
@@ -621,7 +652,9 @@ save-tool provenance.
    candidates. Call shape:
    `run_cpsat_python_experiment(attempts=[<attempt objects>],
    objective_sense=<"minimize" | "maximize"; omit for pure feasibility>,
-   checker=<the CP-SAT checker>, problem=<original problem text>)`, where
+   checker=<the CP-SAT checker>, problem=<the original problem text, or step
+   7's combined JSON object for the instance THIS run solves when the checker parses
+   it>)`, where
    each attempt is `{{name, source, seed, config, timeout_ms}}` with a
    complete, independent `source`. Attach the checker when comparing
    candidates. The tool accepts only attempts with a present solution
@@ -642,7 +675,8 @@ save-tool provenance.
       hardcoded, then use `submit_cpsat_python_job` with the checker and poll
       `get_cpsat_python_job` until terminal. Call shape:
       `submit_cpsat_python_job(source=<full-instance script>, checker=<the
-      CP-SAT checker>, problem=<original problem text>,
+      CP-SAT checker>, problem=<step 9's `problem` value, rebuilt for
+      the FULL instance>,
       timeout_ms=<budget>)`. `run_cpsat_python` has no `checker`
       parameter at all. Keep this exact full-instance `source` for the final
       job and any save.
@@ -739,8 +773,11 @@ save-tool provenance.
       `submit_portfolio_job`. A final run made through `submit_solve_job` has no
       `portfolio_result` to pass.
     - CP-SAT: pass the exact source/seed/config, the SAME `checker` (when one
-      was drafted for the finalist run), and the original problem text as
-      `problem`; plus `experiment_result` ONLY when the final run used the
+      was drafted for the finalist run), and as `problem` the SAME value the
+      full-instance finalist run used — the original problem text, or step
+      7's combined JSON object for the full instance when the checker parses it, so
+      the saved `problem.txt` keeps the request alongside the instance;
+      plus `experiment_result` ONLY when the final run used the
       synchronous `run_cpsat_python_experiment`. A final run made through
       `submit_cpsat_python_job` has no `experiment_result` to pass.
 
