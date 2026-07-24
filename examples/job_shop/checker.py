@@ -1,9 +1,12 @@
 """Checker script for model.py.
 
-Validates that the emitted job shop schedule is feasible for the ft06
-benchmark (data_ft06.json): every task appears exactly once with the right
-machine and duration, tasks within a job run in order, no machine runs two
-tasks at once, and the reported objective matches the schedule's makespan.
+Validates that the emitted job shop schedule is feasible for the job shop
+instance supplied via `payload["problem"]`: every task appears exactly once
+with the right machine and duration, tasks within a job run in order, no
+machine runs two tasks at once, and the reported objective matches the
+schedule's makespan. Because the instance rides in via the payload, this
+checker validates ANY job shop instance (ft06, ft10, or another), not just
+one hardcoded benchmark.
 
 Checker protocol:
 - Receives the payload JSON path as sys.argv[1].
@@ -22,18 +25,88 @@ import json
 import sys
 from typing import Any
 
-# Mirrors data_ft06.json. Duplicated (not loaded from disk) because the
-# checker runs in an isolated temp directory with only itself and the
-# payload present.
-JOBS: tuple[tuple[tuple[int, int], ...], ...] = (
-    ((2, 1), (0, 3), (1, 6), (3, 7), (5, 3), (4, 6)),
-    ((1, 8), (2, 5), (4, 10), (5, 10), (0, 10), (3, 4)),
-    ((2, 5), (3, 4), (5, 8), (0, 9), (1, 1), (4, 7)),
-    ((1, 5), (0, 5), (2, 5), (3, 3), (4, 8), (5, 9)),
-    ((2, 9), (1, 3), (4, 5), (5, 4), (0, 3), (3, 1)),
-    ((1, 3), (3, 3), (5, 9), (0, 10), (4, 4), (2, 1)),
-)
-NUM_MACHINES = 6
+Jobs = list[list[tuple[int, int]]]
+
+
+def _is_int(value: object) -> bool:
+    """True only for a genuine int. `bool` is an `int` subclass in Python, so a JSON
+    `true`/`false` left unguarded would sail through every downstream check as 1/0:
+    it indexes, compares, and adds identically. This guard is the only place such a
+    value can be caught."""
+    return isinstance(value, int) and not isinstance(value, bool)
+
+
+def _parse_instance(problem: object) -> tuple[Jobs | None, int | None, str | None]:
+    """Parse the job shop instance out of payload["problem"].
+
+    Returns (jobs, num_machines, error) where error is None on success.
+    """
+    if not isinstance(problem, str):
+        return None, None, "payload.problem is missing or not a string"
+
+    try:
+        instance = json.loads(problem)
+    except json.JSONDecodeError as exc:
+        return None, None, f"payload.problem is not valid JSON: {exc}"
+
+    if not isinstance(instance, dict):
+        return None, None, "problem instance is not a JSON object"
+
+    num_machines = instance.get("num_machines")
+    if not _is_int(num_machines):
+        return None, None, "problem instance num_machines missing or not an int"
+    if num_machines < 1:
+        return None, None, f"problem instance num_machines {num_machines} is not positive"
+
+    raw_jobs = instance.get("jobs")
+    if not isinstance(raw_jobs, list):
+        return None, None, "problem instance jobs missing or not a list"
+    # An instance with no tasks would accept an empty schedule with objective 0 as
+    # trivially feasible, turning a serialization slip (jobs dropped or truncated on
+    # the way into `problem`) into a passing verdict. Reject it as unusable ground
+    # truth instead; model.py cannot solve these either — an empty `jobs` makes its
+    # makespan max-equality unsatisfiable, and an empty job has no final task to
+    # select.
+    if not raw_jobs:
+        return None, None, "problem instance jobs is empty"
+
+    jobs: Jobs = []
+    for job_id, raw_job in enumerate(raw_jobs):
+        if not isinstance(raw_job, list):
+            return None, None, f"problem instance jobs[{job_id}] is not a list"
+        if not raw_job:
+            return None, None, f"problem instance jobs[{job_id}] has no tasks"
+        tasks: list[tuple[int, int]] = []
+        for task_id, raw_task in enumerate(raw_job):
+            if (
+                not isinstance(raw_task, list)
+                or len(raw_task) != 2
+                or not all(_is_int(v) for v in raw_task)
+            ):
+                return (
+                    None,
+                    None,
+                    f"problem instance jobs[{job_id}][{task_id}] is not a [machine, "
+                    "duration] pair of ints",
+                )
+            machine, duration = raw_task[0], raw_task[1]
+            if not 0 <= machine < num_machines:
+                return (
+                    None,
+                    None,
+                    f"problem instance jobs[{job_id}][{task_id}] machine {machine} "
+                    f"is outside range(0, {num_machines})",
+                )
+            if duration < 0:
+                return (
+                    None,
+                    None,
+                    f"problem instance jobs[{job_id}][{task_id}] duration {duration} is negative",
+                )
+            tasks.append((machine, duration))
+        jobs.append(tasks)
+
+    return jobs, num_machines, None
 
 
 def _load_schedule(solution: object) -> tuple[list[dict[str, Any]] | None, list[str]]:
@@ -49,12 +122,17 @@ def _load_schedule(solution: object) -> tuple[list[dict[str, Any]] | None, list[
             errors.append(f"schedule[{i}] is not a dict")
             continue
         for key in ("job", "task", "machine", "start", "duration", "end"):
-            if not isinstance(entry.get(key), int):
+            if not _is_int(entry.get(key)):
                 errors.append(f"schedule[{i}].{key} missing or not an int")
     return (None, errors) if errors else (schedule, errors)
 
 
 def check_payload(payload: dict[str, Any]) -> dict[str, Any]:
+    jobs, num_machines, instance_error = _parse_instance(payload.get("problem"))
+    if instance_error is not None:
+        return {"status": "error", "errors": [instance_error], "details": {}}
+    assert jobs is not None and num_machines is not None
+
     errors: list[str] = []
     solver_status = payload.get("solver_status")
     if solver_status not in {"optimal", "feasible"}:
@@ -65,7 +143,7 @@ def check_payload(payload: dict[str, Any]) -> dict[str, Any]:
 
     if schedule is not None:
         seen: set[tuple[int, int]] = set()
-        by_machine: dict[int, list[tuple[int, int, int]]] = {m: [] for m in range(NUM_MACHINES)}
+        by_machine: dict[int, list[tuple[int, int, int]]] = {}
         max_end = 0
 
         for entry in schedule:
@@ -76,11 +154,11 @@ def check_payload(payload: dict[str, Any]) -> dict[str, Any]:
                 continue
             seen.add(key)
 
-            if not (0 <= job_id < len(JOBS)) or not (0 <= task_id < len(JOBS[job_id])):
+            if not (0 <= job_id < len(jobs)) or not (0 <= task_id < len(jobs[job_id])):
                 errors.append(f"job {job_id} task {task_id} is out of range")
                 continue
 
-            expected_machine, expected_duration = JOBS[job_id][task_id]
+            expected_machine, expected_duration = jobs[job_id][task_id]
             start, duration, end, machine = (
                 entry["start"],
                 entry["duration"],
@@ -100,16 +178,16 @@ def check_payload(payload: dict[str, Any]) -> dict[str, Any]:
             if start < 0 or end != start + duration:
                 errors.append(f"job {job_id} task {task_id} has inconsistent start/duration/end")
 
-            by_machine[machine].append((start, end, job_id))
+            by_machine.setdefault(machine, []).append((start, end, job_id))
             max_end = max(max_end, end)
 
         missing = {
-            (job_id, task_id) for job_id, job in enumerate(JOBS) for task_id in range(len(job))
+            (job_id, task_id) for job_id, job in enumerate(jobs) for task_id in range(len(job))
         } - seen
         if missing:
             errors.append(f"missing tasks: {sorted(missing)}")
 
-        for job_id in range(len(JOBS)):
+        for job_id in range(len(jobs)):
             job_entries = sorted(
                 (e for e in schedule if e["job"] == job_id), key=lambda e: e["task"]
             )
@@ -140,7 +218,7 @@ def check_payload(payload: dict[str, Any]) -> dict[str, Any]:
     return {
         "status": status,
         "errors": errors,
-        "details": {"num_jobs": len(JOBS), "num_machines": NUM_MACHINES},
+        "details": {"num_jobs": len(jobs), "num_machines": num_machines},
     }
 
 

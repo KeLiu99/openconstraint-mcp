@@ -1115,6 +1115,18 @@ server runs it in a **local child process**.
      to `timeout_ms`). **The checker is not sandboxed** — generate only
      validation code (no network, no file mutations).
 
+  `problem` is one text value — handed to the checker as `payload["problem"]`
+  and persisted verbatim as `problem.txt`. A **data-driven checker** parses a
+  machine-readable instance out of it, so callers often have a JSON object to
+  send rather than prose. Every tool that takes `problem` accepts either: a
+  JSON object or array is serialized to its canonical text form before it goes
+  any further, and a string is passed through untouched (a string that already
+  contains JSON is never unwrapped). Non-finite numbers (`NaN`, `±inf`) are
+  rejected, because the checker payload is written as strict JSON. The
+  published schema stays `string | null` — text is the canonical form; the
+  object spelling is accepted so a correct instance is not rejected over how
+  the call happened to be written.
+
   `target_dir` must be an explicit absolute local path; the server never
   opens a file dialog. Fixed filenames: `model.py` (always); `problem.txt`
   when `problem` is supplied; `checker.py` and `solution.json` when a checker
@@ -1300,9 +1312,24 @@ replaying a `checked`-level save this way only re-verifies at the `reported`
 level. For full checked replay — re-running every original gate, including
 the checker with the manifest's `verification.checker_timeout_ms` — call
 `save_verified_cpsat_python` again with the saved source (read from
-`model.py`), checker (read from `checker.py`), `seed`, `config`, and a
-scratch `target_dir`. This is not a new tool; it is the same save path
-already documented above, applied to a saved artifact's own inputs.
+`model.py`), checker (read from `checker.py`), `seed`, `config`, a scratch
+`target_dir`, and — whenever the saved directory or manifest has them — the
+original `problem` (read verbatim from `problem.txt`), `expectation`
+(rebuilt from `verification.expectation.objective_sense` /
+`objective_threshold`), and `timeout_ms` (from `verification.timeout_ms`).
+Omitting any of these replays something different from the original:
+`problem` is passed straight through to the checker payload, so a
+**data-driven checker** — one that parses its instance out of
+`payload["problem"]` rather than hardcoding it, the shape the
+`cpsat_python_solution_workflow` prompt asks for — validates against
+different input, or returns `error` outright, when it is dropped or
+reworded; `expectation` is a gate that runs and can fail *before* the
+checker ever does, so leaving it out silently skips the objective-threshold
+check; and `timeout_ms` is the re-run budget (and the checker's timeout too,
+unless `checker_timeout_ms` was set explicitly) — a different value is a
+looser or stricter re-run, not a weaker one. This is not a
+new tool; it is the same save path already documented above, applied to a
+saved artifact's own inputs.
 
 ### Background CP-SAT jobs
 
