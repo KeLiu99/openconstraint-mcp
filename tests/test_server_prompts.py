@@ -865,6 +865,18 @@ async def test_auto_tune_constraint_problem_prompt_minizinc_check_precedes_portf
 
 
 @pytest.mark.asyncio
+async def test_auto_tune_constraint_problem_prompt_smoke_offers_args_for_on_disk_script() -> None:
+    text = await _get_prompt_text("auto_tune_constraint_problem", {"problem": SAMPLE_PROBLEM})
+    normalized = " ".join(text.split())
+
+    # The on-disk smoke call shape must offer `args`, or the prompt steers the
+    # client into whatever default instance the script hardcodes.
+    file_call_idx = normalized.index("run_cpsat_python_file(script_path=")
+    args_idx = normalized.index("add `args=[<data file>]`")
+    assert file_call_idx < args_idx
+
+
+@pytest.mark.asyncio
 async def test_auto_tune_constraint_problem_prompt_submit_tools_name_matching_poll_tools() -> None:
     text = await _get_prompt_text("auto_tune_constraint_problem", {"problem": SAMPLE_PROBLEM})
     normalized = " ".join(text.split())

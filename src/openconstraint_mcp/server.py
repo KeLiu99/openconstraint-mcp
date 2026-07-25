@@ -494,6 +494,7 @@ def _run_cpsat_python_file_with_replay(
     script_path: Path,
     *,
     timeout_ms: int,
+    args: list[str] | None,
     seed: int | None,
     config: dict[str, Any] | None,
     tracker: ChildProcessTracker,
@@ -508,7 +509,9 @@ def _run_cpsat_python_file_with_replay(
     torn down on every exit path.
     """
     with replay_env_scope(seed=seed, config=config) as env:
-        return run_cpsat_python_file(script_path, timeout_ms=timeout_ms, tracker=tracker, env=env)
+        return run_cpsat_python_file(
+            script_path, timeout_ms=timeout_ms, args=args, tracker=tracker, env=env
+        )
 
 
 def create_mcp_server(toolset: str = "full") -> FastMCP:
@@ -963,6 +966,7 @@ def create_mcp_server(toolset: str = "full") -> FastMCP:
     def submit_cpsat_python_file_job(
         script_path: str,
         timeout_ms: int = DEFAULT_PYEXEC_TIMEOUT_MS,
+        args: list[str] | None = None,
         problem: ProblemText = None,
         checker: str | None = None,
         checker_timeout_ms: int | None = None,
@@ -970,6 +974,7 @@ def create_mcp_server(toolset: str = "full") -> FastMCP:
         job_id = cpsat_registry.submit_file(
             Path(script_path),
             timeout_ms=timeout_ms,
+            args=args,
             problem=problem,
             checker=checker,
             checker_timeout_ms=checker_timeout_ms,
@@ -1018,6 +1023,7 @@ def create_mcp_server(toolset: str = "full") -> FastMCP:
     async def run_cpsat_python_file_tool(
         script_path: str,
         timeout_ms: int = DEFAULT_PYEXEC_TIMEOUT_MS,
+        args: list[str] | None = None,
         seed: StrictInt | None = None,
         config: dict[str, JsonValue] | None = None,
         ctx: Context | None = None,
@@ -1032,6 +1038,7 @@ def create_mcp_server(toolset: str = "full") -> FastMCP:
                 timeout_ms=timeout_ms,
                 seed=validated_seed,
                 config=normalized_config,
+                args=args,
                 tracker=child_tracker,
             )
         )

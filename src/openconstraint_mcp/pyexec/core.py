@@ -391,12 +391,14 @@ def _validate_script_path(script_path: Path) -> Path:
     return script_path
 
 
-def _python_script_argv(script: Path) -> list[str]:
+def _python_script_argv(script: Path, args: list[str] | None = None) -> list[str]:
     # -u: unbuffered child stdout/stderr so prints reach the capture files as
     # they happen (not on a full buffer). This is what lets a flushed
     # intermediate result block survive a timeout kill (see the partial
     # recovery on the timeout path above).
-    return [sys.executable, "-u", str(script)]
+    # Anything in `args` trails the script path, so the child sees it as
+    # `sys.argv[1:]`.
+    return [sys.executable, "-u", str(script), *(args or ())]
 
 
 def run_cpsat_python(
@@ -454,6 +456,7 @@ def run_cpsat_python_file(
     script_path: Path,
     *,
     timeout_ms: int = DEFAULT_PYEXEC_TIMEOUT_MS,
+    args: list[str] | None = None,
     tracker: ChildProcessTracker | None = None,
     on_start: Callable[[Popen[str]], None] | None = None,
     env: dict[str, str | None] | None = None,
@@ -472,10 +475,15 @@ def run_cpsat_python_file(
     ``ValueError`` before any child is spawned. Same execution contract, output
     cap, timeout, tree-kill, and INTERNAL ``env`` overlay (see ``run_cpsat_python``)
     as ``run_cpsat_python``.
+
+    ``args`` are appended after the script path, so the child reads them as
+    ``sys.argv[1:]`` — for a script that takes its data file (or a flag) on the
+    command line. Omitting it reproduces the plain ``python -u script.py``
+    invocation exactly.
     """
     resolved = _validate_script_path(script_path)
     child = execute_child(
-        _python_script_argv(resolved),
+        _python_script_argv(resolved, args),
         cwd=resolved.parent,
         timeout_ms=timeout_ms,
         tracker=tracker,

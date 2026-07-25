@@ -90,3 +90,24 @@ def test_run_cpsat_python_file_resolves_relative_sibling_file(tmp_path: Path) ->
 
     assert result.status in VERIFIED_STATUSES
     assert result.solution == {"x": 7}
+
+
+@pytest.mark.integration
+def test_run_cpsat_python_file_forwards_args_to_child_argv(tmp_path: Path) -> None:
+    # The mocked unit test only proves the command list was built; this proves
+    # the values actually land in a real interpreter's sys.argv[1:].
+    script = tmp_path / "echo_argv.py"
+    script.write_text(
+        "import json, sys\n"
+        "print(json.dumps({\n"
+        "    'status': 'optimal',\n"
+        "    'objective': None,\n"
+        "    'solution': {'argv': sys.argv[1:]},\n"
+        "}))\n",
+        encoding="utf-8",
+    )
+
+    result = run_cpsat_python_file(script, args=["--flag", "value"])
+
+    assert result.solution is not None
+    assert result.solution["argv"] == ["--flag", "value"]

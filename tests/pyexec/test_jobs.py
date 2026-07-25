@@ -211,6 +211,62 @@ def test_submit_file_clears_cpsat_protocol_env_vars(
         registry.shutdown()
 
 
+def test_submit_file_forwards_args_to_the_executor(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    script = tmp_path / "sol.py"
+    script.write_text("print('x')", encoding="utf-8")
+    seen: dict[str, object] = {}
+
+    def _fake(path: Path, *, on_start: Any, **kw: object) -> CpsatPythonResult:
+        seen["args"] = kw.get("args")
+        return _cpsat_result()
+
+    _patch_run_file(monkeypatch, _fake)
+    registry = CpsatJobRegistry()
+    try:
+        job_id = registry.submit_file(script, args=["data_ft10.json"])
+        _wait_until_terminal(registry, job_id)
+        assert seen["args"] == ["data_ft10.json"]
+    finally:
+        registry.shutdown()
+
+
+def test_submit_file_args_are_snapshotted_against_caller_mutation(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    # A queued job's argv must not stay live-linked to the caller's list: the
+    # values supplied at submission are what runs, however the caller mutates
+    # its list while the job waits for a slot.
+    script = tmp_path / "sol.py"
+    script.write_text("print('x')", encoding="utf-8")
+    release = threading.Event()
+    seen: list[object] = []
+
+    def _fake(path: Path, *, on_start: Any, **kw: object) -> CpsatPythonResult:
+        if kw.get("args") is None:
+            release.wait(3.0)
+        else:
+            seen.append(kw.get("args"))
+        return _cpsat_result()
+
+    _patch_run_file(monkeypatch, _fake)
+    registry = CpsatJobRegistry(max_running_jobs=1)
+    try:
+        blocker_id = registry.submit_file(script)
+        caller_args = ["data_ft10.json"]
+        queued_id = registry.submit_file(script, args=caller_args)
+        assert registry.get(queued_id).state == "queued"  # precondition for the mutation below
+        caller_args.append("injected")
+        release.set()
+        _wait_until_terminal(registry, blocker_id)
+        _wait_until_terminal(registry, queued_id)
+        assert seen == [["data_ft10.json"]]
+    finally:
+        release.set()
+        registry.shutdown()
+
+
 # --- path validation before admission ---------------------------------------
 
 

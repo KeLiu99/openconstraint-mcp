@@ -2053,10 +2053,12 @@ def _patch_job_solve(monkeypatch: pytest.MonkeyPatch, fake: Any) -> None:
     monkeypatch.setattr("openconstraint_mcp.jobs.registry.solve_model_cancellable", fake)
 
 
-async def _poll_job_status(mcp: Any, job_id: str, timeout: float = 3.0) -> dict[str, Any]:
+async def _poll_job_status(
+    mcp: Any, job_id: str, timeout: float = 3.0, get_tool: str = "get_solve_job"
+) -> dict[str, Any]:
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
-        status = _structured(await mcp.call_tool("get_solve_job", {"job_id": job_id}))
+        status = _structured(await mcp.call_tool(get_tool, {"job_id": job_id}))
         if status["state"] in _JOB_TERMINAL_STATES:
             return status
         await asyncio.sleep(0.01)
@@ -3033,6 +3035,25 @@ async def test_run_cpsat_python_file_seed_replay_passes_seed_env(
 
 
 @pytest.mark.asyncio
+async def test_run_cpsat_python_file_forwards_args_to_the_executor(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    seen: dict[str, object] = {}
+
+    def _fake(script_path: Path, **kw: object) -> Any:
+        seen["args"] = kw.get("args")
+        return _fake_cpsat_result()
+
+    monkeypatch.setattr("openconstraint_mcp.server.run_cpsat_python_file", _fake)
+    mcp = create_mcp_server()
+    await mcp.call_tool(
+        "run_cpsat_python_file",
+        {"script_path": "/tmp/model.py", "args": ["data_ft10.json"]},
+    )
+    assert seen["args"] == ["data_ft10.json"]
+
+
+@pytest.mark.asyncio
 async def test_run_cpsat_python_file_config_replay_passes_config_env(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -3140,6 +3161,32 @@ async def test_submit_cpsat_python_file_job_returns_job_id(
     # A very fast job may already be terminal by the time submit reads status,
     # matching the MiniZinc submit-job test convention.
     assert result["state"] in {"queued", "running", "succeeded"}
+
+
+@pytest.mark.asyncio
+async def test_submit_cpsat_python_file_job_forwards_args_to_the_executor(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    script = tmp_path / "sol.py"
+    script.write_text("print('x')", encoding="utf-8")
+    seen: dict[str, object] = {}
+
+    def _fake(path: Path, *, on_start: Any, **kw: object) -> Any:
+        seen["args"] = kw.get("args")
+        return _fake_cpsat_result()
+
+    monkeypatch.setattr("openconstraint_mcp.pyexec.jobs.run_cpsat_python_file", _fake)
+    mcp = create_mcp_server()
+    submitted = _structured(
+        await mcp.call_tool(
+            "submit_cpsat_python_file_job",
+            {"script_path": str(script), "args": ["data_ft10.json"]},
+        )
+    )
+    # The run happens on a worker thread, so the kwarg is only settled once the
+    # job is terminal — asserting straight off the submit response would race it.
+    await _poll_job_status(mcp, submitted["job_id"], get_tool="get_cpsat_python_job")
+    assert seen["args"] == ["data_ft10.json"]
 
 
 @pytest.mark.asyncio

@@ -55,6 +55,11 @@ class _CpsatJobRequest:
     ``problem``/``checker``/``checker_timeout_ms`` are the optional diagnostic
     checker inputs (same contract as the save/experiment tools); all three are
     ``None`` for an unchecked job.
+
+    ``args`` (file jobs only) is the child's ``sys.argv[1:]``. It is a ``tuple``
+    rather than a ``list`` because ``frozen=True`` blocks rebinding but not
+    mutation of a contained list, and a queued job's argv must not stay
+    live-linked to the caller's list; ``submit_file`` snapshots at admission.
     """
 
     source: str | None
@@ -63,6 +68,7 @@ class _CpsatJobRequest:
     problem: str | None = None
     checker: str | None = None
     checker_timeout_ms: int | None = None
+    args: tuple[str, ...] | None = None
 
     @property
     def is_file(self) -> bool:
@@ -178,6 +184,7 @@ class CpsatJobRegistry:
         script_path: Path,
         *,
         timeout_ms: int = DEFAULT_PYEXEC_TIMEOUT_MS,
+        args: list[str] | None = None,
         problem: str | None = None,
         checker: str | None = None,
         checker_timeout_ms: int | None = None,
@@ -188,6 +195,10 @@ class CpsatJobRegistry:
         (exists / regular file / non-empty / UTF-8) before admission so a bad
         argument raises ``ValueError`` synchronously and no job record is
         created. Raises ``JobRejectedError`` when the queue is full.
+
+        ``args`` becomes the child's ``sys.argv[1:]``; it is snapshotted here at
+        admission, so mutating the caller's list while the job sits queued
+        cannot change what runs.
         """
         if timeout_ms <= 0:
             raise ValueError("timeout_ms must be positive")
@@ -200,6 +211,7 @@ class CpsatJobRegistry:
             problem=problem,
             checker=checker,
             checker_timeout_ms=checker_timeout_ms,
+            args=tuple(args) if args is not None else None,
         )
         with self._lock:
             if self._in_flight >= self._max_running + self._max_queued:
@@ -411,6 +423,7 @@ class CpsatJobRegistry:
                 result = run_cpsat_python_file(
                     request.script_path,
                     timeout_ms=request.timeout_ms,
+                    args=list(request.args) if request.args is not None else None,
                     on_start=lambda proc: self._on_start(job_id, proc),
                     env=seed_config_env(seed=None, config_path=None),
                 )
