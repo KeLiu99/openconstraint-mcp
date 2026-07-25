@@ -62,7 +62,7 @@ def cpsat_save_stages(with_checker: bool) -> tuple[str, str, str, str]:
         "Validating save request and CP-SAT Python source",
         rerun,
         "Child finished; save decision made",
-        "Save complete",
+        "Save request complete",
     )
 
 

@@ -739,6 +739,22 @@ async def test_cpsat_python_solution_workflow_prompt_documents_file_replay_workf
 
 
 @pytest.mark.asyncio
+async def test_cpsat_python_solution_workflow_prompt_replays_via_verify_only() -> None:
+    text = await _get_prompt_text("cpsat_python_solution_workflow", {"problem": SAMPLE_PROBLEM})
+
+    # Full checked replay is a gate re-evaluation, so the prompt must point at
+    # `verify_only=true` rather than telling the client to invent a scratch target.
+    assert "verify_only=true" in text
+    normalized = " ".join(text.split()).lower()
+    assert "scratch `target_dir`, and" not in normalized
+    # `verify_only=true` IGNORES a supplied target, so the prompt must never sell a
+    # scratch target as the way to persist a replay — that needs `verify_only=false`.
+    assert "scratch" not in normalized
+    assert "ignores one if you pass it" in normalized
+    assert "`verify_only=false`" in normalized
+
+
+@pytest.mark.asyncio
 async def test_cpsat_python_solution_workflow_prompt_save_step_gated_on_user_request() -> None:
     text = await _get_prompt_text("cpsat_python_solution_workflow", {"problem": SAMPLE_PROBLEM})
     normalized = " ".join(text.split()).lower()

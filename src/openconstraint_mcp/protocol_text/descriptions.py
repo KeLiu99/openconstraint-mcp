@@ -756,7 +756,9 @@ _RUN_CPSAT_PYTHON_FILE_CHECKED_REPLAY_FULL = (
     "parameter: replaying a `checked`-level save this way only re-verifies at "
     "the `reported` level; for full checked replay, call "
     "`save_verified_cpsat_python` with the saved source/checker/seed/config and "
-    "a scratch `target_dir`. "
+    "`verify_only=true`, which re-runs every gate and needs no `target_dir` at "
+    "all — that mode ignores one if passed, so to persist the replay itself omit "
+    "`verify_only` (or pass `verify_only=false`) with a real `target_dir`. "
 )
 
 RUN_CPSAT_PYTHON_FILE_DESCRIPTION = (
@@ -883,6 +885,14 @@ SAVE_VERIFIED_CPSAT_PYTHON_DESCRIPTION = (
     "success: it runs `source` again and saves only when all supplied gates pass. "
     + _SAVE_TARGET_DIR_RULE
     + " "
+    "`target_dir` is required for a save but NOT for `verify_only=true`, which "
+    "re-evaluates the gates without persisting anything — use it to iterate on a "
+    "checker or expectation instead of writing to a throwaway directory. That mode "
+    "runs the SAME solver child and the SAME gates in the SAME order and skips only "
+    "save-target validation and the persistent writes; `target_dir` and `overwrite` "
+    "are ignored when supplied. A passing verify-only run returns `reason=null` with "
+    "`saved=false`, `target_dir=null`, and no `files`; a failing one is identical to "
+    "a failed save. "
     "Gate order (reported → expectation → checker): "
     "(1) Reported gate — always applied: `status` must be `optimal`/`feasible` "
     "AND `solution` must be non-empty. "
@@ -935,15 +945,18 @@ SAVE_VERIFIED_CPSAT_PYTHON_DESCRIPTION = (
     "free text), a compact experiment-log summary, and per-file sha256 hashes. "
     + _MARKER_GATED_OVERWRITE
     + " "
-    "Returns a SaveVerifiedPythonResult with: `saved` (bool), "
+    "Returns a SaveVerifiedPythonResult with: `saved` (bool — PERSISTENCE only, "
+    "never the verdict: a passing `verify_only` run also reports `saved=false`), "
     "`verification_level` ('none'|'reported'|'expectation'|'checked' — the "
-    "highest gate that passed; combine with `saved` to distinguish a saved result "
-    "from a failed gate at the same level), `reported_passed` (bool), "
+    "highest gate that passed; the verdict is `reason` being null plus the "
+    "per-gate fields, never `saved`), `reported_passed` (bool), "
     "`expectation` (echoed expectation or null), `expectation_passed` "
     "(bool or null when not evaluated), `checker` (CpsatCheckerReport or null), "
     "`status`, `target_dir`, `reason`, `solution`, `objective`, `stdout`, "
     "`stderr`, `timed_out`, `truncated`, `duration_ms`, `files`. "
-    "A failed gate returns `saved=False` with `reason` and writes NOTHING. "
+    "A failed gate returns a non-null `reason` and writes NOTHING; a run that "
+    "passes every gate returns `reason=null`, and writes files only when it was "
+    "not `verify_only`. "
     "CP-SAT's nondeterminism can yield a different (but still valid) solution "
     "from the prior run; the save gate checks status, not solution-equality. "
     + _CPSAT_CHILD_POSTURE

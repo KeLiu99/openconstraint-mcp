@@ -349,7 +349,36 @@ async def test_full_profile_descriptions_advertise_full_only_cross_references() 
     run_cpsat_python_desc = tools["run_cpsat_python"].description
     assert "cpsat_python_solution_workflow" in run_cpsat_python_desc
     assert "submit_portfolio_job" in run_cpsat_python_desc
-    assert "save_verified_cpsat_python" in tools["run_cpsat_python_file"].description
+    run_cpsat_python_file_desc = tools["run_cpsat_python_file"].description
+    assert "save_verified_cpsat_python" in run_cpsat_python_file_desc
+    # The checked-replay pointer names the gate-only mode, not a scratch target:
+    # `verify_only=true` ignores a supplied `target_dir`, so persisting a replay
+    # must be advertised as `verify_only=false`, never as a throwaway target.
+    assert "verify_only=true" in run_cpsat_python_file_desc
+    assert "scratch" not in run_cpsat_python_file_desc
+    assert "`verify_only=false`" in run_cpsat_python_file_desc
+
+
+@pytest.mark.asyncio
+async def test_save_verified_cpsat_python_description_states_verify_only_result_shape() -> None:
+    # A passing verify-only run is a `saved=false` SUCCESS, so the advertised
+    # description must say so rather than letting a client read `saved` as the verdict.
+    tools = await _tools_by_name("full")
+    description = tools["save_verified_cpsat_python"].description
+    assert "verify_only=true" in description
+    assert "`reason=null` with `saved=false`" in description
+
+
+@pytest.mark.asyncio
+async def test_save_verified_cpsat_python_output_schema_does_not_read_saved_as_verdict() -> None:
+    # The SaveVerifiedPythonResult docstring is published verbatim as this tool's
+    # outputSchema.description, so the corrected two-field rule must reach clients.
+    tools = await _tools_by_name("full")
+    output_schema = tools["save_verified_cpsat_python"].outputSchema
+    assert output_schema is not None
+    description = output_schema["description"]
+    assert "combine with ``saved``" not in description
+    assert "PERSISTENCE only, never the verdict" in description
 
 
 @pytest.mark.asyncio

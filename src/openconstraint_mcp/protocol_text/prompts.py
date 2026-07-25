@@ -489,7 +489,10 @@ User problem:
    checker parameter, so this only re-verifies at the `reported` level
    even for a `checked`-level save. For full checked replay, call
    `save_verified_cpsat_python` again
-   with the saved source/checker/seed/config, a scratch `target_dir`, AND —
+   with `verify_only=true` — which re-runs every gate and needs no
+   `target_dir`, and ignores one if you pass it; to persist the replay
+   instead, omit `verify_only` (or pass `verify_only=false`) and supply a
+   real `target_dir` — plus the saved source/checker/seed/config, AND —
    whenever the manifest or saved directory has them — the original
    `problem` (read from `problem.txt` if a `problem` artifact is listed),
    `expectation` (rebuilt from `verification.expectation.objective_sense` /

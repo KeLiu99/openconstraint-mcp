@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+from mcp.server.fastmcp.exceptions import ToolError
 from mcp.types import CallToolResult
 
 from openconstraint_mcp.jobs.registry import JobRegistry
@@ -3342,9 +3343,12 @@ async def test_save_verified_cpsat_python_tool_schema_includes_new_params() -> N
         "expectation",
         "checker",
         "checker_timeout_ms",
+        "verify_only",
     } <= props
     assert "ctx" not in props
-    assert set(tool.inputSchema.get("required", [])) == {"source", "target_dir"}
+    # `target_dir` is required only for a real save; verify_only=true omits it,
+    # a condition the generated JSON schema cannot express (enforced at runtime).
+    assert set(tool.inputSchema.get("required", [])) == {"source"}
 
 
 @pytest.mark.asyncio
@@ -3365,6 +3369,58 @@ async def test_save_verified_cpsat_python_tool_routes_to_save(
         )
     )
     assert result["saved"] is True
+    assert result["verification_level"] == "reported"
+
+
+@pytest.mark.asyncio
+async def test_save_verified_cpsat_python_tool_passes_verify_only_and_no_target_through(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    received: dict = {}
+
+    def _spy(source, **kw):
+        received.update(kw)
+        return _fake_cpsat_save_result()
+
+    monkeypatch.setattr("openconstraint_mcp.server.save_verified_cpsat_python", _spy)
+
+    mcp = create_mcp_server()
+    await mcp.call_tool(
+        "save_verified_cpsat_python",
+        {"source": "print('x')", "verify_only": True},
+    )
+
+    assert received["verify_only"] is True
+    assert received["target_dir"] is None
+
+
+@pytest.mark.asyncio
+async def test_save_verified_cpsat_python_tool_rejects_missing_target_dir() -> None:
+    # The published schema cannot express "required unless verify_only=true", so
+    # the normal-mode requirement is enforced at the tool boundary instead.
+    mcp = create_mcp_server()
+    with pytest.raises(ToolError, match="target_dir is required unless verify_only"):
+        await mcp.call_tool("save_verified_cpsat_python", {"source": "print('x')"})
+
+
+@pytest.mark.asyncio
+async def test_save_verified_cpsat_python_tool_verify_only_reports_no_save(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        "openconstraint_mcp.pyexec.save.run_cpsat_python",
+        lambda source, **kw: _fake_cpsat_run_result(),
+    )
+    mcp = create_mcp_server()
+    result = _structured(
+        await mcp.call_tool(
+            "save_verified_cpsat_python",
+            {"source": "print('x')", "verify_only": True},
+        )
+    )
+    assert result["saved"] is False
+    assert result["target_dir"] is None
+    assert result["reason"] is None
     assert result["verification_level"] == "reported"
 
 
