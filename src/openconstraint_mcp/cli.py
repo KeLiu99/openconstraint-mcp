@@ -47,8 +47,9 @@ def stdio(
         "--toolset",
         help=(
             "Advertised MCP toolset. 'core' (default) exposes 8 essential tools "
-            "for a smaller tools/list payload; 'full' exposes every tool and "
-            "three prompts, adding background jobs, solver portfolios, explicit "
+            "for a smaller tools/list payload, plus the backend-neutral "
+            "solve_constraint_problem prompt; 'full' exposes every tool and all "
+            "four prompts, adding background jobs, solver portfolios, explicit "
             "experiments, verified saves, inspection/unsat-core diagnostics, and "
             "tabular I/O."
         ),

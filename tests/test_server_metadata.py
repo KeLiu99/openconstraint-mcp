@@ -234,7 +234,11 @@ FULL_TOOL_NAMES = CORE_TOOL_NAMES | {
     "write_tabular_result",
 }
 
-FULL_PROMPT_NAMES = {
+# The exact core prompt inventory: one compact backend-neutral workflow prompt,
+# usable for either backend and naming core tools only.
+CORE_PROMPT_NAMES = {"solve_constraint_problem"}
+
+FULL_PROMPT_NAMES = CORE_PROMPT_NAMES | {
     "minizinc_solution_workflow",
     "cpsat_python_solution_workflow",
     "auto_tune_constraint_problem",
@@ -243,6 +247,31 @@ FULL_PROMPT_NAMES = {
 # A schema-change budget failure is a REVIEW trigger, not a cap to silently
 # raise: reduce descriptions or reconsider the core inventory instead.
 CORE_METADATA_BUDGET_BYTES = 40_000
+
+SOLVE_TOOL_NAMES = (
+    "solve_minizinc_model",
+    "solve_minizinc_files",
+    "run_cpsat_python",
+    "run_cpsat_python_file",
+)
+
+# The stable plain-language vocabulary each solve tool advertises for itself,
+# independently of the server `instructions` that carry the same words.
+SOLVE_DOMAIN_CUES = (
+    "scheduling",
+    "rostering",
+    "assignment",
+    "routing",
+    "bin-packing",
+    "knapsack",
+    "allocation",
+)
+
+# The plain-language domain cue and the input precondition must LEAD each solve
+# tool's description, not sit in its tail. A failure here is a REVIEW trigger,
+# not a cap to silently raise: widening the window lets the cue drift out of the
+# opening, which voids the "lead with" contract these assertions exist to hold.
+SOLVE_CUE_PREFIX_CHARS = 340
 
 # A budget failure here is a REVIEW trigger, not a cap to silently raise: the
 # routing/safety paragraphs must survive client-side instructions truncation,
@@ -346,14 +375,49 @@ async def test_cpsat_file_tools_advertise_an_args_parameter() -> None:
         )
 
 
+async def _core_solve_description_openings() -> dict[str, str]:
+    """Each core solve tool's advertised description, cut to its leading window.
+
+    Read from the live core server, not the description constants, so these
+    assertions cover what a client is actually sent.
+    """
+    tools = await _tools_by_name("core")
+    return {
+        name: (tools[name].description or "")[:SOLVE_CUE_PREFIX_CHARS] for name in SOLVE_TOOL_NAMES
+    }
+
+
 @pytest.mark.asyncio
-async def test_core_profile_registers_no_prompts() -> None:
+async def test_solve_tools_lead_with_the_plain_language_domain_cue() -> None:
+    for name, opening in (await _core_solve_description_openings()).items():
+        for cue in SOLVE_DOMAIN_CUES:
+            assert cue in opening, f"{name} does not lead with the {cue!r} domain cue"
+
+
+@pytest.mark.asyncio
+async def test_inline_solve_tools_lead_with_a_complete_artifact_precondition() -> None:
+    # An inline tool takes a drafted model/script, never the user's raw prose.
+    openings = await _core_solve_description_openings()
+    for name in ("solve_minizinc_model", "run_cpsat_python"):
+        assert "COMPLETE" in openings[name], name
+        assert "prose" in openings[name], name
+
+
+@pytest.mark.asyncio
+async def test_file_solve_tools_lead_with_an_existing_on_disk_artifact() -> None:
+    openings = await _core_solve_description_openings()
+    for name in ("solve_minizinc_files", "run_cpsat_python_file"):
+        assert "already has on disk" in openings[name], name
+
+
+@pytest.mark.asyncio
+async def test_core_profile_registers_only_the_backend_neutral_prompt() -> None:
     prompts = await create_mcp_server("core").list_prompts()
-    assert prompts == []
+    assert {prompt.name for prompt in prompts} == CORE_PROMPT_NAMES
 
 
 @pytest.mark.asyncio
-async def test_full_profile_retains_the_three_prompts() -> None:
+async def test_full_profile_retains_the_four_prompts() -> None:
     prompts = await create_mcp_server("full").list_prompts()
     assert {prompt.name for prompt in prompts} == FULL_PROMPT_NAMES
 
@@ -456,16 +520,19 @@ def test_full_instructions_lead_with_routing_then_posture() -> None:
 
 
 async def _forbidden_full_only_names() -> set[str]:
-    """Every full-only tool name plus every full-profile prompt name.
+    """Every full-only tool name plus every full-only prompt name.
 
-    Derived from the live servers so it tracks reality: unavailable tools are
-    ``full_names - core_names`` and prompts are all core-hidden.
+    Derived from the live servers so it tracks reality: both halves are the
+    ``full - core`` difference, so a prompt the core profile also exposes is
+    NOT classified as forbidden — core text may name it.
     """
     full = create_mcp_server("full")
-    full_names = {tool.name for tool in await full.list_tools()}
-    prompt_names = {prompt.name for prompt in await full.list_prompts()}
-    core_names = {tool.name for tool in await create_mcp_server("core").list_tools()}
-    return (full_names - core_names) | prompt_names
+    core = create_mcp_server("core")
+    full_tools = {tool.name for tool in await full.list_tools()}
+    full_prompts = {prompt.name for prompt in await full.list_prompts()}
+    core_tools = {tool.name for tool in await core.list_tools()}
+    core_prompts = {prompt.name for prompt in await core.list_prompts()}
+    return (full_tools - core_tools) | (full_prompts - core_prompts)
 
 
 @pytest.mark.asyncio
@@ -476,6 +543,27 @@ async def test_core_tool_payload_names_no_full_only_tool_or_prompt() -> None:
     forbidden = await _forbidden_full_only_names()
     core_tools = await create_mcp_server("core").list_tools()
     payload = _serialize_tools(core_tools)
+    leaked = sorted(name for name in forbidden if name in payload)
+    assert leaked == []
+
+
+@pytest.mark.asyncio
+async def test_core_prompt_surface_names_no_full_only_tool_or_prompt() -> None:
+    # The core prompt's advertised description AND its rendered body must stay
+    # inside the core surface: a full-only tool or prompt named there points the
+    # client's LLM at something the profile does not expose.
+    forbidden = await _forbidden_full_only_names()
+    mcp = create_mcp_server("core")
+    descriptions = [prompt.description or "" for prompt in await mcp.list_prompts()]
+    (core_prompt_name,) = CORE_PROMPT_NAMES
+    rendered = await mcp.get_prompt(core_prompt_name, {"problem": "pack 5 boxes"})
+    payload = "\n".join(
+        descriptions
+        + [
+            message.content.text  # type: ignore[union-attr]
+            for message in rendered.messages
+        ]
+    )
     leaked = sorted(name for name in forbidden if name in payload)
     assert leaked == []
 

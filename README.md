@@ -137,14 +137,16 @@ The package exposes five commands:
   Flags:
 
   - `--toolset core|full` — which MCP toolset to advertise (default: `core`).
-    The **core** profile exposes eight essential tools and no prompts, for a
-    materially smaller `tools/list` payload and a less ambiguous default choice
+    The **core** profile exposes eight essential tools for a materially
+    smaller `tools/list` payload and a less ambiguous default choice
     set: `check_runtime`, `list_available_solvers`, `check_minizinc_model`,
     `solve_minizinc_model`, `check_minizinc_files`, `solve_minizinc_files`,
-    `run_cpsat_python`, and `run_cpsat_python_file`. The **full** profile
-    (`--toolset full`) additionally exposes the three MCP prompts and every
-    advanced tool — background solve/CP-SAT jobs, solver portfolios, explicit
-    CP-SAT experiments, verified saving, model-interface inspection,
+    `run_cpsat_python`, and `run_cpsat_python_file` — plus one MCP prompt,
+    `solve_constraint_problem`, the backend-neutral workflow you invoke by
+    hand in a client that exposes MCP prompts. The **full** profile
+    (`--toolset full`) additionally exposes the three detailed MCP prompts and
+    every advanced tool — background solve/CP-SAT jobs, solver portfolios,
+    explicit CP-SAT experiments, verified saving, model-interface inspection,
     unsat-core diagnostics, and tabular (Excel/CSV) I/O. Use `--toolset full`
     when you need any of those; existing users who relied on an advanced tool
     from bare `stdio` must now pass `--toolset full`.
@@ -248,8 +250,9 @@ diagnostic describes only what the local wrapper observed.
 > server can expose. The default `stdio` profile is **core** and advertises only
 > eight of them (`check_runtime`, `list_available_solvers`,
 > `check_minizinc_model`, `solve_minizinc_model`, `check_minizinc_files`,
-> `solve_minizinc_files`, `run_cpsat_python`, `run_cpsat_python_file`) and no
-> prompts. The advanced tools and the [MCP prompts](#mcp-prompts) below require
+> `solve_minizinc_files`, `run_cpsat_python`, `run_cpsat_python_file`) plus the
+> single `solve_constraint_problem` [MCP prompt](#mcp-prompts). The advanced
+> tools and the three detailed prompts below require
 > `openconstraint-mcp stdio --toolset full` (see [CLI](#cli)).
 
 The stdio server exposes two runtime-introspection tools, a model-check tool, a
@@ -1747,13 +1750,42 @@ telemetry, no subprocess, and no managed-runtime dependency.
 
 ## MCP prompts
 
-The stdio server exposes three MCP prompts for client-side LLMs. These are part
-of the **full** profile only — start the server with
-`openconstraint-mcp stdio --toolset full` to expose them (the default `core`
-profile registers no prompts; see [CLI](#cli)):
+The stdio server exposes four MCP prompts for client-side LLMs. One,
+`solve_constraint_problem`, is available in **both** profiles; the other three
+are **full**-profile only — start the server with
+`openconstraint-mcp stdio --toolset full` to expose them (see [CLI](#cli)).
 
-- **`minizinc_solution_workflow(problem: str)`** — a guided template for the
-  MCP client's LLM. Given a natural-language constraint or optimization
+> **Two different entry paths.** MCP *tools* are model-controlled: the host and
+> its model decide which tool to retrieve and call, which is why the four solve
+> tools lead their descriptions with the plain-language problem vocabulary
+> (scheduling, rostering, assignment, routing, packing/bin-packing, knapsack,
+> resource allocation) and say what input they need. MCP *prompts* are
+> user-controlled: a workflow prompt does nothing until you pick it explicitly
+> from your client's prompt menu, slash-command list, or command palette, and a
+> client that does not surface MCP prompts will never show it. Neither path is a
+> routing guarantee — the metadata is the guarantee, and tool selection stays
+> host- and model-controlled.
+
+- **`solve_constraint_problem(problem: str)`** — available in **both** profiles,
+  including the default `core`. One compact, backend-neutral workflow for
+  ordinary solving: analyze the problem's variables, constraints, and objective
+  (asking only about material missing information), choose MiniZinc or OR-Tools
+  CP-SAT Python by problem shape, draft a complete model or script, verify and
+  run it with the core tools — `check_minizinc_model` then
+  `solve_minizinc_model`, or `run_cpsat_python`, switching to
+  `check_minizinc_files` / `solve_minizinc_files` / `run_cpsat_python_file` when
+  the artifact already exists on disk — and present the status and solution in
+  the user's own terms. It states the mandatory generation rule for every
+  artifact it drafts, MiniZinc model and CP-SAT script alike: generate only
+  modeling code — no network access, no file writes or deletes, and no
+  subprocess spawning — unless the user explicitly asked for it. The three
+  full-only prompts below are the detailed, backend-specific alternatives;
+  reach for them when you need the advanced full-profile capabilities they
+  cover.
+
+- **`minizinc_solution_workflow(problem: str)`** — **full** profile only. A
+  guided template for the MCP client's LLM. Given a natural-language
+  constraint or optimization
   problem, the prompt instructs the client's model to:
 
   1. Identify decision variables, domains, constraints, and any objective.
@@ -1803,9 +1835,9 @@ profile registers no prompts; see [CLI](#cli)):
   verified by the local managed MiniZinc runtime via
   `solve_minizinc_model`. `LLM proposes, local MiniZinc verifies.`
 
-- **`cpsat_python_solution_workflow(problem: str)`** — a guided template for the MCP
-  client's LLM to write OR-Tools CP-SAT Python and run it via
-  `run_cpsat_python`. The prompt instructs the client's model to:
+- **`cpsat_python_solution_workflow(problem: str)`** — **full** profile only. A
+  guided template for the MCP client's LLM to write OR-Tools CP-SAT Python and
+  run it via `run_cpsat_python`. The prompt instructs the client's model to:
 
   1. Identify decision variables, domains, constraints, and the objective.
   2. Ask concise clarifying questions if the problem is underspecified.
@@ -1851,10 +1883,10 @@ profile registers no prompts; see [CLI](#cli)):
   LLM should write the script; the script is then executed locally by
   `run_cpsat_python`. `LLM writes, server executes locally.`
 
-- **`auto_tune_constraint_problem(problem: str)`** — client-side
-  orchestration for comparing *several* candidate formulations (MiniZinc
-  and/or CP-SAT Python) before presenting one winner, rather than solving a
-  single drafted model. A peer of `minizinc_solution_workflow` and
+- **`auto_tune_constraint_problem(problem: str)`** — **full** profile only.
+  Client-side orchestration for comparing *several* candidate formulations
+  (MiniZinc and/or CP-SAT Python) before presenting one winner, rather than
+  solving a single drafted model. A peer of `minizinc_solution_workflow` and
   `cpsat_python_solution_workflow` — pick it when the user's own framing asks for
   formulations to be compared ("try a few approaches", "which formulation is
   fastest", "compare MiniZinc vs CP-SAT"), not as an automatic escalation

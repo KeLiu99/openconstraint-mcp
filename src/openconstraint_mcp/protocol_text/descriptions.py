@@ -24,6 +24,17 @@ _CPSAT_CHILD_POSTURE = (
     "out. 'Offline' describes the wrapper here, not the executed script."
 )
 
+# The stable plain-language problem vocabulary the four solve tools lead with.
+# It also appears in _ROUTING_PARAGRAPH, which reaches the client only through
+# the server `instructions`; duplicating it here is deliberate, because tool
+# descriptions and instructions are advertised as separate fields a host may
+# consume, truncate, or rank independently. Shared so the cue cannot drift
+# between the four descriptions or between their core/full variants.
+_CP_PROBLEM_DOMAINS = (
+    "scheduling, rostering, assignment, routing, packing/bin-packing, knapsack, "
+    "or resource allocation"
+)
+
 _UNKNOWN_JOB_ID_ERROR = "An unknown `job_id` is an MCP error."
 
 _NO_ARGS_LIST_TOOL = "Takes no arguments; never downloads or runs anything."
@@ -268,7 +279,10 @@ _SOLVE_MZN_HARD_INSTANCE_CORE = (
 )
 
 _SOLVE_MINIZINC_MODEL_BODY = (
-    "Solve a complete MiniZinc model through the managed local runtime. `model` "
+    "Solve a constraint or discrete-optimization problem ("
+    + _CP_PROBLEM_DOMAINS
+    + ") from a COMPLETE MiniZinc model you have already drafted, never from the "
+    "user's prose. Runs through the managed local runtime. `model` "
     "must be full source: declarations, constraints, exactly one `solve` "
     "statement, and an `output` block. Optional `data` is `.dzn` text run as a "
     "data file beside the model (omit when none is needed). Returns a "
@@ -451,8 +465,10 @@ CHECK_MINIZINC_FILES_DESCRIPTION = (
 )
 
 SOLVE_MINIZINC_FILES_DESCRIPTION = (
-    "Solve a MiniZinc model from local file paths — the path-based sibling "
-    "of `solve_minizinc_model`. "
+    "Solve a constraint or discrete-optimization problem ("
+    + _CP_PROBLEM_DOMAINS
+    + ") from a MiniZinc model the user already has on disk — the path-based "
+    "sibling of `solve_minizinc_model`, reading local file paths. "
     + _FILE_TOOL_SHARED_DESCRIPTION
     + " Returns the same SolveResult shape (`status`, `solver`, "
     "`return_code`, `timed_out`, `truncated` (output-cap overrun — see "
@@ -657,8 +673,11 @@ LIST_PORTFOLIO_JOBS_DESCRIPTION = (
 )
 
 _RUN_CPSAT_PYTHON_HEAD = (
-    "Execute LLM-generated OR-Tools CP-SAT Python source in a bounded child "
-    "process and return a structured CpsatPythonResult. The script runs under "
+    "Solve a constraint or discrete-optimization problem ("
+    + _CP_PROBLEM_DOMAINS
+    + ") by executing a COMPLETE OR-Tools CP-SAT Python script you have already "
+    "written, never the user's prose, in a bounded child "
+    "process; returns a structured CpsatPythonResult. The script runs under "
     "the same Python interpreter as the server, with `ortools` and the stdlib "
     "available. " + _CPSAT_JSON_CONTRACT + " "
     "Valid `status` values: `optimal`, `feasible`, `infeasible`, `unknown`, `error`. "
@@ -715,7 +734,10 @@ RUN_CPSAT_PYTHON_DESCRIPTION_CORE = (
 )
 
 _RUN_CPSAT_PYTHON_FILE_HEAD = (
-    "Execute an OR-Tools CP-SAT Python script from a LOCAL file path — the "
+    "Solve a constraint or discrete-optimization problem ("
+    + _CP_PROBLEM_DOMAINS
+    + ") by executing an OR-Tools CP-SAT Python script the user already has on "
+    "disk, from a LOCAL file path — the "
     "path-based sibling of `run_cpsat_python`. Pass `script_path` instead of "
     "pasting the whole source, so iterating on a local file does not mean "
     "re-copying it on every call. The script runs with its working directory set "
@@ -786,6 +808,16 @@ RUN_CPSAT_PYTHON_FILE_DESCRIPTION_CORE = (
     + _RUN_CPSAT_PYTHON_FILE_MID
     + _RUN_CPSAT_PYTHON_FILE_ARGS
     + _CPSAT_CHILD_POSTURE
+)
+
+SOLVE_CONSTRAINT_PROBLEM_PROMPT_DESCRIPTION = (
+    "Start here for a plain-language constraint or discrete-optimization "
+    "problem (" + _CP_PROBLEM_DOMAINS + "). Guides the MCP client's LLM "
+    "through one compact backend-neutral loop: analyze the problem, choose "
+    "MiniZinc or OR-Tools CP-SAT Python by problem shape, draft a complete "
+    "model or script, verify and run it with the local tools (using the "
+    "path-based tools when the artifact already exists on disk), and present "
+    "the result in the user's own terms."
 )
 
 MINIZINC_SOLUTION_WORKFLOW_PROMPT_DESCRIPTION = (
