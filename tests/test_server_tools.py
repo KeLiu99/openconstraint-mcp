@@ -2240,8 +2240,28 @@ async def test_list_solve_jobs_returns_one_entry_per_submitted_job(
 
 
 class _PortfolioFakeProc:
+    """An opaque process-handle stand-in; ``poll`` reports it as already exited.
+
+    It has no ``pid`` and backs no real process, so the real (group-aware)
+    ``_terminate_process_tree`` must never see it. Any test racing MORE THAN ONE
+    attempt must therefore request ``_never_terminate_for_real`` below (or patch
+    a recorder of its own): winner selection cancels the still-running losers,
+    and whether a loser is still mid-flight when the winner is polled is a
+    timing race the test cannot control — it loses locally and wins under CI
+    load. A single-attempt race never cancels, so it needs no guard.
+    """
+
     def poll(self) -> int:
         return 0
+
+
+@pytest.fixture
+def _never_terminate_for_real(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Disarm real process-tree termination for tests using ``_PortfolioFakeProc``."""
+    monkeypatch.setattr(
+        "openconstraint_mcp.jobs.registry._terminate_process_tree",
+        lambda proc, **kwargs: None,
+    )
 
 
 def _portfolio_solve_result(status: str, solver: str) -> SolveResult:
@@ -2369,6 +2389,7 @@ async def test_portfolio_job_tools_are_listed_with_expected_properties() -> None
 @pytest.mark.asyncio
 async def test_submit_portfolio_job_returns_running_then_get_reaches_succeeded(
     monkeypatch: pytest.MonkeyPatch,
+    _never_terminate_for_real: None,
 ) -> None:
     def _fake_solve(model: str, *, solver: str, on_start: Any, **kw: Any) -> SolveResult:
         on_start(_PortfolioFakeProc())
@@ -3376,9 +3397,9 @@ async def test_save_verified_cpsat_python_tool_routes_to_save(
 async def test_save_verified_cpsat_python_tool_passes_verify_only_and_no_target_through(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    received: dict = {}
+    received: dict[str, Any] = {}
 
-    def _spy(source, **kw):
+    def _spy(source: str, **kw: Any) -> Any:
         received.update(kw)
         return _fake_cpsat_save_result()
 
@@ -3430,7 +3451,7 @@ async def test_save_verified_cpsat_python_tool_accepts_nested_expectation(
     tmp_path: Path,
 ) -> None:
     """FastMCP coerces nested `expectation` dict to CpsatExpectation."""
-    received: dict = {}
+    received: dict[str, Any] = {}
     monkeypatch.setattr(
         "openconstraint_mcp.pyexec.save.run_cpsat_python",
         lambda source, **kw: _fake_cpsat_run_result(objective=10.0),
@@ -3440,7 +3461,7 @@ async def test_save_verified_cpsat_python_tool_accepts_nested_expectation(
         "openconstraint_mcp.pyexec.save", fromlist=["save_verified_cpsat_python"]
     ).save_verified_cpsat_python
 
-    def _spy(source, *, target_dir, expectation=None, **kw):
+    def _spy(source: str, *, target_dir: Path, expectation: Any = None, **kw: Any) -> Any:
         received["expectation"] = expectation
         return original_save(source, target_dir=target_dir, expectation=expectation, **kw)
 
