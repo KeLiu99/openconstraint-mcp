@@ -103,8 +103,7 @@ _ROUTING_PARAGRAPH = (
 )
 
 MCP_SERVER_INSTRUCTIONS = (
-    _ROUTING_PARAGRAPH
-    + "\n"
+    _ROUTING_PARAGRAPH + "\n"
     "\n"
     "POSTURE: MiniZinc tools use the managed local MiniZinc runtime; never a "
     "remote solver or a bare PATH minizinc. The CP-SAT Python tools execute "
@@ -169,8 +168,7 @@ MCP_SERVER_INSTRUCTIONS = (
 # full-only tool or prompt — the metadata-budget test cross-checks this text
 # against the same forbidden set it scans the core tool payload with.
 MCP_SERVER_INSTRUCTIONS_CORE = (
-    _ROUTING_PARAGRAPH
-    + "\n"
+    _ROUTING_PARAGRAPH + "\n"
     "\n"
     "This is the default core toolset. Launch with `--toolset full` for model "
     "inspection, unsat-core diagnostics, jobs, portfolios, experiments, "
@@ -757,7 +755,7 @@ _RUN_CPSAT_PYTHON_FILE_MID = (
 _RUN_CPSAT_PYTHON_FILE_ARGS = (
     "Optional `args` (a list of strings) is appended after the script path, so "
     "the script reads it as `sys.argv[1:]` — pass it for a script that takes its "
-    "data file or a flag on the command line (e.g. `args=[\"data_ft10.json\"]` "
+    'data file or a flag on the command line (e.g. `args=["data_ft10.json"]` '
     "runs an `examples/job_shop/model.py`-style script against that instance "
     "instead of its hardcoded default, with no edit to the source). Omitting it "
     "runs the script with no arguments. "

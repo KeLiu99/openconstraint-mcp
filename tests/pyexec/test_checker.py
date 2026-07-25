@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 from typing import Any
 from unittest.mock import patch
@@ -80,6 +81,59 @@ def test_checker_accepted_returns_accepted_report(monkeypatch: pytest.MonkeyPatc
     assert report.errors == []
     assert report.timed_out is False
     assert report.truncated is False
+
+
+# --- Payload construction ----------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("solution", "expected_solution"),
+    [({"x": 3}, {"x": 3}), (None, {}), ({}, {})],
+    ids=["non_empty", "none", "empty"],
+)
+def test_checker_payload_carries_solution_objective_and_status(
+    monkeypatch: pytest.MonkeyPatch,
+    solution: dict | None,
+    expected_solution: dict,
+) -> None:
+    """Pin which result fields cross into the checker protocol.
+
+    ``objective`` and ``best_objective_bound`` are adjacent, same-typed fields on
+    ``CpsatPythonResult``, so reading the bound here would be type-correct and
+    silent; the fixture keeps them distinct. Comparing the whole capture list
+    also pins that the checker child is invoked exactly once.
+    """
+    result = CpsatPythonResult(
+        status="optimal",
+        solution=solution,
+        objective=3.0,
+        best_objective_bound=99.0,
+        stdout="",
+        stderr="",
+        return_code=0,
+        timed_out=False,
+        truncated=False,
+        duration_ms=42,
+    )
+    payloads: list[Any] = []
+
+    def _capture(argv: list[str], **kwargs: Any) -> ChildExecutionResult:
+        # Read while the TemporaryDirectory still exists; argv[-1] is payload.json.
+        payloads.append(json.loads(Path(argv[-1]).read_text(encoding="utf-8")))
+        return _make_child_result()
+
+    monkeypatch.setattr("openconstraint_mcp.pyexec.checker.execute_child", _capture)
+
+    run_checker(_CHECKER_SOURCE, result, problem="ship 3 units", timeout_ms=5000, tracker=None)
+
+    assert payloads == [
+        {
+            "problem": "ship 3 units",
+            "solution": expected_solution,
+            "objective": 3.0,
+            "solver_status": "optimal",
+        }
+    ]
 
 
 # --- Rejected checker --------------------------------------------------------
