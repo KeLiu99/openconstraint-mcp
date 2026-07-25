@@ -599,6 +599,9 @@ save-tool provenance.
    `model_path`/`data_path`, and `run_cpsat_python_file(script_path=<the
    existing model.py>, timeout_ms=<short budget>)` — they run from the
    file's own directory, so relative includes and sibling data resolve.
+   When that script reads `sys.argv` for its data file, add
+   `args=[<data file>]`; without it the script silently falls back to its
+   own hardcoded default instance instead of the one you meant to smoke.
    This step never ranks or selects a winner among the candidates that pass.
 
 5. Call `list_available_solvers` before any MiniZinc portfolio work.

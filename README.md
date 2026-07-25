@@ -1070,8 +1070,9 @@ server runs it in a **local child process**.
   if none was printed in time. On a clean run the final block (printed after
   `Solve` returns) is the authoritative result.
 
-- **`run_cpsat_python_file(script_path: str, timeout_ms: int = 30000, seed:
-  int | None = None, config: dict | None = None)`** — path-based sibling of
+- **`run_cpsat_python_file(script_path: str, timeout_ms: int = 30000, args:
+  list[str] | None = None, seed: int | None = None, config: dict | None =
+  None)`** — path-based sibling of
   `run_cpsat_python`. Pass a local `.py` path instead of pasting the source, so
   iterating on a file does not mean re-copying it on every call. The script
   runs with its working directory set to the file's own directory, so a
@@ -1082,6 +1083,15 @@ server runs it in a **local child process**.
   error and nothing runs. Same JSON output contract, output cap, timeout,
   tree-kill, and `CpsatPythonResult` shape (including timeout partial
   recovery) as `run_cpsat_python`.
+
+  `args` is appended after the script path, so the script reads it as
+  `sys.argv[1:]`. This is what lets a script that takes its data file on the
+  command line be pointed at a different instance without editing its source:
+  `examples/job_shop/model.py` reads `sys.argv[1]` and otherwise falls back to
+  `data_ft06.json`, so `run_cpsat_python_file(script_path=".../job_shop/model.py",
+  args=["data_ft10.json"])` is the tool-level equivalent of `python model.py
+  data_ft10.json`. Omitting `args` runs the script with no arguments, exactly
+  as before.
 
   `seed` and `config` are REPLAY inputs for re-running a saved seeded/
   configured artifact through this file tool instead of exporting environment
@@ -1368,12 +1378,15 @@ CP-SAT analogue of the MiniZinc `submit_solve_job` / `get_solve_job` pair:
   problem-specific checker as `save_verified_cpsat_python`'s checker gate —
   see the checked-jobs note below.
 - **`submit_cpsat_python_file_job(script_path: str, timeout_ms: int = 30000,
-  problem: str | None = None, checker: str | None = None, checker_timeout_ms:
-  int | None = None)`** — submit a local script file as a background job. The
+  args: list[str] | None = None, problem: str | None = None, checker: str |
+  None = None, checker_timeout_ms: int | None = None)`** — submit a local
+  script file as a background job. The
   path is validated before admission (missing / non-file / empty / non-UTF-8 →
   MCP error, no job created). The script runs in its own directory so relative
-  imports and data-file opens resolve. Takes the same optional checker inputs
-  as `submit_cpsat_python_job`.
+  imports and data-file opens resolve. `args` becomes the script's
+  `sys.argv[1:]`, as in `run_cpsat_python_file`, and is recorded at admission,
+  so a job that waits in the queue still runs the values supplied on submit.
+  Takes the same optional checker inputs as `submit_cpsat_python_job`.
 - **`get_cpsat_python_job(job_id: str)`** — poll a job by `job_id` (works
   for both inline and file submits). Returns a `CpsatPythonJobStatus`: `state`
   (`"queued"`, `"running"`, `"succeeded"`, `"failed"`, `"timeout"`,

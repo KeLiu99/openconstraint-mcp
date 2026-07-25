@@ -428,6 +428,7 @@ def _run_file_with_mocked_proc(
     stdout_content: str = _VALID_STDOUT,
     returncode: int = 0,
     timeout_ms: int = 5000,
+    args: list[str] | None = None,
     tracker: Any = None,
     env: dict[str, str] | None = None,
 ) -> tuple[CpsatPythonResult, dict[str, Any]]:
@@ -455,7 +456,9 @@ def _run_file_with_mocked_proc(
         ),
         patch("openconstraint_mcp.shared.childrun.terminate_process_tree"),
     ):
-        result = run_cpsat_python_file(script_path, timeout_ms=timeout_ms, tracker=tracker, env=env)
+        result = run_cpsat_python_file(
+            script_path, timeout_ms=timeout_ms, args=args, tracker=tracker, env=env
+        )
     return result, captured
 
 
@@ -491,6 +494,16 @@ def test_run_cpsat_python_file_argv_targets_file_unbuffered(tmp_path: Path) -> N
     _, captured = _run_file_with_mocked_proc(script)
 
     assert captured["cmd"] == [sys.executable, "-u", str(script.resolve())]
+
+
+# (k2a) `args` trail the script path, so the child reads them as sys.argv[1:].
+def test_run_cpsat_python_file_appends_args_after_script_path(tmp_path: Path) -> None:
+    script = tmp_path / "model.py"
+    script.write_text("print('x')", encoding="utf-8")
+
+    _, captured = _run_file_with_mocked_proc(script, args=["data_ft10.json"])
+
+    assert captured["cmd"] == [sys.executable, "-u", str(script.resolve()), "data_ft10.json"]
 
 
 # (k3) tracker is registered then unregistered on the file path too.

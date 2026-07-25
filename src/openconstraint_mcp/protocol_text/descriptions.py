@@ -754,6 +754,15 @@ _RUN_CPSAT_PYTHON_FILE_MID = (
     "from the server's own launch environment. "
 )
 
+_RUN_CPSAT_PYTHON_FILE_ARGS = (
+    "Optional `args` (a list of strings) is appended after the script path, so "
+    "the script reads it as `sys.argv[1:]` — pass it for a script that takes its "
+    "data file or a flag on the command line (e.g. `args=[\"data_ft10.json\"]` "
+    "runs an `examples/job_shop/model.py`-style script against that instance "
+    "instead of its hardcoded default, with no edit to the source). Omitting it "
+    "runs the script with no arguments. "
+)
+
 _RUN_CPSAT_PYTHON_FILE_CHECKED_REPLAY_FULL = (
     "This tool has no checker "
     "parameter: replaying a `checked`-level save this way only re-verifies at "
@@ -769,6 +778,7 @@ RUN_CPSAT_PYTHON_FILE_DESCRIPTION = (
     + _RUN_CPSAT_PYTHON_FILE_PROTOCOLS_FULL
     + "`seed`/`config`. "
     + _RUN_CPSAT_PYTHON_FILE_MID
+    + _RUN_CPSAT_PYTHON_FILE_ARGS
     + _RUN_CPSAT_PYTHON_FILE_CHECKED_REPLAY_FULL
     + _CPSAT_CHILD_POSTURE
 )
@@ -776,6 +786,7 @@ RUN_CPSAT_PYTHON_FILE_DESCRIPTION_CORE = (
     _RUN_CPSAT_PYTHON_FILE_HEAD
     + _RUN_CPSAT_PYTHON_FILE_PROTOCOLS_CORE
     + _RUN_CPSAT_PYTHON_FILE_MID
+    + _RUN_CPSAT_PYTHON_FILE_ARGS
     + _CPSAT_CHILD_POSTURE
 )
 
@@ -1043,6 +1054,11 @@ SUBMIT_CPSAT_PYTHON_FILE_JOB_DESCRIPTION = (
     "Same output contract as `run_cpsat_python_file`; same admission bounds, "
     "polling (`get_cpsat_python_job`), and cancel (`cancel_cpsat_python_job`) as "
     "`submit_cpsat_python_job` — the `job_id` is kind-agnostic. "
+    "Optional `args` (a list of strings) is appended after the script path, so "
+    "the script reads it as `sys.argv[1:]` — pass it for a script that takes its "
+    "data file or a flag on the command line, exactly as with "
+    "`run_cpsat_python_file`. It is recorded at admission, so the job runs the "
+    "values supplied on submit even while it waits in the queue. "
     + _CPSAT_JOB_CHECKER_NOTE
     + _REGISTRY_NOTE
     + " "

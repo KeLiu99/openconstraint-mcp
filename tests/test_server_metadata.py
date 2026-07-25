@@ -336,6 +336,17 @@ def test_every_problem_parameter_accepts_a_json_object() -> None:
 
 
 @pytest.mark.asyncio
+async def test_cpsat_file_tools_advertise_an_args_parameter() -> None:
+    # Both file-based CP-SAT surfaces must publish `args`, otherwise a client
+    # cannot pass a script its data file without editing the script's source.
+    tools = await _tools_by_name("full")
+    for name in ("run_cpsat_python_file", "submit_cpsat_python_file_job"):
+        assert "args" in tools[name].inputSchema.get("properties", {}), (
+            f"{name} does not advertise `args`"
+        )
+
+
+@pytest.mark.asyncio
 async def test_core_profile_registers_no_prompts() -> None:
     prompts = await create_mcp_server("core").list_prompts()
     assert prompts == []
