@@ -121,6 +121,12 @@ After installing the package above:
    implicit dependency installs or network access on Codex startup; run
    `uv sync --all-groups` first if the server is not available.
 
+Once connected, the server's MCP `instructions` tell the client to route constraint
+and optimization tasks here before running solver code directly — no client-side
+setup (prompt files, `AGENTS.md`/`CLAUDE.md` entries) needed beyond the connection
+above. Tool selection stays host/model-controlled, so this improves routing but
+doesn't guarantee the client calls a tool.
+
 ## CLI
 
 The package exposes five commands:

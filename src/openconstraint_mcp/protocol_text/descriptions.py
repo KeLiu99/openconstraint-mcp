@@ -95,11 +95,22 @@ def _job_result_contract(error_verdict: str) -> str:
     )
 
 
+_ROUTING_PARAGRAPH = (
+    "For constraint programming or discrete optimization (scheduling, "
+    "rostering, assignment, routing, knapsack, allocation, bin-packing, or "
+    "model validation), use this MCP server before running solver code "
+    "directly."
+)
+
 MCP_SERVER_INSTRUCTIONS = (
-    "Use this MCP server for local constraint programming and optimization: "
-    "scheduling, rostering, knapsack, allocation, assignment, routing, "
-    "bin-packing, SAT/UNSAT analysis, model validation, and solver "
-    "statistics.\n"
+    _ROUTING_PARAGRAPH
+    + "\n"
+    "\n"
+    "POSTURE: MiniZinc tools use the managed local MiniZinc runtime; never a "
+    "remote solver or a bare PATH minizinc. The CP-SAT Python tools execute "
+    "user-provided Python locally in an UNSANDBOXED child process — the "
+    "server wrapper makes no network calls, but the executed child is "
+    "arbitrary code.\n"
     "\n"
     "BACKENDS — two equal backends; pick by problem shape:\n"
     "- OR-Tools CP-SAT Python: zero-install (no managed runtime needed), "
@@ -149,13 +160,7 @@ MCP_SERVER_INSTRUCTIONS = (
     "feedback while running — MCP progress notifications when the request "
     "carries `_meta.progressToken`, plus info-level log notifications. These "
     "are stage markers, not a completion percentage, so never render a "
-    "percent bar.\n"
-    "\n"
-    "POSTURE: MiniZinc tools use the managed local MiniZinc runtime; never a "
-    "remote solver or a bare PATH minizinc. The CP-SAT Python tools execute "
-    "user-provided Python locally in an UNSANDBOXED child process — the "
-    "server wrapper makes no network calls, but the executed child is "
-    "arbitrary code."
+    "percent bar."
 )
 
 # Core-profile server instructions: the default `stdio` toolset advertises only
@@ -164,9 +169,12 @@ MCP_SERVER_INSTRUCTIONS = (
 # full-only tool or prompt — the metadata-budget test cross-checks this text
 # against the same forbidden set it scans the core tool payload with.
 MCP_SERVER_INSTRUCTIONS_CORE = (
-    "Use this MCP server for local constraint programming and optimization: "
-    "scheduling, rostering, knapsack, allocation, assignment, routing, "
-    "bin-packing, model validation, and solving.\n"
+    _ROUTING_PARAGRAPH
+    + "\n"
+    "\n"
+    "This is the default core toolset. Launch with `--toolset full` for model "
+    "inspection, unsat-core diagnostics, jobs, portfolios, experiments, "
+    "verified saving, and tabular I/O.\n"
     "\n"
     "BACKENDS — two equal backends; pick by problem shape:\n"
     "- OR-Tools CP-SAT Python: zero-install (no managed runtime needed), "
@@ -198,12 +206,7 @@ MCP_SERVER_INSTRUCTIONS_CORE = (
     "remote solver or a bare PATH minizinc. The CP-SAT Python tools execute "
     "user-provided Python locally in an UNSANDBOXED child process — the "
     "server wrapper makes no network calls, but the executed child is "
-    "arbitrary code.\n"
-    "\n"
-    "This is the default core toolset; advanced capabilities (model interface "
-    "inspection, unsatisfiable-core diagnostics, background jobs, solver "
-    "portfolios, explicit experiments, verified result saving, and tabular "
-    "data I/O) are available by launching the server with `--toolset full`."
+    "arbitrary code."
 )
 
 CHECK_RUNTIME_DESCRIPTION = (
