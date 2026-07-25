@@ -204,9 +204,12 @@ class SaveVerifiedPythonResult(BaseModel):
     """Outcome of a save_verified_cpsat_python request.
 
     ``saved`` is computed from ``reason``: True iff ``reason`` is None and
-    ``target_dir`` is set. ``verification_level`` is the highest gate that
-    passed — combine with ``saved`` to distinguish a successful save from a
-    failed gate at the same level.
+    ``target_dir`` is set. It reports PERSISTENCE only, never the verdict — a
+    passing ``verify_only`` run deliberately returns ``reason=None`` with
+    ``saved=False``. The verdict is ``reason is None`` (every supplied gate
+    passed) plus the per-gate fields — ``reported_passed``,
+    ``expectation_passed``, ``checker`` — and ``verification_level``, the
+    highest gate that passed.
 
     Gate short-circuit order: reported → expectation → checker. Every gate
     downstream of the first failure carries its None/False default.

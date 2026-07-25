@@ -1092,7 +1092,7 @@ server runs it in a **local child process**.
   level only — see [Reproducing a saved CP-SAT
   artifact](#reproducing-a-saved-cp-sat-artifact) for full checked replay.
 
-- **`save_verified_cpsat_python(source, target_dir, …)`** — re-run `source`
+- **`save_verified_cpsat_python(source, …)`** — re-run `source`
   and persist it only when all supplied save gates pass. Gates run in order
   and short-circuit on the first failure:
 
@@ -1128,13 +1128,24 @@ server runs it in a **local child process**.
   the call happened to be written.
 
   `target_dir` must be an explicit absolute local path; the server never
-  opens a file dialog. Fixed filenames: `model.py` (always); `problem.txt`
+  opens a file dialog. It is required for a save but **not** for
+  `verify_only=true`, which re-evaluates the gates and persists nothing —
+  useful while iterating on a checker or an expectation, instead of writing
+  to a throwaway directory. Verify-only runs the *same* solver child and the
+  *same* gates in the *same* order; it skips only save-target validation and
+  the persistent writes (`target_dir` and `overwrite` are ignored when
+  supplied). A passing verify-only run returns `reason: null` with
+  `saved: false`, `target_dir: null`, and no `files`; a failing one is
+  identical to a failed save. Fixed filenames: `model.py` (always); `problem.txt`
   when `problem` is supplied; `checker.py` and `solution.json` when a checker
   is supplied; `.openconstraint-model.json` (always, the manifest). Overwrite
   is marker-gated (prior-save manifest required,
   `overwrite=true` set, no untracked files). Returns
   `SaveVerifiedPythonResult` with:
-  - `saved: bool` — computed from whether all gates passed
+  - `saved: bool` — **persistence only, never the verdict**: true iff
+    `reason` is null *and* something was written. A passing `verify_only`
+    run reports `saved: false`. The verdict is `reason: null` plus the
+    per-gate fields below
   - `verification_level: "none" | "reported" | "expectation" | "checked"` —
     the highest gate that passed
   - `reported_passed`, `expectation_passed` (bool or null), `checker`
@@ -1311,9 +1322,12 @@ folder, and its manifest is a JSON file a client can read directly.
 replaying a `checked`-level save this way only re-verifies at the `reported`
 level. For full checked replay — re-running every original gate, including
 the checker with the manifest's `verification.checker_timeout_ms` — call
-`save_verified_cpsat_python` again with the saved source (read from
-`model.py`), checker (read from `checker.py`), `seed`, `config`, a scratch
-`target_dir`, and — whenever the saved directory or manifest has them — the
+`save_verified_cpsat_python` again with `verify_only=true`. That mode re-runs
+every original gate and needs no `target_dir` at all — and ignores one if you
+pass it, so to persist the replay itself, omit `verify_only` (or pass
+`verify_only=false`) and supply a real `target_dir`. Along with it, pass the
+saved source (read from `model.py`), checker (read from `checker.py`), `seed`,
+`config`, and — whenever the saved directory or manifest has them — the
 original `problem` (read verbatim from `problem.txt`), `expectation`
 (rebuilt from `verification.expectation.objective_sense` /
 `objective_threshold`), and `timeout_ms` (from `verification.timeout_ms`).

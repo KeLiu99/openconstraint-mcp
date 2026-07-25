@@ -1318,3 +1318,111 @@ def test_save_rejects_experiment_result_non_winner_accepted_attempt_seed_mismatc
             _SCRIPT, target_dir=tmp_path / "x", experiment_result=experiment_result
         )
     assert called == []
+
+
+# --- verify_only mode ---------------------------------------------------------
+
+
+def _forbid_target_io(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Make any save-target validation or commit an immediate test failure."""
+
+    def _no_validate(*args: object, **kwargs: object) -> Path:
+        raise AssertionError("validate_save_target must not run in verify_only mode")
+
+    def _no_commit(*args: object, **kwargs: object) -> object:
+        raise AssertionError("commit_staged_dir must not run in verify_only mode")
+
+    monkeypatch.setattr("openconstraint_mcp.pyexec.save.validate_save_target", _no_validate)
+    monkeypatch.setattr("openconstraint_mcp.pyexec.save.commit_staged_dir", _no_commit)
+
+
+def test_verify_only_without_target_dir_returns_passing_checked_verdict(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _patch_executor(monkeypatch, _OPTIMAL_RESULT)
+    _patch_checker(monkeypatch, _accepted_report())
+
+    result = save_verified_cpsat_python(
+        _SCRIPT,
+        verify_only=True,
+        expectation=CpsatExpectation(objective_sense="maximize", objective_threshold=2.0),
+        checker=_CHECKER_SOURCE,
+    )
+
+    assert result.reason is None
+    assert result.verification_level == "checked"
+    assert result.reported_passed is True
+    assert result.expectation_passed is True
+    assert result.checker is not None and result.checker.status == "accepted"
+    assert result.saved is False
+    assert result.target_dir is None
+    assert result.files == []
+
+
+def test_verify_only_never_validates_target_or_commits(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _patch_executor(monkeypatch, _OPTIMAL_RESULT)
+    _patch_checker(monkeypatch, _accepted_report())
+    _forbid_target_io(monkeypatch)
+
+    result = save_verified_cpsat_python(_SCRIPT, verify_only=True, checker=_CHECKER_SOURCE)
+
+    assert result.reason is None
+
+
+def test_verify_only_ignores_a_target_dir_that_would_fail_validation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Deliberately UNSTUBBED: the real validate_save_target rejects a relative
+    # path, so a passing verdict here proves the validator was never reached.
+    _patch_executor(monkeypatch, _OPTIMAL_RESULT)
+
+    result = save_verified_cpsat_python(_SCRIPT, target_dir=Path("relative/path"), verify_only=True)
+
+    assert result.reason is None
+    assert result.verification_level == "reported"
+    assert result.saved is False
+
+
+def test_verify_only_writes_nothing_under_a_real_target_dir(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Filesystem-level no-write proof, independent of any monkeypatched call site."""
+    _patch_executor(monkeypatch, _OPTIMAL_RESULT)
+    _patch_checker(monkeypatch, _accepted_report())
+
+    result = save_verified_cpsat_python(
+        _SCRIPT,
+        target_dir=tmp_path / "out",
+        verify_only=True,
+        checker=_CHECKER_SOURCE,
+    )
+
+    assert result.reason is None
+    assert list(tmp_path.iterdir()) == []
+
+
+def test_save_without_target_dir_raises_before_the_solver_runs(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    called = _patch_executor_counting(monkeypatch, _OPTIMAL_RESULT)
+
+    with pytest.raises(ValueError, match="target_dir is required unless verify_only"):
+        save_verified_cpsat_python(_SCRIPT)
+
+    assert called == [], "executor must not be called before the target check"
+
+
+def test_missing_target_dir_is_checked_after_experiment_consistency(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The target check sits behind all three eager validations, not in front of them."""
+    _patch_executor(monkeypatch, _OPTIMAL_RESULT)
+    experiment_result = _experiment_result(
+        winning_attempt=_winning_attempt_row(accepted=False), status="no_winner"
+    )
+
+    with pytest.raises(ValueError, match="status must be 'winner'"):
+        save_verified_cpsat_python(_SCRIPT, experiment_result=experiment_result)

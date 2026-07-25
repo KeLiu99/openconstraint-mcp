@@ -342,13 +342,14 @@ def _write_staged_artifacts(
 def save_verified_cpsat_python(
     source: str,
     *,
-    target_dir: Path,
+    target_dir: Path | None = None,
     problem: str | None = None,
     expectation: CpsatExpectation | None = None,
     checker: str | None = None,
     checker_timeout_ms: int | None = None,
     timeout_ms: int = DEFAULT_PYEXEC_TIMEOUT_MS,
     overwrite: bool = False,
+    verify_only: bool = False,
     seed: int | None = None,
     config: dict[str, Any] | None = None,
     experiment_result: CpsatPythonExperimentResult | None = None,
@@ -358,9 +359,18 @@ def save_verified_cpsat_python(
 
     Gates run in order (reported → expectation → checker) and short-circuit on
     the first failure. Writing nothing on a non-passing run is guaranteed — the
-    commit never starts. Returns a ``SaveVerifiedPythonResult`` with ``saved=True``
-    and files on disk, or ``saved=False`` with a ``reason`` and the
-    ``verification_level`` of the highest gate that actually passed.
+    commit never starts. Read the returned ``SaveVerifiedPythonResult`` as two
+    independent fields: ``saved`` reports PERSISTENCE only, while the verdict is
+    ``reason`` (None iff every supplied gate passed) plus the per-gate fields and
+    the ``verification_level`` of the highest gate that actually passed.
+
+    ``verify_only=True`` runs the same solver and the same gates in the same
+    order, but skips save-target validation and every persistent write:
+    ``target_dir`` is then not required, and is ignored along with ``overwrite``
+    when supplied. A passing verify-only run returns ``reason=None`` with
+    ``saved=False``, ``target_dir=None``, and no ``files``; a failing one returns
+    through the ordinary gate-failure path unchanged. With ``verify_only=False``,
+    omitting ``target_dir`` raises ``ValueError`` before any child process starts.
 
     When ``seed`` is supplied, the re-run sets ``OPENCONSTRAINT_MCP_CPSAT_SEED`` so
     a cooperating script replays that seed, and the manifest records it. This is a
@@ -398,7 +408,14 @@ def save_verified_cpsat_python(
         default_timeout_ms=timeout_ms,
     )
 
-    target = validate_save_target(target_dir, overwrite=overwrite)
+    target: Path | None = None
+    if not verify_only:
+        if target_dir is None:
+            raise ValueError(
+                "target_dir is required unless verify_only=True (a save must know where "
+                "to persist the verified artifacts)"
+            )
+        target = validate_save_target(target_dir, overwrite=overwrite)
     with replay_env_scope(seed=seed, config=normalized_config) as replay_env:
         run_result = run_cpsat_python(
             source, timeout_ms=timeout_ms, tracker=tracker, env=replay_env
@@ -458,7 +475,7 @@ def save_verified_cpsat_python(
             )
         checker_report = _report
 
-    # --- All gates passed: commit ---
+    # --- All gates passed: commit, unless this was verify-only ---
     final_level: CpsatVerificationLevel
     if checker is not None:
         final_level = "checked"
@@ -467,28 +484,34 @@ def save_verified_cpsat_python(
     else:
         final_level = "reported"
 
-    def _writer(staging: Path) -> list[SavedModelArtifact]:
-        return _write_staged_artifacts(
-            staging,
-            source=source,
-            problem=problem,
-            checker=checker,
-            run_result=run_result,
-            verification_level=final_level,
-            expectation=expectation,
-            expectation_passed=exp_passed,
-            checker_report=checker_report,
-            seed=seed,
-            config=normalized_config,
-            experiment_result=experiment_result,
-            timeout_ms=timeout_ms,
-            checker_timeout_ms=checker_timeout_ms,
-        )
+    # ``target`` is None exactly when verify_only is set; checking it (not the
+    # flag) is what narrows the Path | None for commit_staged_dir, and keeps the
+    # whole persistence path — writer included — unbuilt on a verify-only run.
+    files: list[SavedModelArtifact] = []
+    if target is not None:
 
-    files, _ = commit_staged_dir(target, overwrite=overwrite, write_files=_writer)
+        def _writer(staging: Path) -> list[SavedModelArtifact]:
+            return _write_staged_artifacts(
+                staging,
+                source=source,
+                problem=problem,
+                checker=checker,
+                run_result=run_result,
+                verification_level=final_level,
+                expectation=expectation,
+                expectation_passed=exp_passed,
+                checker_report=checker_report,
+                seed=seed,
+                config=normalized_config,
+                experiment_result=experiment_result,
+                timeout_ms=timeout_ms,
+                checker_timeout_ms=checker_timeout_ms,
+            )
+
+        files, _ = commit_staged_dir(target, overwrite=overwrite, write_files=_writer)
     return SaveVerifiedPythonResult(
         status=run_result.status,
-        target_dir=str(target),
+        target_dir=str(target) if target is not None else None,
         reason=None,
         solution=run_result.solution,
         objective=run_result.objective,
