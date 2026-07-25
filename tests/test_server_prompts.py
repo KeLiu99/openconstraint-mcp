@@ -7,6 +7,7 @@ from openconstraint_mcp.protocol_text.descriptions import (
     CPSAT_PYTHON_SOLUTION_WORKFLOW_PROMPT_DESCRIPTION,
     LIST_AVAILABLE_SOLVERS_DESCRIPTION,
     MCP_SERVER_INSTRUCTIONS,
+    MCP_SERVER_INSTRUCTIONS_CORE,
     MINIZINC_SOLUTION_WORKFLOW_PROMPT_DESCRIPTION,
     RUN_CPSAT_PYTHON_DESCRIPTION,
     SOLVE_MINIZINC_FILES_DESCRIPTION,
@@ -218,6 +219,30 @@ def test_backend_routing_presents_minizinc_and_cpsat_as_peers() -> None:
     # Each prompt description names the other backend's prompt as its peer.
     assert "cpsat_python_solution_workflow" in MINIZINC_SOLUTION_WORKFLOW_PROMPT_DESCRIPTION
     assert "minizinc_solution_workflow" in CPSAT_PYTHON_SOLUTION_WORKFLOW_PROMPT_DESCRIPTION
+
+
+def test_both_instruction_variants_open_with_the_routing_paragraph() -> None:
+    # The routing paragraph must survive client-side truncation, so it has to
+    # be the very first thing in both variants, not merely present somewhere.
+    routing_paragraph = (
+        "For constraint programming or discrete optimization (scheduling, "
+        "rostering, assignment, routing, knapsack, allocation, bin-packing, or "
+        "model validation), use this MCP server before running solver code "
+        "directly."
+    )
+    for instructions in (MCP_SERVER_INSTRUCTIONS, MCP_SERVER_INSTRUCTIONS_CORE):
+        assert instructions.startswith(routing_paragraph)
+
+
+def test_both_instruction_variants_retain_safety_disclosures() -> None:
+    # These disclosures must reach the client even under truncation pressure,
+    # so both the full and core profiles carry them, not just one.
+    for instructions in (MCP_SERVER_INSTRUCTIONS, MCP_SERVER_INSTRUCTIONS_CORE):
+        assert "managed local MiniZinc runtime" in instructions
+        assert "bare PATH minizinc" in instructions
+        assert "UNSANDBOXED" in instructions
+        assert "server wrapper makes no network calls" in instructions
+        assert "arbitrary code" in instructions
 
 
 def test_mcp_server_instructions_route_num_solutions_and_multiple_optima() -> None:

@@ -10,6 +10,10 @@ import pytest
 from pydantic import ValidationError
 
 from openconstraint_mcp.jobs.registry import JobRegistry
+from openconstraint_mcp.protocol_text.descriptions import (
+    MCP_SERVER_INSTRUCTIONS,
+    MCP_SERVER_INSTRUCTIONS_CORE,
+)
 from openconstraint_mcp.pyexec.jobs import CpsatJobRegistry
 from openconstraint_mcp.server import (
     _homepage_url,
@@ -240,6 +244,20 @@ FULL_PROMPT_NAMES = {
 # raise: reduce descriptions or reconsider the core inventory instead.
 CORE_METADATA_BUDGET_BYTES = 40_000
 
+# A budget failure here is a REVIEW trigger, not a cap to silently raise: the
+# routing/safety paragraphs must survive client-side instructions truncation,
+# so growth should shrink other paragraphs or be reconsidered, not just raise
+# this number.
+CORE_INSTRUCTIONS_BUDGET_BYTES = 2_048
+
+# A budget failure here is a REVIEW trigger, not a cap to silently raise:
+# Codex's documented guidance is that only a bounded prefix of `instructions`
+# is guaranteed to reach the model self-contained before truncation may cut
+# it off, so the routing paragraph plus the paragraph after it must fit this
+# head. Measured in UTF-8 bytes, the conservative axis — see
+# CORE_INSTRUCTIONS_BUDGET_BYTES's rationale above.
+TRUNCATION_HEAD_BUDGET_BYTES = 512
+
 
 def _serialize_tools(tools: list[Any]) -> str:
     """Deterministic compact serialization of a complete advertised tool list.
@@ -387,6 +405,42 @@ async def test_core_metadata_is_within_budget() -> None:
     total = len(_serialize_tools(tools).encode("utf-8"))
     assert total <= CORE_METADATA_BUDGET_BYTES, (
         f"core metadata is {total} bytes, over the {CORE_METADATA_BUDGET_BYTES} budget"
+    )
+
+
+def test_core_instructions_toolset_hint_is_paragraph_two_within_head_budget() -> None:
+    # The `--toolset full` hint must be paragraph two, immediately after
+    # routing, so it survives truncation alongside the routing paragraph.
+    # (The routing paragraph itself is covered by
+    # test_both_instruction_variants_open_with_the_routing_paragraph in
+    # test_server_prompts.py — not duplicated here.)
+    paragraphs = MCP_SERVER_INSTRUCTIONS_CORE.split("\n\n")
+    assert paragraphs[1].startswith("This is the default core toolset.")
+    first_two = "\n\n".join(paragraphs[:2])
+    head_bytes = len(first_two.encode("utf-8"))
+    assert head_bytes <= TRUNCATION_HEAD_BUDGET_BYTES, (
+        f"core instructions head is {head_bytes} bytes, over the "
+        f"{TRUNCATION_HEAD_BUDGET_BYTES} truncation-head budget"
+    )
+
+
+def test_core_instructions_are_within_budget() -> None:
+    total = len(MCP_SERVER_INSTRUCTIONS_CORE.encode("utf-8"))
+    assert total <= CORE_INSTRUCTIONS_BUDGET_BYTES, (
+        f"core instructions are {total} bytes, over the {CORE_INSTRUCTIONS_BUDGET_BYTES} budget"
+    )
+
+
+def test_full_instructions_lead_with_routing_then_posture() -> None:
+    # POSTURE (the safety disclosure) must be paragraph two in the full
+    # profile, so it survives truncation alongside the routing paragraph.
+    paragraphs = MCP_SERVER_INSTRUCTIONS.split("\n\n")
+    assert paragraphs[1].startswith("POSTURE")
+    first_two = "\n\n".join(paragraphs[:2])
+    head_bytes = len(first_two.encode("utf-8"))
+    assert head_bytes <= TRUNCATION_HEAD_BUDGET_BYTES, (
+        f"full instructions head is {head_bytes} bytes, over the "
+        f"{TRUNCATION_HEAD_BUDGET_BYTES} truncation-head budget"
     )
 
 
