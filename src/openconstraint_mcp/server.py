@@ -67,6 +67,7 @@ from .protocol_text.descriptions import (
     RUN_CPSAT_PYTHON_FILE_DESCRIPTION_CORE,
     SAVE_VERIFIED_CPSAT_PYTHON_DESCRIPTION,
     SAVE_VERIFIED_MINIZINC_MODEL_DESCRIPTION,
+    SOLVE_CONSTRAINT_PROBLEM_PROMPT_DESCRIPTION,
     SOLVE_MINIZINC_FILES_DESCRIPTION,
     SOLVE_MINIZINC_MODEL_DESCRIPTION,
     SOLVE_MINIZINC_MODEL_DESCRIPTION_CORE,
@@ -78,6 +79,7 @@ from .protocol_text.descriptions import (
 )
 from .protocol_text.prompts import (
     AUTO_TUNE_CONSTRAINT_PROBLEM_PROMPT,
+    MINIZINC_SOLUTION_WORKFLOW_PROMPT,
     SOLVE_CONSTRAINT_PROBLEM_PROMPT,
     SOLVE_CPSAT_PYTHON_PROMPT,
 )
@@ -130,9 +132,10 @@ from .shared.tabular_io import DEFAULT_MAX_ROWS, read_tabular_data, write_tabula
 _PACKAGE_NAME = "openconstraint-mcp"
 
 # The advertised MCP toolset. `full` (the internal default) registers every tool
-# and prompt; `core` (the user-facing `stdio` default) advertises only eight core
-# tools and no prompts, for a materially smaller `tools/list` payload and a less
-# ambiguous default choice set.
+# and all four prompts; `core` (the user-facing `stdio` default) advertises only
+# eight core tools and the one backend-neutral `solve_constraint_problem`
+# prompt, for a materially smaller `tools/list` payload and a less ambiguous
+# default choice set.
 Toolset = Literal["core", "full"]
 _VALID_TOOLSETS: tuple[Toolset, ...] = ("core", "full")
 
@@ -518,10 +521,12 @@ def create_mcp_server(toolset: str = "full") -> FastMCP:
     """Build a fresh FastMCP server for the given ``toolset``.
 
     ``full`` (the default, for internal callers and existing tests) registers
-    every tool and all three prompts. ``core`` registers the same surface, then
-    removes every tool in ``_FULL_ONLY_TOOL_NAMES`` and skips the prompts, so the
-    advertised ``tools/list`` payload is the eight core tools only. The user-
-    facing ``stdio`` default is ``core``, enforced by ``run_stdio`` and the CLI.
+    every tool and all four prompts. ``core`` registers the same surface, then
+    removes every tool in ``_FULL_ONLY_TOOL_NAMES`` and skips the three detailed
+    backend-specific prompts, so the advertised ``tools/list`` payload is the
+    eight core tools only and the advertised ``prompts/list`` payload is
+    ``solve_constraint_problem`` only. The user-facing ``stdio`` default is
+    ``core``, enforced by ``run_stdio`` and the CLI.
     An unknown value is rejected before any server object is built.
     """
     if toolset not in _VALID_TOOLSETS:
@@ -1159,10 +1164,21 @@ def create_mcp_server(toolset: str = "full") -> FastMCP:
             )
         )
 
+    # Registered ABOVE the core early return, so both profiles expose it: this
+    # is the one backend-neutral prompt, and it names core tools only.
+    @mcp.prompt(
+        name="solve_constraint_problem",
+        description=SOLVE_CONSTRAINT_PROBLEM_PROMPT_DESCRIPTION,
+    )
+    def solve_constraint_problem(problem: str) -> str:
+        return SOLVE_CONSTRAINT_PROBLEM_PROMPT.format(problem=problem)
+
     if is_core:
         # Finalize the core profile before any client connects: drop every
-        # full-only tool and register no prompts (they reference save,
-        # portfolio, experiment, inspection, and job tools core hides).
+        # full-only tool and register only the backend-neutral
+        # `solve_constraint_problem` prompt above. The three detailed prompts
+        # below stay full-only because they reference save, portfolio,
+        # experiment, inspection, and job tools core hides.
         # remove_tool() raises ToolError on an unknown name, so a rename or
         # deletion upstream breaks core construction loudly instead of silently
         # drifting.
@@ -1175,7 +1191,7 @@ def create_mcp_server(toolset: str = "full") -> FastMCP:
         description=MINIZINC_SOLUTION_WORKFLOW_PROMPT_DESCRIPTION,
     )
     def minizinc_solution_workflow(problem: str) -> str:
-        return SOLVE_CONSTRAINT_PROBLEM_PROMPT.format(problem=problem)
+        return MINIZINC_SOLUTION_WORKFLOW_PROMPT.format(problem=problem)
 
     @mcp.prompt(
         name="cpsat_python_solution_workflow",
@@ -1198,7 +1214,7 @@ def run_stdio(toolset: str = "core") -> None:
     """Create the MCP server and run it over stdio for CLI/client use.
 
     Defaults to the ``core`` profile: the user-facing ``stdio`` entry point
-    advertises the eight core tools only. Pass ``full`` for the complete
-    tool and three-prompt surface.
+    advertises the eight core tools and the ``solve_constraint_problem`` prompt
+    only. Pass ``full`` for the complete tool and four-prompt surface.
     """
     create_mcp_server(toolset).run(transport="stdio")

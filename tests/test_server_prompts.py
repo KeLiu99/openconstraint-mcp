@@ -14,7 +14,7 @@ from openconstraint_mcp.protocol_text.descriptions import (
     SOLVE_MINIZINC_MODEL_DESCRIPTION,
 )
 from openconstraint_mcp.protocol_text.prompts import (
-    SOLVE_CONSTRAINT_PROBLEM_PROMPT,
+    MINIZINC_SOLUTION_WORKFLOW_PROMPT,
     SOLVE_CPSAT_PYTHON_PROMPT,
 )
 
@@ -134,6 +134,86 @@ async def _get_prompt_text(prompt_name: str, arguments: dict[str, str]) -> str:
         message.content.text  # type: ignore[union-attr]
         for message in result.messages
     )
+
+
+async def _get_core_prompt_text(prompt_name: str, arguments: dict[str, str]) -> str:
+    """Render a prompt through the CORE profile — the user-facing stdio default."""
+    mcp = create_mcp_server("core")
+    result = await mcp.get_prompt(prompt_name, arguments)
+    return "\n".join(
+        message.content.text  # type: ignore[union-attr]
+        for message in result.messages
+    )
+
+
+# --- solve_constraint_problem ----------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_solve_constraint_problem_prompt_substitutes_the_user_problem() -> None:
+    text = await _get_core_prompt_text("solve_constraint_problem", {"problem": SAMPLE_PROBLEM})
+
+    assert SAMPLE_PROBLEM in text
+
+
+@pytest.mark.asyncio
+async def test_solve_constraint_problem_prompt_passes_through_brace_input() -> None:
+    # The body is `str.format`ted with the user's text, so a problem containing
+    # braces must be substituted literally rather than read as a field.
+    problem = 'Pack items {a, b} into bins of capacity {"max": 10}.'
+    text = await _get_core_prompt_text("solve_constraint_problem", {"problem": problem})
+
+    assert problem in text
+
+
+@pytest.mark.asyncio
+async def test_solve_constraint_problem_prompt_requires_an_explicit_backend_choice() -> None:
+    text = await _get_core_prompt_text("solve_constraint_problem", {"problem": SAMPLE_PROBLEM})
+    normalized = " ".join(text.split())
+
+    assert "Choose a backend by problem shape, and say which one you chose and why" in normalized
+    assert "MiniZinc" in normalized
+    assert "OR-Tools CP-SAT Python" in normalized
+
+
+@pytest.mark.asyncio
+async def test_solve_constraint_problem_prompt_orders_minizinc_check_before_solve() -> None:
+    text = await _get_core_prompt_text("solve_constraint_problem", {"problem": SAMPLE_PROBLEM})
+    normalized = " ".join(text.split())
+
+    assert normalized.index("check_minizinc_model") < normalized.index("solve_minizinc_model")
+    assert 'never solve before it returns `"ok"`' in normalized
+
+
+@pytest.mark.asyncio
+async def test_solve_constraint_problem_prompt_names_the_cpsat_execution_path() -> None:
+    text = await _get_core_prompt_text("solve_constraint_problem", {"problem": SAMPLE_PROBLEM})
+    normalized = " ".join(text.split())
+
+    assert "`run_cpsat_python(source=<complete script>, timeout_ms=<milliseconds>)`" in normalized
+
+
+@pytest.mark.asyncio
+async def test_solve_constraint_problem_prompt_routes_existing_artifacts_to_file_tools() -> None:
+    text = await _get_core_prompt_text("solve_constraint_problem", {"problem": SAMPLE_PROBLEM})
+
+    for tool in ("check_minizinc_files", "solve_minizinc_files", "run_cpsat_python_file"):
+        assert tool in text, f"prompt does not route an existing artifact to {tool}"
+
+
+@pytest.mark.asyncio
+async def test_solve_constraint_problem_prompt_carries_the_cpsat_generation_rule() -> None:
+    text = await _get_core_prompt_text("solve_constraint_problem", {"problem": SAMPLE_PROBLEM})
+    lower = " ".join(text.split()).lower()
+
+    # Same mandatory rule as the cpsat_python_solution_workflow prompt: the
+    # server cannot enforce it, so the client-facing prompt must state it.
+    assert "no network access, no file writes or deletes" in lower
+    assert "no subprocess spawning" in lower
+    assert "unless the user explicitly requested it" in lower
+
+
+# --- minizinc_solution_workflow --------------------------------------------
 
 
 @pytest.mark.asyncio
@@ -1358,7 +1438,7 @@ def test_auto_tune_constraint_problem_named_in_instructions_and_sibling_prompts(
     # without prompt-listing support must still be able to find the auto-tune
     # prompt from the server instructions or either single-backend prompt.
     assert "auto_tune_constraint_problem" in MCP_SERVER_INSTRUCTIONS
-    assert "auto_tune_constraint_problem" in SOLVE_CONSTRAINT_PROBLEM_PROMPT
+    assert "auto_tune_constraint_problem" in MINIZINC_SOLUTION_WORKFLOW_PROMPT
     assert "auto_tune_constraint_problem" in SOLVE_CPSAT_PYTHON_PROMPT
 
     assert "minizinc_solution_workflow" in AUTO_TUNE_CONSTRAINT_PROBLEM_PROMPT_DESCRIPTION
