@@ -627,6 +627,12 @@ def test_cpsat_python_checked_result_rejects_checker_and_skipped_reason_together
         )
 
 
+def test_cpsat_python_checked_result_rejects_neither_checker_nor_skipped_reason() -> None:
+    """This tool always requests a check, so a result with no outcome is malformed."""
+    with pytest.raises(ValidationError, match="requires checker or checker_skipped_reason"):
+        CpsatPythonCheckedResult(**_checked_kwargs())
+
+
 def test_cpsat_python_checked_result_allows_a_skipped_checker() -> None:
     result = CpsatPythonCheckedResult(
         **_checked_kwargs(), checker_skipped_reason="solution is missing or empty"

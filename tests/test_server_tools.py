@@ -3111,7 +3111,7 @@ def _fake_checked_result() -> CpsatPythonCheckedResult:
         timed_out=False,
         truncated=False,
         duration_ms=7,
-        checker=None,
+        checker=_fake_checker_report(),
         checker_skipped_reason=None,
         checker_timeout_ms=30_000,
     )

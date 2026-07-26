@@ -100,8 +100,9 @@ class CpsatPythonCheckedResult(CpsatPythonResult):
     - ``checker`` is the checker's report when the checker ran;
       ``CpsatCheckerReport.status`` is the verdict.
     - ``checker_skipped_reason`` is set only when the checker did NOT run
-      because the run produced no checkable incumbent. Mutually exclusive with
-      ``checker``.
+      because the run produced no checkable incumbent. Exactly one of
+      ``checker``/``checker_skipped_reason`` is set — unlike
+      ``CpsatPythonJobStatus``, where neither is set if no checker was supplied.
     - ``checker_timeout_ms`` echoes the effective checker cap (the explicit
       value, else ``timeout_ms``); it is always set, since this tool always
       requests a check.
@@ -123,6 +124,12 @@ class CpsatPythonCheckedResult(CpsatPythonResult):
             raise ValueError(
                 "CpsatPythonCheckedResult checker and checker_skipped_reason are mutually "
                 "exclusive (a checker either ran or was skipped, never both)"
+            )
+        if self.checker is None and self.checker_skipped_reason is None:
+            raise ValueError(
+                "CpsatPythonCheckedResult requires checker or checker_skipped_reason "
+                "(this tool always requests a check, so exactly one outcome exists). "
+                "CpsatPythonJobStatus permits neither because a job may supply no checker"
             )
         return self
 
