@@ -4,7 +4,7 @@ import functools
 import inspect
 import os
 import sys
-from collections.abc import AsyncIterator, Awaitable, Callable
+from collections.abc import AsyncGenerator, Awaitable, Callable
 from contextlib import AbstractAsyncContextManager, asynccontextmanager
 from importlib import metadata
 from pathlib import Path
@@ -454,7 +454,7 @@ def _make_lifespan(
     """
 
     @asynccontextmanager
-    async def _lifespan(server: FastMCP[Any]) -> AsyncIterator[None]:
+    async def _lifespan(server: FastMCP[Any]) -> AsyncGenerator[None]:
         _log_boot_diagnostic()
         try:
             yield
