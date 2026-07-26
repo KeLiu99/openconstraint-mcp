@@ -64,7 +64,7 @@ import json
 import math
 import sys
 import tempfile
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Generator
 from contextlib import contextmanager
 from pathlib import Path
 from subprocess import Popen
@@ -205,7 +205,7 @@ def seed_config_env(*, seed: int | None, config_path: Path | None) -> dict[str, 
 @contextmanager
 def replay_env_scope(
     *, seed: int | None, config: dict[str, Any] | None
-) -> Iterator[dict[str, str | None]]:
+) -> Generator[dict[str, str | None]]:
     """Yield the child env overlay for a seed/config replay run.
 
     A non-empty ``config`` is written into a ``tempfile.TemporaryDirectory()``

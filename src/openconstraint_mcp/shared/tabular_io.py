@@ -22,7 +22,7 @@ import os
 import re
 import sys
 import tempfile
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Generator, Iterator
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
@@ -160,7 +160,7 @@ def _csv_records(reader: Any, path: Path) -> Iterator[list[Any]]:
 
 
 @contextmanager
-def _open_csv_rows(path: Path) -> Iterator[Iterator[list[Any]]]:
+def _open_csv_rows(path: Path) -> Generator[Iterator[list[Any]]]:
     """Yield an iterator of CSV records, using one fixed dialect.
 
     Comma-separated, ``"``-quoted, UTF-8 — no dialect sniffing. ``utf-8-sig``
@@ -215,7 +215,7 @@ def _xlsx_records(worksheet: Any, path: Path) -> Iterator[list[Any]]:
 @contextmanager
 def _open_xlsx_rows(
     path: Path, sheet: str | None
-) -> Iterator[tuple[str, list[str], Iterator[list[Any]]]]:
+) -> Generator[tuple[str, list[str], Iterator[list[Any]]]]:
     """Yield ``(sheet_name, available_sheets, rows)`` for one worksheet.
 
     ``data_only=True`` reads a formula cell's CACHED result — the server never

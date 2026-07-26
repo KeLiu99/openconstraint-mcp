@@ -22,7 +22,7 @@ exception to "no global mutable state" as the ``JobRegistry``.
 from __future__ import annotations
 
 import threading
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Generator
 from contextlib import contextmanager
 from subprocess import Popen
 from typing import Any
@@ -67,7 +67,7 @@ class ChildProcessTracker:
             self._handles.discard(proc)
 
     @contextmanager
-    def track(self, proc: Popen[Any]) -> Iterator[None]:
+    def track(self, proc: Popen[Any]) -> Generator[None]:
         """Register ``proc`` for the duration of the ``with`` block.
 
         Unregisters on exit whether the body returns or raises, so a child that
