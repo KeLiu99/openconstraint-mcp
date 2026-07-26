@@ -15,6 +15,7 @@ from openconstraint_mcp.pyexec.core import (
     effective_checker_timeout_ms,
     run_cpsat_python,
     run_cpsat_python_file,
+    run_cpsat_python_file_checked,
     seed_config_env,
     validate_checker_args,
     validate_cpsat_random_seed,
@@ -22,7 +23,11 @@ from openconstraint_mcp.pyexec.core import (
 from openconstraint_mcp.pyexec.core import (
     normalize_objective as _normalize_objective,
 )
-from openconstraint_mcp.schemas.cpsat import CpsatPythonResult
+from openconstraint_mcp.pyexec.diagnostics import (
+    checker_report_diagnostic,
+    cpsat_result_diagnostic,
+)
+from openconstraint_mcp.schemas.cpsat import CpsatCheckerReport, CpsatPythonResult
 from openconstraint_mcp.shared.childrun import MAX_OUTPUT_BYTES
 
 _VALID_SOLUTION = {"x": 3, "y": 7}
@@ -537,27 +542,6 @@ def test_run_cpsat_python_no_on_start_default_is_none() -> None:
     assert result.status == "optimal"
 
 
-def test_validate_script_path_unreadable_raises_value_error(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """An OSError (e.g. unreadable file) is translated to ValueError, not leaked raw.
-
-    So the tool's @_as_mcp_error(ValueError, ...) wrapper turns a mode-000 script
-    into an actionable client message instead of an opaque traceback.
-    """
-    from openconstraint_mcp.pyexec.core import _validate_script_path
-
-    script = tmp_path / "secret.py"
-    script.write_text("print('x')", encoding="utf-8")
-
-    def _boom(*_a: Any, **_k: Any) -> str:
-        raise PermissionError("Permission denied")
-
-    monkeypatch.setattr(Path, "read_text", _boom)
-    with pytest.raises(ValueError, match="not readable"):
-        _validate_script_path(script)
-
-
 def test_run_cpsat_python_file_on_start_called_once(tmp_path: Path) -> None:
     """on_start works on the file-path entry point too."""
     script = tmp_path / "model.py"
@@ -774,3 +758,316 @@ def test_run_cpsat_python_file_forwards_env_overlay(tmp_path: Path) -> None:
 
     assert captured["env"]["OPENCONSTRAINT_MCP_CPSAT_SEED"] == "7"
     assert "PATH" in captured["env"]
+
+
+# --- run_cpsat_python_file_checked -------------------------------------------
+
+
+def _checked_pair(tmp_path: Path) -> tuple[Path, Path]:
+    """Write a valid model script and checker script; return both paths."""
+    script = tmp_path / "model.py"
+    script.write_text("print('ignored by mock')", encoding="utf-8")
+    checker = tmp_path / "checker.py"
+    checker.write_text("print('ignored by mock')", encoding="utf-8")
+    return script, checker
+
+
+def _checked_result(
+    status: str,
+    *,
+    solution: dict | None,
+    timed_out: bool = False,
+) -> CpsatPythonResult:
+    result = CpsatPythonResult(
+        status=status,  # type: ignore[arg-type]
+        solution=solution,
+        objective=10,
+        stdout="",
+        stderr="",
+        return_code=None if timed_out else 0,
+        timed_out=timed_out,
+        truncated=False,
+        duration_ms=5,
+    )
+    result.diagnostic = cpsat_result_diagnostic(result)
+    return result
+
+
+def _checker_report(status: str) -> CpsatCheckerReport:
+    report = CpsatCheckerReport(
+        status=status,  # type: ignore[arg-type]
+        errors=[] if status == "accepted" else ["nope"],
+        stdout="",
+        stderr="",
+        duration_ms=1,
+        timed_out=False,
+        truncated=False,
+    )
+    report.diagnostic = checker_report_diagnostic(report)
+    return report
+
+
+def _patch_checked(
+    monkeypatch: pytest.MonkeyPatch,
+    run_result: CpsatPythonResult,
+    checker_outcome: CpsatCheckerReport | Exception,
+) -> list[dict[str, Any]]:
+    """Stub the model run and the checker run; return the checker call log."""
+    calls: list[dict[str, Any]] = []
+    monkeypatch.setattr(
+        "openconstraint_mcp.pyexec.core.run_cpsat_python_file",
+        lambda script, **kw: run_result,
+    )
+
+    def _fake_run_checker_file(checker: Path, result: Any, **kw: Any) -> CpsatCheckerReport:
+        calls.append({"checker": checker, "result": result, **kw})
+        if isinstance(checker_outcome, Exception):
+            raise checker_outcome
+        return checker_outcome
+
+    monkeypatch.setattr("openconstraint_mcp.pyexec.core.run_checker_file", _fake_run_checker_file)
+    return calls
+
+
+def test_checked_run_forwards_args_and_env_to_the_model_run(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Dropping `args=` or `env=` on the inner call would silently no-op a
+    # seed/config replay while still returning a plausible-looking result.
+    script, checker = _checked_pair(tmp_path)
+    model_kw: dict[str, Any] = {}
+
+    def _fake_run(script_path: Path, **kw: Any) -> CpsatPythonResult:
+        model_kw.update(kw)
+        return _checked_result("optimal", solution={"x": 1})
+
+    monkeypatch.setattr("openconstraint_mcp.pyexec.core.run_cpsat_python_file", _fake_run)
+    monkeypatch.setattr(
+        "openconstraint_mcp.pyexec.core.run_checker_file",
+        lambda *args, **kw: _checker_report("accepted"),
+    )
+
+    run_cpsat_python_file_checked(
+        script, checker, args=["data.json"], env={"OPENCONSTRAINT_MCP_CPSAT_SEED": "7"}
+    )
+
+    assert model_kw["args"] == ["data.json"]
+    assert model_kw["env"] == {"OPENCONSTRAINT_MCP_CPSAT_SEED": "7"}
+
+
+def test_checked_run_accepted_carries_the_checker_report(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    script, checker = _checked_pair(tmp_path)
+    _patch_checked(
+        monkeypatch, _checked_result("optimal", solution={"x": 1}), _checker_report("accepted")
+    )
+
+    result = run_cpsat_python_file_checked(script, checker)
+
+    assert result.checker is not None
+    assert result.checker.status == "accepted"
+
+
+def test_checked_run_accepted_leaves_the_top_level_diagnostic_clean(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    script, checker = _checked_pair(tmp_path)
+    _patch_checked(
+        monkeypatch, _checked_result("optimal", solution={"x": 1}), _checker_report("accepted")
+    )
+
+    result = run_cpsat_python_file_checked(script, checker)
+
+    assert result.diagnostic is None
+
+
+def test_checked_run_rejected_carries_the_rejected_verdict(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    script, checker = _checked_pair(tmp_path)
+    _patch_checked(
+        monkeypatch, _checked_result("optimal", solution={"x": 1}), _checker_report("rejected")
+    )
+
+    result = run_cpsat_python_file_checked(script, checker)
+
+    assert result.checker is not None
+    assert result.checker.status == "rejected"
+
+
+def test_checked_run_rejected_but_optimal_sets_the_top_level_diagnostic(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # D8: `diagnostic: null` is the clean-success signal, so an optimal run the
+    # checker rejected must NOT come back with a null top-level diagnostic.
+    script, checker = _checked_pair(tmp_path)
+    _patch_checked(
+        monkeypatch, _checked_result("optimal", solution={"x": 1}), _checker_report("rejected")
+    )
+
+    result = run_cpsat_python_file_checked(script, checker)
+
+    assert result.diagnostic is not None
+    assert result.diagnostic.category == "checker_failed"
+
+
+def test_checked_run_rejected_preserves_the_model_result(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    script, checker = _checked_pair(tmp_path)
+    _patch_checked(
+        monkeypatch, _checked_result("optimal", solution={"x": 1}), _checker_report("rejected")
+    )
+
+    result = run_cpsat_python_file_checked(script, checker)
+
+    assert result.status == "optimal"
+    assert result.solution == {"x": 1}
+
+
+def test_checked_run_timeout_with_incumbent_runs_the_checker(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # D5: `timeout` IS a diagnostic-accept status, so a recovered incumbent is
+    # still checkable.
+    script, checker = _checked_pair(tmp_path)
+    calls = _patch_checked(
+        monkeypatch,
+        _checked_result("timeout", solution={"x": 1}, timed_out=True),
+        _checker_report("accepted"),
+    )
+
+    result = run_cpsat_python_file_checked(script, checker)
+
+    assert len(calls) == 1
+    assert result.checker is not None
+    assert result.checker_skipped_reason is None
+
+
+def test_checked_run_timeout_without_incumbent_skips_the_checker(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The other side of the D5 boundary: same status, no solution -> not checkable.
+    script, checker = _checked_pair(tmp_path)
+    calls = _patch_checked(
+        monkeypatch,
+        _checked_result("timeout", solution=None, timed_out=True),
+        _checker_report("accepted"),
+    )
+
+    result = run_cpsat_python_file_checked(script, checker)
+
+    assert calls == []
+    assert result.checker is None
+    assert result.checker_skipped_reason == "solution is missing or empty"
+
+
+def test_checked_run_infeasible_skips_the_checker_naming_the_status(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    script, checker = _checked_pair(tmp_path)
+    calls = _patch_checked(
+        monkeypatch, _checked_result("infeasible", solution=None), _checker_report("accepted")
+    )
+
+    result = run_cpsat_python_file_checked(script, checker)
+
+    assert calls == []
+    assert result.checker_skipped_reason == "status='infeasible'"
+
+
+def test_checked_run_checker_infrastructure_error_yields_a_diagnosed_error_report(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # D4: a post-run infrastructure failure (temp-file write, spawn) becomes an
+    # `error` report — it must never discard the completed model result.
+    script, checker = _checked_pair(tmp_path)
+    _patch_checked(
+        monkeypatch,
+        _checked_result("optimal", solution={"x": 1}),
+        OSError("no space left on device"),
+    )
+
+    result = run_cpsat_python_file_checked(script, checker)
+
+    assert result.status == "optimal"
+    assert result.checker is not None
+    assert result.checker.status == "error"
+    assert any("checker infrastructure error" in e for e in result.checker.errors)
+    assert result.checker.diagnostic is not None
+    assert result.checker.diagnostic.category == "checker_failed"
+
+
+def test_checked_run_defaults_the_checker_timeout_to_the_run_timeout(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    script, checker = _checked_pair(tmp_path)
+    calls = _patch_checked(
+        monkeypatch, _checked_result("optimal", solution={"x": 1}), _checker_report("accepted")
+    )
+
+    result = run_cpsat_python_file_checked(script, checker, timeout_ms=12_345)
+
+    assert calls[0]["timeout_ms"] == 12_345
+    assert result.checker_timeout_ms == 12_345
+
+
+def test_checked_run_explicit_checker_timeout_wins(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    script, checker = _checked_pair(tmp_path)
+    calls = _patch_checked(
+        monkeypatch, _checked_result("optimal", solution={"x": 1}), _checker_report("accepted")
+    )
+
+    result = run_cpsat_python_file_checked(
+        script, checker, timeout_ms=12_345, checker_timeout_ms=999
+    )
+
+    assert calls[0]["timeout_ms"] == 999
+    assert result.checker_timeout_ms == 999
+
+
+def test_checked_run_forwards_problem_to_the_checker(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    script, checker = _checked_pair(tmp_path)
+    calls = _patch_checked(
+        monkeypatch, _checked_result("optimal", solution={"x": 1}), _checker_report("accepted")
+    )
+
+    run_cpsat_python_file_checked(script, checker, problem='{"jobs": []}')
+
+    assert calls[0]["problem"] == '{"jobs": []}'
+
+
+def test_checked_run_rejects_a_non_positive_checker_timeout(tmp_path: Path) -> None:
+    script, checker = _checked_pair(tmp_path)
+
+    with pytest.raises(ValueError, match="checker_timeout_ms must be positive"):
+        run_cpsat_python_file_checked(script, checker, checker_timeout_ms=0)
+
+
+def _assert_no_child_spawned(script: Path, checker: Path, match: str) -> None:
+    """Both spawn helpers are mocked: a rejection must reach neither."""
+    with (
+        patch("openconstraint_mcp.shared.childrun.popen_process_group") as fake_popen,
+        patch("openconstraint_mcp.pyexec.core.execute_child") as fake_execute,
+        patch("openconstraint_mcp.pyexec.checker.execute_child") as fake_checker_execute,
+    ):
+        with pytest.raises(ValueError, match=match):
+            run_cpsat_python_file_checked(script, checker)
+    fake_popen.assert_not_called()
+    fake_execute.assert_not_called()
+    fake_checker_execute.assert_not_called()
+
+
+def test_checked_run_invalid_checker_path_spawns_nothing(tmp_path: Path) -> None:
+    script, _ = _checked_pair(tmp_path)
+    _assert_no_child_spawned(script, tmp_path / "nope.py", r"checker_path does not exist")
+
+
+def test_checked_run_invalid_script_path_spawns_nothing(tmp_path: Path) -> None:
+    _, checker = _checked_pair(tmp_path)
+    _assert_no_child_spawned(tmp_path / "nope.py", checker, r"script_path does not exist")

@@ -16,9 +16,16 @@ Checker output protocol: the checker must print, as its final stdout line,
 one JSON object:
     {"status": "accepted" | "rejected" | "error", "errors": [...], "details": {...}}
 
+Two entry points share one execution tail: ``run_checker`` (inline source,
+copied to a temp dir and run there) and ``run_checker_file`` (an on-disk
+checker, run in place with ``cwd`` set to its own directory so a relative
+sibling reference file resolves).
+
 Imports only: ``shared.childrun`` (shared executor), ``schemas`` (checker
-report type), and ``childproc`` (tracker type). Never imports ``minizinc`` or
-``runtime``.
+report type), ``childproc`` (tracker type), ``shared.job_errors``
+(``exception_summary``, for the shared infrastructure-failure report), and the
+dependency-light siblings ``diagnostics``, ``env_vars``, and ``script_path``.
+Never imports ``core``, ``minizinc``, or ``runtime``.
 """
 
 from __future__ import annotations
@@ -34,7 +41,10 @@ from typing import TypedDict
 from ..schemas.cpsat import CpsatCheckerReport, CpsatPythonResult
 from ..shared.childproc import ChildProcessTracker
 from ..shared.childrun import execute_child
+from ..shared.job_errors import exception_summary
 from .diagnostics import checker_report_diagnostic
+from .env_vars import CPSAT_CONFIG_ENV_VAR, CPSAT_SEED_ENV_VAR
+from .script_path import validate_script_path
 
 _ACCEPTED_STATUS = "accepted"
 _REJECTED_STATUS = "rejected"
@@ -74,6 +84,24 @@ def _error(
             timed_out=False,
             truncated=truncated,
         )
+    )
+
+
+def checker_infrastructure_report(exc: Exception) -> CpsatCheckerReport:
+    """Turn a checker-phase infrastructure failure into a diagnosed error report.
+
+    A temp-file write or spawn failure AFTER the model run must not discard the
+    completed model result, so it becomes a ``status="error"`` verdict rather
+    than an exception. Shared by the synchronous checked runner
+    (``core.run_cpsat_python_file_checked``) and the background-job registry so
+    both surface the identical error string and nested diagnostic for the same
+    fault.
+    """
+    return _error(
+        f"checker infrastructure error: {exception_summary(exc)}",
+        stdout="",
+        stderr="",
+        duration_ms=0,
     )
 
 
@@ -141,47 +169,50 @@ def _normalize_checker_result(
     )
 
 
-def run_checker(
-    checker: str,
-    run_result: CpsatPythonResult,
-    *,
-    problem: str | None,
-    timeout_ms: int,
-    tracker: ChildProcessTracker | None,
-    on_start: Callable[[Popen[str]], None] | None = None,
-) -> CpsatCheckerReport:
-    """Execute a checker script against a CP-SAT solution.
-
-    Writes the checker source and the payload JSON to temporary files, then
-    invokes the checker through ``execute_child``. Parses the checker's stdout
-    for the final JSON object and normalizes any malformed output to
-    ``status="error"``. ``on_start`` is forwarded to ``execute_child`` so a
-    caller (the background-job registry) can capture the checker child's
-    ``Popen`` handle for targeted cancellation.
-    """
+def _write_payload_file(
+    directory: Path, run_result: CpsatPythonResult, problem: str | None
+) -> Path:
+    """Write the checker input payload into ``directory`` and return its path."""
     payload = {
         "problem": problem,
         "solution": run_result.solution or {},
         "objective": run_result.objective,
         "solver_status": run_result.status,
     }
+    payload_file = directory / "payload.json"
+    payload_file.write_text(json.dumps(payload), encoding="utf-8")
+    return payload_file
 
-    with tempfile.TemporaryDirectory() as tmp_dir:
-        tmp = Path(tmp_dir)
-        checker_script = tmp / "checker.py"
-        checker_script.write_text(checker, encoding="utf-8")
-        payload_file = tmp / "payload.json"
-        payload_file.write_text(json.dumps(payload), encoding="utf-8")
 
-        argv = [sys.executable, "-u", str(checker_script), str(payload_file)]
+def _execute_checker(
+    checker_script: Path,
+    payload_file: Path,
+    *,
+    cwd: Path,
+    timeout_ms: int,
+    tracker: ChildProcessTracker | None,
+    on_start: Callable[[Popen[str]], None] | None,
+) -> CpsatCheckerReport:
+    """Run the checker child and normalize its outcome into a report.
 
-        child_result = execute_child(
-            argv,
-            cwd=tmp,
-            timeout_ms=timeout_ms,
-            tracker=tracker,
-            on_start=on_start,
-        )
+    The single execution + verdict-parsing tail shared by the inline
+    (``run_checker``) and path-based (``run_checker_file``) entry points, so the
+    two can only differ in where the checker script lives and which directory it
+    runs from. Both ``checker_script`` and ``payload_file`` are absolute, so a
+    caller-chosen ``cwd`` never changes which files the child is handed.
+    """
+    # The checker gets its inputs through the payload JSON file, not env vars; a
+    # stale OPENCONSTRAINT_MCP_CPSAT_SEED/_CONFIG from the server's own launch
+    # environment would leak into the checker and could change its behaviour, so
+    # both protocol vars are deleted from the child's environment.
+    child_result = execute_child(
+        [sys.executable, "-u", str(checker_script), str(payload_file)],
+        cwd=cwd,
+        timeout_ms=timeout_ms,
+        tracker=tracker,
+        on_start=on_start,
+        env={CPSAT_SEED_ENV_VAR: None, CPSAT_CONFIG_ENV_VAR: None},
+    )
 
     kw: _CheckerKw = {
         "stdout": child_result.stdout,
@@ -205,9 +236,76 @@ def run_checker(
         return _error(f"checker exited with non-zero code: {child_result.return_code}", **kw)
 
     parsed = _parse_final_line_json(child_result.stdout)
-    return _normalize_checker_result(
-        parsed,
-        stdout=child_result.stdout,
-        stderr=child_result.stderr,
-        duration_ms=child_result.duration_ms,
-    )
+    return _normalize_checker_result(parsed, **kw)
+
+
+def run_checker(
+    checker: str,
+    run_result: CpsatPythonResult,
+    *,
+    problem: str | None,
+    timeout_ms: int,
+    tracker: ChildProcessTracker | None,
+    on_start: Callable[[Popen[str]], None] | None = None,
+) -> CpsatCheckerReport:
+    """Execute an inline checker script against a CP-SAT solution.
+
+    Writes the checker source and the payload JSON to temporary files, then
+    invokes the checker through ``execute_child`` with ``cwd`` set to that temp
+    directory — an inline snippet has no sibling files to find. Parses the
+    checker's stdout for the final JSON object and normalizes any malformed
+    output to ``status="error"``. ``on_start`` is forwarded to ``execute_child``
+    so a caller (the background-job registry) can capture the checker child's
+    ``Popen`` handle for targeted cancellation.
+
+    For a checker that already exists on disk, use ``run_checker_file`` instead
+    — it runs the checker in its own directory so a relative read of a sibling
+    reference file resolves.
+    """
+    with tempfile.TemporaryDirectory() as tmp_dir:
+        tmp = Path(tmp_dir)
+        checker_script = tmp / "checker.py"
+        checker_script.write_text(checker, encoding="utf-8")
+        payload_file = _write_payload_file(tmp, run_result, problem)
+        return _execute_checker(
+            checker_script,
+            payload_file,
+            cwd=tmp,
+            timeout_ms=timeout_ms,
+            tracker=tracker,
+            on_start=on_start,
+        )
+
+
+def run_checker_file(
+    checker_path: Path,
+    run_result: CpsatPythonResult,
+    *,
+    problem: str | None,
+    timeout_ms: int,
+    tracker: ChildProcessTracker | None,
+    on_start: Callable[[Popen[str]], None] | None = None,
+) -> CpsatCheckerReport:
+    """Execute an on-disk checker script against a CP-SAT solution, in place.
+
+    The path-based counterpart to ``run_checker``: the checker is NOT copied to
+    a temp directory, and runs with ``cwd`` set to its own parent directory, so
+    a checker that reads a relative sibling reference file resolves (mirroring
+    ``run_cpsat_python_file``). The payload JSON still lives in a temp file,
+    passed as an absolute path in ``argv[1]``, so the checker directory is never
+    written to.
+
+    ``checker_path`` is validated (exists / regular file / non-empty / UTF-8)
+    with a ``ValueError`` naming ``checker_path`` before any child is spawned.
+    """
+    resolved = validate_script_path(checker_path, parameter="checker_path")
+    with tempfile.TemporaryDirectory() as tmp_dir:
+        payload_file = _write_payload_file(Path(tmp_dir), run_result, problem)
+        return _execute_checker(
+            resolved,
+            payload_file,
+            cwd=resolved.parent,
+            timeout_ms=timeout_ms,
+            tracker=tracker,
+            on_start=on_start,
+        )

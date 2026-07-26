@@ -42,6 +42,15 @@ CPSAT_PYTHON_STAGES = (
     "Child finished; parsing result",
     "CP-SAT Python execution complete",
 )
+# Same four-stage schedule as CPSAT_PYTHON_STAGES, with stage 2 naming the
+# checker phase — the family always verifies, so the wording is fixed rather
+# than checker-aware like `cpsat_save_stages`.
+CPSAT_PYTHON_CHECKED_STAGES = (
+    "Validating script and checker paths",
+    "Running CP-SAT Python in child process, then the checker script",
+    "Children finished; parsing result and checker verdict",
+    "CP-SAT Python execution and check complete",
+)
 CPSAT_EXPERIMENT_STAGES = (
     "Validating experiment attempts and admission budget",
     "Running attempts in child processes",

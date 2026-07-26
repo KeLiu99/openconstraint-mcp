@@ -14,6 +14,7 @@ from mcp.types import CallToolResult
 
 from openconstraint_mcp.jobs.registry import JobRegistry
 from openconstraint_mcp.schemas.cpsat import (
+    CpsatPythonCheckedResult,
     CpsatPythonExperimentAttempt,
     CpsatPythonExperimentAttemptResult,
     CpsatPythonExperimentResult,
@@ -3090,6 +3091,191 @@ async def test_run_cpsat_python_file_without_seed_or_config_clears_both_env_vars
     monkeypatch.setattr("openconstraint_mcp.server.run_cpsat_python_file", _fake)
     mcp = create_mcp_server()
     await mcp.call_tool("run_cpsat_python_file", {"script_path": "/tmp/model.py"})
+    assert seen["env"] == {
+        "OPENCONSTRAINT_MCP_CPSAT_SEED": None,
+        "OPENCONSTRAINT_MCP_CPSAT_CONFIG": None,
+    }
+
+
+# --- run_cpsat_python_file_checked --------------------------------------------
+
+
+def _fake_checked_result() -> CpsatPythonCheckedResult:
+    return CpsatPythonCheckedResult(
+        status="optimal",
+        solution={"x": 3},
+        objective=3,
+        stdout="",
+        stderr="",
+        return_code=0,
+        timed_out=False,
+        truncated=False,
+        duration_ms=7,
+        checker=None,
+        checker_skipped_reason=None,
+        checker_timeout_ms=30_000,
+    )
+
+
+def _patch_checked_runner(
+    monkeypatch: pytest.MonkeyPatch,
+) -> dict[str, Any]:
+    """Stub the server-level checked runner; return the recorded call."""
+    seen: dict[str, Any] = {}
+
+    def _fake(script_path: Path, checker_path: Path, **kw: Any) -> CpsatPythonCheckedResult:
+        seen["script_path"] = script_path
+        seen["checker_path"] = checker_path
+        seen.update(kw)
+        return _fake_checked_result()
+
+    monkeypatch.setattr("openconstraint_mcp.server.run_cpsat_python_file_checked", _fake)
+    return seen
+
+
+@pytest.mark.asyncio
+async def test_run_cpsat_python_file_checked_tool_is_listed() -> None:
+    mcp = create_mcp_server("full")
+    tools = await mcp.list_tools()
+    names = {tool.name for tool in tools}
+    assert "run_cpsat_python_file_checked" in names
+
+
+@pytest.mark.asyncio
+async def test_run_cpsat_python_file_checked_routes_result_to_the_caller(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _patch_checked_runner(monkeypatch)
+
+    mcp = create_mcp_server("full")
+    result = _structured(
+        await mcp.call_tool(
+            "run_cpsat_python_file_checked",
+            {"script_path": "/tmp/model.py", "checker_path": "/tmp/checker.py"},
+        )
+    )
+
+    assert result["status"] == "optimal"
+
+
+@pytest.mark.asyncio
+async def test_run_cpsat_python_file_checked_keeps_script_and_checker_paths_distinct(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A swap of the two positional paths would run the checker as the model."""
+    seen = _patch_checked_runner(monkeypatch)
+
+    mcp = create_mcp_server("full")
+    await mcp.call_tool(
+        "run_cpsat_python_file_checked",
+        {"script_path": "/tmp/model.py", "checker_path": "/tmp/checker.py"},
+    )
+
+    assert (seen["script_path"], seen["checker_path"]) == (
+        Path("/tmp/model.py"),
+        Path("/tmp/checker.py"),
+    )
+
+
+@pytest.mark.asyncio
+async def test_run_cpsat_python_file_checked_forwards_args(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    seen = _patch_checked_runner(monkeypatch)
+
+    mcp = create_mcp_server("full")
+    await mcp.call_tool(
+        "run_cpsat_python_file_checked",
+        {
+            "script_path": "/tmp/model.py",
+            "checker_path": "/tmp/checker.py",
+            "args": ["data_ft20.json"],
+        },
+    )
+
+    assert seen["args"] == ["data_ft20.json"]
+
+
+@pytest.mark.asyncio
+async def test_run_cpsat_python_file_checked_forwards_problem_and_checker_timeout(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    seen = _patch_checked_runner(monkeypatch)
+
+    mcp = create_mcp_server("full")
+    await mcp.call_tool(
+        "run_cpsat_python_file_checked",
+        {
+            "script_path": "/tmp/model.py",
+            "checker_path": "/tmp/checker.py",
+            "problem": "20 jobs, 5 machines",
+            "checker_timeout_ms": 5_000,
+        },
+    )
+
+    assert (seen["problem"], seen["checker_timeout_ms"]) == ("20 jobs, 5 machines", 5_000)
+
+
+@pytest.mark.asyncio
+async def test_run_cpsat_python_file_checked_seed_replay_passes_seed_env(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    seen = _patch_checked_runner(monkeypatch)
+
+    mcp = create_mcp_server("full")
+    await mcp.call_tool(
+        "run_cpsat_python_file_checked",
+        {"script_path": "/tmp/model.py", "checker_path": "/tmp/checker.py", "seed": 7},
+    )
+
+    assert seen["env"] == {
+        "OPENCONSTRAINT_MCP_CPSAT_SEED": "7",
+        "OPENCONSTRAINT_MCP_CPSAT_CONFIG": None,
+    }
+
+
+@pytest.mark.asyncio
+async def test_run_cpsat_python_file_checked_config_replay_passes_config_env(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured: dict[str, Any] = {}
+
+    def _fake(script_path: Path, checker_path: Path, **kw: Any) -> CpsatPythonCheckedResult:
+        env = kw["env"]
+        captured["seed_env"] = env["OPENCONSTRAINT_MCP_CPSAT_SEED"]
+        captured["config_contents"] = json.loads(
+            Path(env["OPENCONSTRAINT_MCP_CPSAT_CONFIG"]).read_text()
+        )
+        return _fake_checked_result()
+
+    monkeypatch.setattr("openconstraint_mcp.server.run_cpsat_python_file_checked", _fake)
+
+    mcp = create_mcp_server("full")
+    await mcp.call_tool(
+        "run_cpsat_python_file_checked",
+        {
+            "script_path": "/tmp/model.py",
+            "checker_path": "/tmp/checker.py",
+            "config": {"num_workers": 2},
+        },
+    )
+
+    assert captured["seed_env"] is None
+    assert captured["config_contents"] == {"num_workers": 2}
+
+
+@pytest.mark.asyncio
+async def test_run_cpsat_python_file_checked_without_seed_or_config_clears_both_env_vars(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    seen = _patch_checked_runner(monkeypatch)
+
+    mcp = create_mcp_server("full")
+    await mcp.call_tool(
+        "run_cpsat_python_file_checked",
+        {"script_path": "/tmp/model.py", "checker_path": "/tmp/checker.py"},
+    )
+
     assert seen["env"] == {
         "OPENCONSTRAINT_MCP_CPSAT_SEED": None,
         "OPENCONSTRAINT_MCP_CPSAT_CONFIG": None,

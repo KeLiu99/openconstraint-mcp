@@ -68,8 +68,9 @@ save -> rerun from saved files` — is complete for both backends:
   rerunnable via `solve_minizinc_files` / `run_cpsat_python_file` — see
   [Reproducing a saved CP-SAT artifact](#reproducing-a-saved-cp-sat-artifact)
   for the CP-SAT replay caveat (`run_cpsat_python_file` re-verifies at the
-  `reported` level only; full checked replay re-runs
-  `save_verified_cpsat_python`).
+  `reported` level only; `run_cpsat_python_file_checked` re-runs the saved
+  checker too, and full gate replay — including the objective `expectation` —
+  re-runs `save_verified_cpsat_python`).
 - **Examples.** The [Example inventory](#example-inventory) maps every
   retained example to the workflow(s) it demonstrates, its test coverage, and
   any known gap, rather than leaving coverage implicit.
@@ -105,7 +106,7 @@ After installing the package above:
        "openconstraint": {
          "type": "stdio",
          "command": "uv",
-         "args": ["run", "openconstraint-mcp", "stdio"]
+         "args": ["run", "openconstraint-mcp", "stdio", "--toolset", "full"]
        }
      }
    }
@@ -146,7 +147,8 @@ The package exposes five commands:
     hand in a client that exposes MCP prompts. The **full** profile
     (`--toolset full`) additionally exposes the three detailed MCP prompts and
     every advanced tool — background solve/CP-SAT jobs, solver portfolios,
-    explicit CP-SAT experiments, verified saving, model-interface inspection,
+    explicit CP-SAT experiments, checker-verified CP-SAT file runs
+    (`run_cpsat_python_file_checked`), verified saving, model-interface inspection,
     unsat-core diagnostics, and tabular (Excel/CSV) I/O. Use `--toolset full`
     when you need any of those; existing users who relied on an advanced tool
     from bare `stdio` must now pass `--toolset full`.
@@ -1106,10 +1108,83 @@ server runs it in a **local child process**.
   env vars are explicitly cleared for the child rather than left to inherit a
   stale value from the server's own launch environment — the same clearing
   rule `run_cpsat_python` applies unconditionally, since it has no
-  `seed`/`config` parameters of its own. This tool has no checker parameter,
-  so replaying a `checked`-level save this way re-verifies at the `reported`
-  level only — see [Reproducing a saved CP-SAT
-  artifact](#reproducing-a-saved-cp-sat-artifact) for full checked replay.
+  `seed`/`config` parameters of its own. This tool runs the script and reports
+  what it printed — to also verify the result, use
+  `run_cpsat_python_file_checked` below.
+
+- **`run_cpsat_python_file_checked(script_path: str, checker_path: str,
+  timeout_ms: int = 30000, args: list[str] | None = None, problem: str | None =
+  None, checker_timeout_ms: int | None = None, seed: int | None = None, config:
+  dict | None = None)`** *(full profile only — start the server with
+  `--toolset full`)* — `run_cpsat_python_file` plus a mandatory verification
+  pass, in one synchronous call. Both `script_path` and the **required**
+  `checker_path` are existing local files; each runs in **its own directory**
+  (`cwd` = that file's parent), so a relative read of a sibling data or
+  reference file resolves on both sides. Both paths are resolved and validated
+  (exists / regular file / non-empty / UTF-8) **before anything runs**; a bad
+  path is an error naming the offending parameter and no child process is
+  spawned.
+
+  **Checker protocol.** The server writes a temporary JSON payload and passes
+  its absolute path as the checker's `sys.argv[1]`:
+
+  ```json
+  {"problem": "<str|null>", "solution": {"…": "…"},
+   "objective": 1165, "solver_status": "optimal"}
+  ```
+
+  The checker must print, as its **final stdout line**, one JSON object:
+
+  ```json
+  {"status": "accepted", "errors": [], "details": {"num_jobs": 20}}
+  ```
+
+  `status` is `accepted`, `rejected`, or `error`. Anything else — a nonzero
+  exit, truncated output, no final JSON line, or `accepted` with a non-empty
+  `errors` list — is normalized to `error`.
+
+  **`problem`** is the instance text (or JSON) the checker validates against.
+  It is optional in the signature but **required in practice by a data-driven
+  checker**, and it cannot be inferred from `args`: those name a data file
+  relative to the script's directory, not the instance itself.
+  `examples/job_shop/checker.py`, for instance, returns `rejected` without it.
+
+  **`checker_timeout_ms`** defaults to `timeout_ms`. `args`, `seed`, and
+  `config` behave exactly as on `run_cpsat_python_file` and apply to the model
+  child only — the checker is a verification step, never a replayed solve.
+
+  Returns a **`CpsatPythonCheckedResult`**: every `CpsatPythonResult` field,
+  plus `checker` (the checker report, whose `status` is the verdict),
+  `checker_skipped_reason` (set *instead of* `checker` when the run produced no
+  checkable incumbent — the two are mutually exclusive), and
+  `checker_timeout_ms`. A checker that rejects, times out, crashes, or emits
+  garbage **does not fail the call**: the model result always survives and the
+  verdict is reported. The top-level `diagnostic` composes both halves — a run
+  timeout wins, else a failed checker overrides, else the run's own diagnostic
+  — so `diagnostic: null` is the clean-success signal only when the checker
+  also accepts; an `optimal` run the checker rejects surfaces a
+  `checker_failed` diagnostic instead. A timed-out run **with** a recovered
+  incumbent is still checked; one without it is skipped.
+
+  **Wall clock.** This call is nominally
+  `(timeout_ms + ~8 s) + (checker_timeout_ms + ~8 s)` — two sequential children,
+  each plus the process-tree termination grace — so at the 30 s defaults it can
+  run about **76 s**. Set your MCP client's tool timeout accordingly in your own
+  client config — a 900 s cap (Codex's `tool_timeout_sec = 900`) leaves room for
+  a long solve without wedging the client indefinitely. `timeout_ms` has
+  no upper bound by design, because a caller must be able to ask for the solve
+  time the problem needs; every child still runs under the executor's own cap
+  with process-tree kill. For a solve longer than a synchronous MCP call can
+  hold, use `submit_cpsat_python_file_job`, which is path-native for the
+  *script* and is not bound by a synchronous timeout — but its `checker` is
+  **inline source**, run from a temp directory rather than the checker's own
+  directory, so a checker that reads a relative sibling file will not find it
+  there.
+
+  **Posture.** The checker is a **second unsandboxed local child** with exactly
+  the same posture as the model script: it is a correctness gate against an
+  *incorrect* script, not a security boundary against a hostile one. The server
+  wrapper makes no network calls; both children are arbitrary local Python.
 
 - **`save_verified_cpsat_python(source, …)`** — re-run `source`
   and persist it only when all supplied save gates pass. Gates run in order
@@ -1337,10 +1412,16 @@ folder, and its manifest is a JSON file a client can read directly.
    `verification.reported_status`/`objective` and the saved `solution.json`
    (when the save included a checker).
 
-**Known limitation:** `run_cpsat_python_file` has no checker parameter, so
-replaying a `checked`-level save this way only re-verifies at the `reported`
-level. For full checked replay — re-running every original gate, including
-the checker with the manifest's `verification.checker_timeout_ms` — call
+**Replaying the checker too.** `run_cpsat_python_file` runs the script only, so
+step 2 re-verifies a `checked`-level save at the `reported` level. To re-run the
+saved checker in the same call, use `run_cpsat_python_file_checked`
+(full profile) with `script_path` = the saved `model.py`, `checker_path` = the
+saved `checker.py`, `problem` = the verbatim contents of `problem.txt`,
+`checker_timeout_ms` from `verification.checker_timeout_ms`, plus the same
+`timeout_ms`/`seed`/`config`.
+
+For full **gate** replay — every original gate, including the objective
+`expectation` that `run_cpsat_python_file_checked` does not evaluate — call
 `save_verified_cpsat_python` again with `verify_only=true`. That mode re-runs
 every original gate and needs no `target_dir` at all — and ignores one if you
 pass it, so to persist the replay itself, omit `verify_only` (or pass

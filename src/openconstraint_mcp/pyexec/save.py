@@ -33,7 +33,6 @@ from ..shared.save_target import (
 from ..shared.save_target import tool_version as _tool_version
 from .checker import run_checker
 from .core import (
-    CPSAT_SEED_ENV_VAR,
     DEFAULT_PYEXEC_TIMEOUT_MS,
     VERIFIED_STATUSES,
     config_sha256,
@@ -44,6 +43,7 @@ from .core import (
     validate_cpsat_random_seed,
 )
 from .diagnostics import save_failure_diagnostic
+from .env_vars import CPSAT_SEED_ENV_VAR
 
 SCRIPT_FILENAME: str = "model.py"
 PROBLEM_FILENAME: str = "problem.txt"

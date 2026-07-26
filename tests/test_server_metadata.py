@@ -228,6 +228,7 @@ FULL_TOOL_NAMES = CORE_TOOL_NAMES | {
     "get_cpsat_python_job",
     "cancel_cpsat_python_job",
     "list_cpsat_python_jobs",
+    "run_cpsat_python_file_checked",
     "run_cpsat_python_experiment",
     "save_verified_cpsat_python",
     "load_tabular_data",
@@ -247,6 +248,12 @@ FULL_PROMPT_NAMES = CORE_PROMPT_NAMES | {
 # A schema-change budget failure is a REVIEW trigger, not a cap to silently
 # raise: reduce descriptions or reconsider the core inventory instead.
 CORE_METADATA_BUDGET_BYTES = 40_000
+
+# The same rule for the full profile, which core-only budgets never covered.
+# Measured at 284 783 bytes across the 31 full tools; the cap carries deliberate
+# headroom for one or two more tools' worth of schema, not unbounded growth. A
+# failure here is a REVIEW trigger, not a cap to silently raise.
+FULL_METADATA_BUDGET_BYTES = 300_000
 
 SOLVE_TOOL_NAMES = (
     "solve_minizinc_model",
@@ -315,10 +322,10 @@ async def test_core_profile_exposes_exactly_the_eight_core_tools() -> None:
 
 
 @pytest.mark.asyncio
-async def test_full_profile_retains_the_current_thirty_tool_set() -> None:
+async def test_full_profile_retains_the_current_thirty_one_tool_set() -> None:
     tools = await _tools_by_name("full")
     assert set(tools) == FULL_TOOL_NAMES
-    assert len(FULL_TOOL_NAMES) == 30
+    assert len(FULL_TOOL_NAMES) == 31
 
 
 def _tools_declaring_problem() -> list[Any]:
@@ -481,6 +488,50 @@ async def test_core_metadata_is_within_budget() -> None:
     assert total <= CORE_METADATA_BUDGET_BYTES, (
         f"core metadata is {total} bytes, over the {CORE_METADATA_BUDGET_BYTES} budget"
     )
+
+
+@pytest.mark.asyncio
+async def test_full_metadata_is_within_budget() -> None:
+    tools = await create_mcp_server("full").list_tools()
+    total = len(_serialize_tools(tools).encode("utf-8"))
+    assert total <= FULL_METADATA_BUDGET_BYTES, (
+        f"full metadata is {total} bytes, over the {FULL_METADATA_BUDGET_BYTES} budget"
+    )
+
+
+@pytest.mark.asyncio
+async def test_run_cpsat_python_file_checked_is_full_only() -> None:
+    # Advertising CpsatPythonCheckedResult costs ~1.8 kB of outputSchema alone,
+    # which core (1 084 bytes of headroom) cannot absorb — hence a full-only tool.
+    assert "run_cpsat_python_file_checked" in await _tools_by_name("full")
+    assert "run_cpsat_python_file_checked" not in await _tools_by_name("core")
+
+
+@pytest.mark.asyncio
+async def test_run_cpsat_python_file_checked_advertises_the_checker_fields() -> None:
+    tools = await _tools_by_name("full")
+    output_schema = tools["run_cpsat_python_file_checked"].outputSchema
+    assert output_schema is not None
+    properties = output_schema["properties"]
+    for field in ("status", "solution", "checker", "checker_skipped_reason", "checker_timeout_ms"):
+        assert field in properties, field
+
+
+@pytest.mark.asyncio
+async def test_run_cpsat_python_file_checked_output_schema_has_no_result_envelope() -> None:
+    # The annotation is the concrete return type, so FastMCP publishes the model
+    # itself — not a `{"result": ...}` wrapper it would add for a non-model return.
+    tools = await _tools_by_name("full")
+    output_schema = tools["run_cpsat_python_file_checked"].outputSchema
+    assert output_schema is not None
+    assert "result" not in output_schema["properties"]
+
+
+@pytest.mark.asyncio
+async def test_run_cpsat_python_file_checked_requires_both_paths() -> None:
+    tools = await _tools_by_name("full")
+    required = tools["run_cpsat_python_file_checked"].inputSchema.get("required", [])
+    assert set(required) == {"script_path", "checker_path"}
 
 
 def test_core_instructions_toolset_hint_is_paragraph_two_within_head_budget() -> None:
