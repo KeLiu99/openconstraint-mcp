@@ -548,9 +548,17 @@ User problem:
    replay-config.json contents, when that sibling file exists>)` — no
    manual environment variables needed. `run_cpsat_python_file` has no
    checker parameter, so this only re-verifies at the `reported` level
-   even for a `checked`-level save. For full checked replay, call
+   even for a `checked`-level save. To re-run the saved checker too, call
+   `run_cpsat_python_file_checked(script_path=<saved model.py path>,
+   checker_path=<saved checker.py path>, problem=<contents of the saved
+   problem.txt>, checker_timeout_ms=<manifest
+   verification.checker_timeout_ms>, seed=..., config=...)` in one step — it
+   returns the checker's verdict alongside the result and persists nothing.
+   Omitting `checker_timeout_ms` there silently replays the checker under
+   `timeout_ms` instead of the cap the save recorded. Use
    `save_verified_cpsat_python` again
-   with `verify_only=true` — which re-runs every gate and needs no
+   with `verify_only=true` when the save also recorded an objective
+   `expectation` you need re-checked — which re-runs every gate and needs no
    `target_dir`, and ignores one if you pass it; to persist the replay
    instead, omit `verify_only` (or pass `verify_only=false`) and supply a
    real `target_dir` — plus the saved source/checker/seed/config, AND —

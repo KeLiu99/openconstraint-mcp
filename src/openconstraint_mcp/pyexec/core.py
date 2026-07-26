@@ -70,30 +70,27 @@ from pathlib import Path
 from subprocess import Popen
 from typing import Any
 
-from ..schemas.cpsat import CpsatPythonResult, CpsatStatus
+from ..schemas.cpsat import (
+    CpsatCheckerReport,
+    CpsatPythonCheckedResult,
+    CpsatPythonResult,
+    CpsatStatus,
+)
 from ..shared.childproc import ChildProcessTracker
 from ..shared.childrun import ChildExecutionResult, execute_child
 from ..shared.save_target import text_sha256
-from .diagnostics import cpsat_result_diagnostic
+from .checker import checker_infrastructure_report, run_checker_file
+from .diagnostics import checked_result_diagnostic, cpsat_result_diagnostic
+from .eligibility import diagnostic_incumbent_eligibility
+from .env_vars import CPSAT_CONFIG_ENV_VAR, CPSAT_SEED_ENV_VAR
+from .script_path import validate_script_path
 
 DEFAULT_PYEXEC_TIMEOUT_MS: int = 30_000
-
-# Environment variable the seeded save replay sets for the child, carrying the
-# replay CP-SAT random seed. The client-generated script must read it and assign
-# ``solver.parameters.random_seed``; the server cannot force a seed into arbitrary
-# Python.
-CPSAT_SEED_ENV_VAR: str = "OPENCONSTRAINT_MCP_CPSAT_SEED"
 
 # OR-Tools CP-SAT's random_seed parameter is a signed int32. Reject values outside
 # that range before they reach a child process.
 CPSAT_RANDOM_SEED_MIN: int = -2_147_483_648
 CPSAT_RANDOM_SEED_MAX: int = 2_147_483_647
-
-# Environment variable an experiment attempt (or a config-carrying save replay)
-# sets for the child, carrying the path to a temporary JSON config file. A
-# cooperating script reads it and applies whichever fields it understands; the
-# server never sets OR-Tools parameters itself — see CpsatPythonExperimentAttempt.
-CPSAT_CONFIG_ENV_VAR: str = "OPENCONSTRAINT_MCP_CPSAT_CONFIG"
 
 VERIFIED_STATUSES: frozenset[CpsatStatus] = frozenset[CpsatStatus]({"optimal", "feasible"})
 
@@ -104,12 +101,23 @@ _SCRIPT_STATUSES: frozenset[str] = frozenset(
 )
 
 
+def validate_checker_timeout_ms(checker_timeout_ms: int | None) -> None:
+    """Reject a non-positive explicit checker timeout.
+
+    The one check shared by the inline-``checker`` tools and the path-based
+    ``checker_path`` tool, which cannot supply a timeout without a checker (its
+    checker is required) and so has nothing else in common with
+    ``validate_checker_args``.
+    """
+    if checker_timeout_ms is not None and checker_timeout_ms <= 0:
+        raise ValueError("checker_timeout_ms must be positive")
+
+
 def validate_checker_args(*, checker: str | None, checker_timeout_ms: int | None) -> None:
     """Validate shared optional-checker arguments for CP-SAT Python tools."""
     if checker_timeout_ms is not None and checker is None:
         raise ValueError("checker_timeout_ms supplied without checker: no checker will run")
-    if checker_timeout_ms is not None and checker_timeout_ms <= 0:
-        raise ValueError("checker_timeout_ms must be positive")
+    validate_checker_timeout_ms(checker_timeout_ms)
     if checker is not None and not checker.strip():
         raise ValueError("checker must be non-empty after stripping whitespace")
 
@@ -365,32 +373,6 @@ def _classify_child_result(child: ChildExecutionResult) -> CpsatPythonResult:
     )
 
 
-def _validate_script_path(script_path: Path) -> Path:
-    """Resolve and validate a CP-SAT Python script path before any subprocess.
-
-    Mirrors the MiniZinc path tools' contract (``validate_model_data_paths``):
-    resolve to an absolute path (following a symlink the caller named), then
-    reject a missing or non-regular file, and an empty/whitespace-only or
-    non-UTF-8 script, with a clear ``ValueError`` naming the offending path. The
-    resolved path is returned so the caller uses the same path for argv and its
-    parent for ``cwd`` — a relative input can't then double-count its subdir.
-    """
-    script_path = script_path.resolve()
-    if not script_path.exists():
-        raise ValueError(f"script_path does not exist: {script_path}")
-    if not script_path.is_file():
-        raise ValueError(f"script_path is not a file: {script_path}")
-    try:
-        text = script_path.read_text(encoding="utf-8")
-    except UnicodeDecodeError as exc:
-        raise ValueError(f"{script_path} is not valid UTF-8") from exc
-    except OSError as exc:
-        raise ValueError(f"script_path is not readable: {script_path} ({exc})") from exc
-    if not text.strip():
-        raise ValueError(f"script file is empty: {script_path}")
-    return script_path
-
-
 def _python_script_argv(script: Path, args: list[str] | None = None) -> list[str]:
     # -u: unbuffered child stdout/stderr so prints reach the capture files as
     # they happen (not on a full buffer). This is what lets a flushed
@@ -481,7 +463,7 @@ def run_cpsat_python_file(
     command line. Omitting it reproduces the plain ``python -u script.py``
     invocation exactly.
     """
-    resolved = _validate_script_path(script_path)
+    resolved = validate_script_path(script_path)
     child = execute_child(
         _python_script_argv(resolved, args),
         cwd=resolved.parent,
@@ -491,3 +473,76 @@ def run_cpsat_python_file(
         env=env,
     )
     return _result_from_child(child)
+
+
+def run_cpsat_python_file_checked(
+    script_path: Path,
+    checker_path: Path,
+    *,
+    problem: str | None = None,
+    timeout_ms: int = DEFAULT_PYEXEC_TIMEOUT_MS,
+    checker_timeout_ms: int | None = None,
+    args: list[str] | None = None,
+    tracker: ChildProcessTracker | None = None,
+    env: dict[str, str | None] | None = None,
+) -> CpsatPythonCheckedResult:
+    """Run an on-disk CP-SAT script, then verify it with an on-disk checker.
+
+    ``run_cpsat_python_file`` plus a mandatory verification pass, in one
+    synchronous call. Both paths are resolved and validated (exists / regular
+    file / non-empty / UTF-8) BEFORE any child is spawned, with a ``ValueError``
+    naming the offending parameter; ``checker_timeout_ms`` must be positive when
+    given and otherwise defaults to ``timeout_ms``.
+
+    The model runs first, in its own directory (see ``run_cpsat_python_file``).
+    The checker runs only against a checkable incumbent — the shared
+    ``diagnostic_incumbent_eligibility`` gate — and otherwise is skipped with
+    ``checker_skipped_reason`` set. Note ``timeout`` IS a checkable status: a
+    timed-out run WITH a recovered incumbent is checked, one without is not.
+
+    A checker that times out, exits nonzero, or emits malformed output does not
+    fail this call — it yields a non-``accepted`` ``CpsatCheckerReport``. The
+    model result always survives. The top-level ``diagnostic`` composes both
+    halves via ``checked_result_diagnostic``.
+
+    Nominal worst-case wall clock is additive:
+    ``(timeout_ms + tree-kill grace) + (checker_timeout_ms + tree-kill grace)``.
+    Beyond what a synchronous MCP call can hold, use
+    ``submit_cpsat_python_file_job``.
+    """
+    resolved_script = validate_script_path(script_path)
+    resolved_checker = validate_script_path(checker_path, parameter="checker_path")
+    validate_checker_timeout_ms(checker_timeout_ms)
+    effective_timeout_ms = effective_checker_timeout_ms(
+        checker_timeout_ms=checker_timeout_ms, default_timeout_ms=timeout_ms
+    )
+
+    run_result = run_cpsat_python_file(
+        resolved_script,
+        timeout_ms=timeout_ms,
+        args=args,
+        tracker=tracker,
+        env=env,
+    )
+
+    eligible, skipped_reason = diagnostic_incumbent_eligibility(run_result)
+    report: CpsatCheckerReport | None = None
+    if eligible:
+        try:
+            report = run_checker_file(
+                resolved_checker,
+                run_result,
+                problem=problem,
+                timeout_ms=effective_timeout_ms,
+                tracker=tracker,
+            )
+        except Exception as exc:  # noqa: BLE001 - a checker fault must not void the run
+            report = checker_infrastructure_report(exc)
+
+    return CpsatPythonCheckedResult(
+        **run_result.model_dump(exclude={"diagnostic"}),
+        diagnostic=checked_result_diagnostic(run_result, report),
+        checker=report,
+        checker_skipped_reason=skipped_reason,
+        checker_timeout_ms=effective_timeout_ms,
+    )

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import ast
 import json
 from pathlib import Path
 from typing import Any
@@ -9,7 +10,13 @@ from unittest.mock import patch
 
 import pytest
 
-from openconstraint_mcp.pyexec.checker import run_checker
+import openconstraint_mcp.pyexec.checker
+from openconstraint_mcp.pyexec.checker import (
+    checker_infrastructure_report,
+    run_checker,
+    run_checker_file,
+)
+from openconstraint_mcp.pyexec.env_vars import CPSAT_CONFIG_ENV_VAR, CPSAT_SEED_ENV_VAR
 from openconstraint_mcp.schemas.cpsat import CpsatCheckerReport, CpsatPythonResult
 from openconstraint_mcp.shared.childrun import ChildExecutionResult
 
@@ -134,6 +141,26 @@ def test_checker_payload_carries_solution_objective_and_status(
             "solver_status": "optimal",
         }
     ]
+
+
+# --- Child environment overlay -----------------------------------------------
+
+
+def test_checker_strips_seed_and_config_env_from_child(monkeypatch: pytest.MonkeyPatch) -> None:
+    # The checker takes its inputs from the payload JSON, never from env vars, so
+    # both CP-SAT protocol vars must be deleted (value None) from the child's
+    # environment rather than inherited from the server process.
+    captured: dict[str, Any] = {}
+
+    def _capture(argv: list[str], **kwargs: Any) -> ChildExecutionResult:
+        captured.update(kwargs)
+        return _make_child_result()
+
+    monkeypatch.setattr("openconstraint_mcp.pyexec.checker.execute_child", _capture)
+
+    run_checker(_CHECKER_SOURCE, _OPTIMAL_RESULT, problem=None, timeout_ms=5000, tracker=None)
+
+    assert captured["env"] == {CPSAT_SEED_ENV_VAR: None, CPSAT_CONFIG_ENV_VAR: None}
 
 
 # --- Rejected checker --------------------------------------------------------
@@ -332,13 +359,176 @@ def test_checker_on_start_receives_checker_child_popen(monkeypatch: pytest.Monke
     assert received == [fake_proc]
 
 
-# --- checker.py is dependency-light: no minizinc/runtime imports -------------
+# --- run_checker_file: an on-disk checker, executed in place ------------------
 
 
-def test_checker_module_has_no_minizinc_import() -> None:
-    import openconstraint_mcp.pyexec.checker as checker_mod
+def _write_checker(tmp_path: Path, body: str) -> Path:
+    checker = tmp_path / "checker.py"
+    checker.write_text(body, encoding="utf-8")
+    return checker
 
-    import_names = [
-        name for name in dir(checker_mod) if "minizinc" in name.lower() or "runtime" in name.lower()
-    ]
-    assert not import_names, f"checker module has forbidden imports: {import_names}"
+
+def _run_file_with_stdout(
+    monkeypatch: pytest.MonkeyPatch, checker_path: Path, stdout: str
+) -> CpsatCheckerReport:
+    _patch_runner(monkeypatch, _make_child_result(stdout=stdout))
+    return run_checker_file(
+        checker_path, _OPTIMAL_RESULT, problem=None, timeout_ms=5000, tracker=None
+    )
+
+
+def test_run_checker_file_accepted_returns_accepted_report(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    checker = _write_checker(tmp_path, _CHECKER_SOURCE)
+    report = _run_file_with_stdout(monkeypatch, checker, '{"status":"accepted","errors":[]}')
+    assert report.status == "accepted"
+
+
+def test_run_checker_file_rejected_returns_rejected_report(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    checker = _write_checker(tmp_path, _CHECKER_SOURCE)
+    report = _run_file_with_stdout(monkeypatch, checker, '{"status":"rejected","errors":["bad"]}')
+    assert report.status == "rejected"
+
+
+def test_run_checker_file_timeout_returns_timeout_report(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    checker = _write_checker(tmp_path, _CHECKER_SOURCE)
+    _patch_runner(monkeypatch, _make_child_result(stdout="", timed_out=True))
+    report = run_checker_file(checker, _OPTIMAL_RESULT, problem=None, timeout_ms=5000, tracker=None)
+    assert report.status == "timeout"
+
+
+def test_run_checker_file_nonzero_exit_returns_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    checker = _write_checker(tmp_path, _CHECKER_SOURCE)
+    _patch_runner(monkeypatch, _make_child_result(stdout="", return_code=3))
+    report = run_checker_file(checker, _OPTIMAL_RESULT, problem=None, timeout_ms=5000, tracker=None)
+    assert report.status == "error"
+
+
+def test_run_checker_file_malformed_final_line_returns_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    checker = _write_checker(tmp_path, _CHECKER_SOURCE)
+    report = _run_file_with_stdout(monkeypatch, checker, "not json at all")
+    assert report.status == "error"
+
+
+def test_run_checker_file_invalid_path_names_checker_path(tmp_path: Path) -> None:
+    with patch("openconstraint_mcp.pyexec.checker.execute_child") as fake_execute:
+        with pytest.raises(ValueError, match=r"checker_path does not exist"):
+            run_checker_file(
+                tmp_path / "nope.py",
+                _OPTIMAL_RESULT,
+                problem=None,
+                timeout_ms=5000,
+                tracker=None,
+            )
+    fake_execute.assert_not_called()
+
+
+def test_run_checker_file_executes_in_the_checker_directory(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # cwd, not sys.path: a sibling *import* would resolve regardless, because
+    # Python puts the script's own directory on sys.path[0]. Only a relative
+    # data-file read proves the working directory moved.
+    checker_dir = tmp_path / "verify"
+    checker_dir.mkdir()
+    checker = _write_checker(checker_dir, _CHECKER_SOURCE)
+    captured: dict[str, Any] = {}
+
+    def _fake_execute_child(argv: list[str], cwd: Path, **kw: Any) -> ChildExecutionResult:
+        captured["argv"] = argv
+        captured["cwd"] = cwd
+        return _make_child_result()
+
+    monkeypatch.setattr("openconstraint_mcp.pyexec.checker.execute_child", _fake_execute_child)
+    run_checker_file(checker, _OPTIMAL_RESULT, problem=None, timeout_ms=5000, tracker=None)
+
+    assert captured["cwd"] == checker_dir.resolve()
+    assert captured["argv"][2] == str(checker.resolve())
+    assert Path(captured["argv"][2]).is_absolute()
+    assert Path(captured["argv"][3]).is_absolute()
+
+
+@pytest.mark.integration
+def test_run_checker_file_reads_a_sibling_data_file(tmp_path: Path) -> None:
+    """A real checker child resolves a RELATIVE sibling data read via cwd."""
+    checker_dir = tmp_path / "verify"
+    checker_dir.mkdir()
+    (checker_dir / "reference.json").write_text(json.dumps({"expected": 3}), encoding="utf-8")
+    checker = _write_checker(
+        checker_dir,
+        "import sys, json\n"
+        "from pathlib import Path\n"
+        "payload = json.loads(Path(sys.argv[1]).read_text())\n"
+        'reference = json.loads(Path("reference.json").read_text())\n'
+        'ok = payload["solution"]["x"] == reference["expected"]\n'
+        'print(json.dumps({"status": "accepted" if ok else "rejected", '
+        '"errors": [] if ok else ["mismatch"]}))\n',
+    )
+
+    report = run_checker_file(
+        checker, _OPTIMAL_RESULT, problem=None, timeout_ms=20_000, tracker=None
+    )
+
+    assert report.status == "accepted"
+
+
+# --- the shared infrastructure-failure report --------------------------------
+
+
+def test_checker_infrastructure_report_summarizes_the_exception() -> None:
+    report = checker_infrastructure_report(OSError("no space left"))
+
+    assert report.status == "error"
+    assert report.errors == ["checker infrastructure error: OSError: no space left"]
+
+
+def test_checker_infrastructure_report_is_diagnosed() -> None:
+    """Both call sites rely on the helper attaching the nested diagnostic."""
+    report = checker_infrastructure_report(RuntimeError("spawn failed"))
+
+    assert report.diagnostic is not None
+    assert report.diagnostic.category == "checker_failed"
+
+
+# --- checker.py is dependency-light: no core/minizinc/runtime imports --------
+
+
+def _imported_modules(module_path: Path) -> set[str]:
+    """Every module name ``module_path`` imports, absolute and relative alike.
+
+    Parses the source rather than inspecting ``dir(module)``: ``from .core
+    import X`` binds a symbol named ``X``, so a name grep over the module
+    namespace cannot see which module a symbol came from. Relative levels are
+    reduced to the bare module name (``.core`` and ``..minizinc.core`` both
+    contribute ``core``/``minizinc``), which is what the layering rule is
+    stated over.
+    """
+    names: set[str] = set()
+    for node in ast.walk(ast.parse(module_path.read_text(encoding="utf-8"))):
+        if isinstance(node, ast.Import):
+            names.update(part for alias in node.names for part in alias.name.split("."))
+        elif isinstance(node, ast.ImportFrom):
+            names.update((node.module or "").split("."))
+    return names - {""}
+
+
+def test_checker_module_imports_no_core_minizinc_or_runtime() -> None:
+    """Acceptance criterion 7 — checker.py must stay free of those dependencies.
+
+    ``core`` matters specifically: ``core.py`` now imports ``checker.py``, so a
+    back-edge would be a genuine import cycle.
+    """
+    source = Path(openconstraint_mcp.pyexec.checker.__file__)
+
+    forbidden = _imported_modules(source) & {"core", "minizinc", "runtime"}
+
+    assert not forbidden, f"checker module has forbidden imports: {sorted(forbidden)}"

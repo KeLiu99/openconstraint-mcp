@@ -31,21 +31,18 @@ from ..schemas.diagnostics import Diagnostic, wrapper_job_diagnostic
 from ..schemas.job_state import RESULT_BEARING_STATES, TERMINAL_STATES, JobState
 from ..shared.job_errors import JobRejectedError, exception_summary, now_ms
 from ..shared.proc import terminate_process_tree as _terminate_process_tree
-from .checker import run_checker
-
-# These are package-internal helpers not promoted to the public API.
-# noinspection PyProtectedMember
+from .checker import checker_infrastructure_report, run_checker
 from .core import (
     DEFAULT_PYEXEC_TIMEOUT_MS,
-    _validate_script_path,
     effective_checker_timeout_ms,
     run_cpsat_python,
     run_cpsat_python_file,
     seed_config_env,
     validate_checker_args,
 )
-from .diagnostics import checker_report_diagnostic
+from .diagnostics import checked_result_diagnostic
 from .eligibility import diagnostic_incumbent_eligibility
+from .script_path import validate_script_path
 
 
 @dataclass(frozen=True)
@@ -203,7 +200,7 @@ class CpsatJobRegistry:
         if timeout_ms <= 0:
             raise ValueError("timeout_ms must be positive")
         validate_checker_args(checker=checker, checker_timeout_ms=checker_timeout_ms)
-        resolved = _validate_script_path(script_path)
+        resolved = validate_script_path(script_path)
         request = _CpsatJobRequest(
             source=None,
             script_path=resolved,
@@ -345,17 +342,7 @@ class CpsatJobRegistry:
         )
         if wrapper is not None:
             return wrapper
-        diagnostic = record.result.diagnostic if record.result is not None else None
-        if diagnostic is not None and diagnostic.category in (
-            "timeout_no_incumbent",
-            "timeout_with_incumbent",
-        ):
-            return diagnostic
-        if record.checker_report is not None:
-            checker_diag = checker_report_diagnostic(record.checker_report)
-            if checker_diag is not None:
-                return checker_diag
-        return diagnostic
+        return checked_result_diagnostic(record.result, record.checker_report)
 
     def _finalize(
         self,
@@ -489,14 +476,5 @@ class CpsatJobRegistry:
                 on_start=lambda proc: self._on_start(job_id, proc),
             )
         except Exception as exc:  # noqa: BLE001 - checker fault must not void the solver result
-            report = CpsatCheckerReport(
-                status="error",
-                errors=[f"checker infrastructure error: {exception_summary(exc)}"],
-                stdout="",
-                stderr="",
-                duration_ms=0,
-                timed_out=False,
-                truncated=False,
-            )
-            report.diagnostic = checker_report_diagnostic(report)
+            report = checker_infrastructure_report(exc)
         return report, None

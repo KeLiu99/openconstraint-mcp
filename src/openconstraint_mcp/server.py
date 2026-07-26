@@ -63,6 +63,7 @@ from .protocol_text.descriptions import (
     RUN_CPSAT_PYTHON_DESCRIPTION,
     RUN_CPSAT_PYTHON_DESCRIPTION_CORE,
     RUN_CPSAT_PYTHON_EXPERIMENT_DESCRIPTION,
+    RUN_CPSAT_PYTHON_FILE_CHECKED_DESCRIPTION,
     RUN_CPSAT_PYTHON_FILE_DESCRIPTION,
     RUN_CPSAT_PYTHON_FILE_DESCRIPTION_CORE,
     SAVE_VERIFIED_CPSAT_PYTHON_DESCRIPTION,
@@ -95,6 +96,7 @@ from .pyexec.core import (
     replay_env_scope,
     run_cpsat_python,
     run_cpsat_python_file,
+    run_cpsat_python_file_checked,
     seed_config_env,
     validate_cpsat_random_seed,
 )
@@ -105,6 +107,7 @@ from .runtime import RuntimeMissingError, get_runtime_status
 from .schemas.cpsat import (
     CpsatExpectation,
     CpsatObjectiveSense,
+    CpsatPythonCheckedResult,
     CpsatPythonExperimentAttempt,
     CpsatPythonExperimentResult,
     CpsatPythonJobStatus,
@@ -166,6 +169,7 @@ _FULL_ONLY_TOOL_NAMES = frozenset(
         "get_cpsat_python_job",
         "cancel_cpsat_python_job",
         "list_cpsat_python_jobs",
+        "run_cpsat_python_file_checked",
         "run_cpsat_python_experiment",
         "save_verified_cpsat_python",
         "load_tabular_data",
@@ -514,6 +518,37 @@ def _run_cpsat_python_file_with_replay(
     with replay_env_scope(seed=seed, config=config) as env:
         return run_cpsat_python_file(
             script_path, timeout_ms=timeout_ms, args=args, tracker=tracker, env=env
+        )
+
+
+def _run_cpsat_python_file_checked_with_replay(
+    script_path: Path,
+    checker_path: Path,
+    *,
+    problem: str | None,
+    timeout_ms: int,
+    checker_timeout_ms: int | None,
+    args: list[str] | None,
+    seed: int | None,
+    config: dict[str, Any] | None,
+    tracker: ChildProcessTracker,
+) -> CpsatPythonCheckedResult:
+    """Run a checked CP-SAT file pair with the same replay env handling as above.
+
+    The env overlay applies to the MODEL child only — the checker is a
+    verification step, not a replayed solve, so it never receives a seed or a
+    config file.
+    """
+    with replay_env_scope(seed=seed, config=config) as env:
+        return run_cpsat_python_file_checked(
+            script_path,
+            checker_path,
+            problem=problem,
+            timeout_ms=timeout_ms,
+            checker_timeout_ms=checker_timeout_ms,
+            args=args,
+            tracker=tracker,
+            env=env,
         )
 
 
@@ -1048,6 +1083,42 @@ def create_mcp_server(toolset: str = "full") -> FastMCP:
             )
         )
         await _status_finished(ctx, status.CPSAT_PYTHON_STAGES)
+        return result
+
+    @mcp.tool(
+        name="run_cpsat_python_file_checked",
+        description=RUN_CPSAT_PYTHON_FILE_CHECKED_DESCRIPTION,
+    )
+    @_as_mcp_error(ValueError)
+    async def run_cpsat_python_file_checked_tool(
+        script_path: str,
+        checker_path: str,
+        timeout_ms: int = DEFAULT_PYEXEC_TIMEOUT_MS,
+        args: list[str] | None = None,
+        problem: ProblemText = None,
+        checker_timeout_ms: int | None = None,
+        seed: StrictInt | None = None,
+        config: dict[str, JsonValue] | None = None,
+        ctx: Context | None = None,
+    ) -> CpsatPythonCheckedResult:
+        await _status_starting(ctx, status.CPSAT_PYTHON_CHECKED_STAGES)
+        validated_seed = validate_cpsat_random_seed(seed) if seed is not None else None
+        normalized_config: dict[str, Any] | None = config if config else None
+        result = await _run_blocking(
+            functools.partial(
+                _run_cpsat_python_file_checked_with_replay,
+                Path(script_path),
+                Path(checker_path),
+                problem=problem,
+                timeout_ms=timeout_ms,
+                checker_timeout_ms=checker_timeout_ms,
+                args=args,
+                seed=validated_seed,
+                config=normalized_config,
+                tracker=child_tracker,
+            )
+        )
+        await _status_finished(ctx, status.CPSAT_PYTHON_CHECKED_STAGES)
         return result
 
     @mcp.tool(

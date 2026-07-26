@@ -6,7 +6,9 @@
       "args": [
         "run",
         "openconstraint-mcp",
-        "stdio"
+        "stdio",
+        "--toolset",
+        "full"
       ]
     }
   }

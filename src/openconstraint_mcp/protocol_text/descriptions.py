@@ -748,10 +748,30 @@ _RUN_CPSAT_PYTHON_FILE_HEAD = (
     "content is rejected with an actionable MCP error and nothing runs. Same "
     "execution contract, output cap, timeout, and tree-kill as "
     "`run_cpsat_python`: " + _CPSAT_JSON_CONTRACT + " "
+)
+
+# The returned-shape sentence, split out of the head so the full profile can
+# name the checked sibling's wider return type without changing a single byte
+# of the core profile's advertised description.
+_RUN_CPSAT_PYTHON_FILE_SHAPE_CORE = (
     "The returned CpsatPythonResult has the identical shape (`status`, "
     "`solution`, `objective`, `best_objective_bound`, `stdout`, `stderr`, "
     "`return_code`, `timed_out`, "
     "`truncated`, `duration_ms`), including `timeout` partial recovery. "
+)
+
+_RUN_CPSAT_PYTHON_FILE_SHAPE_FULL = (
+    "The returned CpsatPythonResult has the identical shape as "
+    "`run_cpsat_python`'s, including `timeout` partial recovery, and carries NO "
+    "checker fields — this tool runs the script and reports what it printed, "
+    "nothing more. To also VERIFY the result against a checker script that is "
+    "already on disk, call `run_cpsat_python_file_checked` instead: same "
+    "`script_path`/`args`/`timeout_ms`, plus a required `checker_path`, and it "
+    "returns a CpsatPythonCheckedResult (every CpsatPythonResult field plus `checker`, "
+    "`checker_skipped_reason`, and `checker_timeout_ms`). "
+)
+
+_RUN_CPSAT_PYTHON_FILE_SEED_CONFIG = (
     "Optional `seed` (a non-bool integer in the CP-SAT `random_seed` "
     "signed-int32 range) and `config` (a JSON object) are REPLAY aids for "
     "re-running a saved seeded/configured artifact through this file tool "
@@ -784,17 +804,20 @@ _RUN_CPSAT_PYTHON_FILE_ARGS = (
 )
 
 _RUN_CPSAT_PYTHON_FILE_CHECKED_REPLAY_FULL = (
-    "This tool has no checker "
-    "parameter: replaying a `checked`-level save this way only re-verifies at "
-    "the `reported` level; for full checked replay, call "
-    "`save_verified_cpsat_python` with the saved source/checker/seed/config and "
-    "`verify_only=true`, which re-runs every gate and needs no `target_dir` at "
-    "all — that mode ignores one if passed, so to persist the replay itself omit "
-    "`verify_only` (or pass `verify_only=false`) with a real `target_dir`. "
+    "To replay a `checked`-level save at its own verification level, point "
+    "`run_cpsat_python_file_checked` at the saved `model.py` and `checker.py` "
+    "(passing the saved `problem` text, plus `seed`/`config` when the manifest "
+    "records them). Use `save_verified_cpsat_python` with `verify_only=true` "
+    "when you also need the saved objective `expectation` gate re-run — that "
+    "mode needs no `target_dir` and ignores one if passed, so to persist the "
+    "replay itself omit `verify_only` (or pass `verify_only=false`) with a real "
+    "`target_dir`. "
 )
 
 RUN_CPSAT_PYTHON_FILE_DESCRIPTION = (
     _RUN_CPSAT_PYTHON_FILE_HEAD
+    + _RUN_CPSAT_PYTHON_FILE_SHAPE_FULL
+    + _RUN_CPSAT_PYTHON_FILE_SEED_CONFIG
     + _RUN_CPSAT_PYTHON_FILE_PROTOCOLS_FULL
     + "`seed`/`config`. "
     + _RUN_CPSAT_PYTHON_FILE_MID
@@ -804,10 +827,64 @@ RUN_CPSAT_PYTHON_FILE_DESCRIPTION = (
 )
 RUN_CPSAT_PYTHON_FILE_DESCRIPTION_CORE = (
     _RUN_CPSAT_PYTHON_FILE_HEAD
+    + _RUN_CPSAT_PYTHON_FILE_SHAPE_CORE
+    + _RUN_CPSAT_PYTHON_FILE_SEED_CONFIG
     + _RUN_CPSAT_PYTHON_FILE_PROTOCOLS_CORE
     + _RUN_CPSAT_PYTHON_FILE_MID
     + _RUN_CPSAT_PYTHON_FILE_ARGS
     + _CPSAT_CHILD_POSTURE
+)
+
+RUN_CPSAT_PYTHON_FILE_CHECKED_DESCRIPTION = (
+    "Solve a constraint or discrete-optimization problem ("
+    + _CP_PROBLEM_DOMAINS
+    + ") AND verify the result, in one synchronous call, from two LOCAL file "
+    "paths the user already has on disk: `script_path` (an OR-Tools CP-SAT "
+    "Python script) and the REQUIRED `checker_path` (a checker script). This is "
+    "`run_cpsat_python_file` plus a mandatory verification pass — pick it when "
+    "an independent check of the solution matters; pick `run_cpsat_python_file` "
+    "when it does not. "
+    "Each script runs in its OWN directory (`cwd` = that file's parent), so a "
+    "relative `open()` of a sibling data or reference file resolves on both "
+    "sides. Both paths are resolved and validated (exists / regular file / "
+    "non-empty / UTF-8) BEFORE anything runs; a bad path is an actionable MCP "
+    "error naming the offending parameter and no child is spawned. "
+    "The model script follows the usual contract: " + _CPSAT_JSON_CONTRACT + " "
+    "The checker protocol: the server writes a temporary JSON payload "
+    '(`{"problem": <str|null>, "solution": {...}, "objective": <float|int|null>, '
+    '"solver_status": "<status>"}`) and passes its absolute path as the '
+    "checker's `sys.argv[1]`; the checker must print, as its FINAL stdout line, "
+    'one JSON object `{"status": "accepted"|"rejected"|"error", "errors": '
+    '[...], "details": {...}}`. '
+    "Pass `problem` — the instance text or JSON the checker validates against — "
+    "whenever the checker is data-driven; it is optional in the signature but a "
+    "checker that reads `payload['problem']` will reject without it, and it "
+    "CANNOT be inferred from `args` (those name a data file relative to the "
+    "script's directory, not the instance itself). "
+    "`checker_timeout_ms` defaults to `timeout_ms`. `args` is appended after "
+    "`script_path` as the model script's `sys.argv[1:]`; `seed`/`config` are "
+    "the same replay aids `run_cpsat_python_file` documents. "
+    "Returns a CpsatPythonCheckedResult: every CpsatPythonResult field, plus "
+    "`checker` (the CpsatCheckerReport, whose `status` is the verdict), "
+    "`checker_skipped_reason` (set INSTEAD of `checker` when the run produced no "
+    "checkable incumbent — the two are mutually exclusive), and "
+    "`checker_timeout_ms`. A checker that rejects, times out, crashes, or emits "
+    "garbage does NOT fail the call: the model result always survives and the "
+    "verdict is reported. The top-level `diagnostic` composes both halves — a "
+    "run timeout wins, else a failed checker overrides, else the run's own "
+    "diagnostic — so `diagnostic: null` remains the clean-success signal. "
+    "A timed-out run WITH a recovered incumbent is still checked; one without "
+    "is skipped. "
+    "WALL CLOCK: this call is nominally `(timeout_ms + ~8s) + "
+    "(checker_timeout_ms + ~8s)`, so at the 30 s defaults it can run ~76 s — set "
+    "your client's tool timeout accordingly. For a solve longer than a "
+    "synchronous MCP call can hold, use `submit_cpsat_python_file_job`, which is "
+    "path-native for the SCRIPT and not bound by a synchronous timeout — but its "
+    "`checker` is INLINE SOURCE run from a temp directory, not the checker's own "
+    "directory, so a checker that reads a relative sibling file will not find it. "
+    "The checker is a correctness gate against an INCORRECT script, not a "
+    "security boundary against a hostile one: it is a second unsandboxed local "
+    "child with exactly the same posture as the model script. " + _CPSAT_CHILD_POSTURE
 )
 
 SOLVE_CONSTRAINT_PROBLEM_PROMPT_DESCRIPTION = (

@@ -84,6 +84,37 @@ def checker_report_diagnostic(report: CpsatCheckerReport) -> Diagnostic | None:
     )
 
 
+def _optional_checker_diagnostic(report: CpsatCheckerReport | None) -> Diagnostic | None:
+    """``checker_report_diagnostic`` widened to accept "no checker ran"."""
+    return checker_report_diagnostic(report) if report is not None else None
+
+
+def checked_result_diagnostic(
+    result: CpsatPythonResult | None, checker: CpsatCheckerReport | None
+) -> Diagnostic | None:
+    """Compose the top-level diagnostic for a run that also ran a checker.
+
+    Precedence: a run TIMEOUT wins (the incumbent is unproven, so the checker's
+    verdict on it is secondary), else a FAILED checker overrides the
+    run-derived diagnostic, else the run-derived diagnostic stands. A clean run
+    with an ``accepted`` checker yields ``None`` — the clean-success signal.
+
+    Shared by the background-job registry (``CpsatJobRegistry._job_diagnostic``)
+    and the synchronous ``run_cpsat_python_file_checked`` runner, so the two
+    can never disagree about which failure a client sees first.
+    """
+    diagnostic = result.diagnostic if result is not None else None
+    if diagnostic is not None and diagnostic.category in (
+        "timeout_no_incumbent",
+        "timeout_with_incumbent",
+    ):
+        return diagnostic
+    checker_diag = _optional_checker_diagnostic(checker)
+    if checker_diag is not None:
+        return checker_diag
+    return diagnostic
+
+
 def save_failure_diagnostic(
     run_result: CpsatPythonResult, checker: CpsatCheckerReport | None
 ) -> Diagnostic:
@@ -95,10 +126,9 @@ def save_failure_diagnostic(
     that a reported/expectation gate rejected (e.g. objective below threshold) —
     a generic ``not_verified``.
     """
-    if checker is not None:
-        checker_diag = checker_report_diagnostic(checker)
-        if checker_diag is not None:
-            return checker_diag
+    checker_diag = _optional_checker_diagnostic(checker)
+    if checker_diag is not None:
+        return checker_diag
     base = cpsat_result_diagnostic(run_result)
     if base is not None:
         return base

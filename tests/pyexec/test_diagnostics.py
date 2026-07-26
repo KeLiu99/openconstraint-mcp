@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from openconstraint_mcp.pyexec.core import _result_from_child
 from openconstraint_mcp.pyexec.diagnostics import (
+    checked_result_diagnostic,
     cpsat_result_diagnostic,
     experiment_attempt_diagnostic,
     experiment_diagnostic,
@@ -149,6 +150,46 @@ def _checker(
         timed_out=timed_out,
         truncated=truncated,
     )
+
+
+# --- checked_result_diagnostic ----------------------------------------------
+
+
+def _diagnosed(result: CpsatPythonResult) -> CpsatPythonResult:
+    """Attach the run-derived diagnostic the executor sets before any checker runs."""
+    result.diagnostic = cpsat_result_diagnostic(result)
+    return result
+
+
+def test_checked_clean_run_with_accepted_checker_is_none() -> None:
+    result = _diagnosed(_result("optimal", solution={"x": 1}))
+    assert checked_result_diagnostic(result, _checker("accepted")) is None
+
+
+def test_checked_failed_checker_overrides_a_clean_run() -> None:
+    result = _diagnosed(_result("optimal", solution={"x": 1}))
+    diag = checked_result_diagnostic(result, _checker("rejected"))
+    assert diag is not None
+    assert diag.category == "checker_failed"
+
+
+def test_checked_run_timeout_wins_over_a_failed_checker() -> None:
+    result = _diagnosed(_result("timeout", solution={"x": 1}, timed_out=True))
+    diag = checked_result_diagnostic(result, _checker("rejected"))
+    assert diag is not None
+    assert diag.category == "timeout_with_incumbent"
+
+
+def test_checked_run_derived_diagnostic_stands_without_a_checker() -> None:
+    result = _diagnosed(_result("infeasible"))
+    diag = checked_result_diagnostic(result, None)
+    assert diag is not None
+    assert diag.category == "infeasible"
+
+
+def test_checked_absent_result_and_checker_is_none() -> None:
+    # The job path passes a None result for a failed/cancelled record.
+    assert checked_result_diagnostic(None, None) is None
 
 
 # --- save_failure_diagnostic ------------------------------------------------

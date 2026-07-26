@@ -8,6 +8,7 @@ from pydantic import ValidationError
 from openconstraint_mcp.schemas.cpsat import (
     CpsatCheckerReport,
     CpsatExpectation,
+    CpsatPythonCheckedResult,
     CpsatPythonExperimentAttemptResult,
     CpsatPythonExperimentResult,
     CpsatPythonJobStatus,
@@ -590,3 +591,50 @@ def test_cpsat_python_experiment_result_rejects_winner_name_mismatch() -> None:
             checker_sha256=None,
             problem_sha256=None,
         )
+
+
+# --- CpsatPythonCheckedResult -----------------------------------------------
+
+
+def _checked_kwargs() -> dict:
+    return {
+        "status": "optimal",
+        "solution": {"x": 1},
+        "objective": 1,
+        "stdout": "",
+        "stderr": "",
+        "return_code": 0,
+        "timed_out": False,
+        "truncated": False,
+        "duration_ms": 5,
+        "checker_timeout_ms": 30_000,
+    }
+
+
+def test_cpsat_python_checked_result_rejects_checker_and_skipped_reason_together() -> None:
+    report = CpsatCheckerReport(
+        status="accepted",
+        errors=[],
+        stdout="",
+        stderr="",
+        duration_ms=1,
+        timed_out=False,
+        truncated=False,
+    )
+    with pytest.raises(ValidationError, match="mutually exclusive"):
+        CpsatPythonCheckedResult(
+            **_checked_kwargs(), checker=report, checker_skipped_reason="status='infeasible'"
+        )
+
+
+def test_cpsat_python_checked_result_rejects_neither_checker_nor_skipped_reason() -> None:
+    """This tool always requests a check, so a result with no outcome is malformed."""
+    with pytest.raises(ValidationError, match="requires checker or checker_skipped_reason"):
+        CpsatPythonCheckedResult(**_checked_kwargs())
+
+
+def test_cpsat_python_checked_result_allows_a_skipped_checker() -> None:
+    result = CpsatPythonCheckedResult(
+        **_checked_kwargs(), checker_skipped_reason="solution is missing or empty"
+    )
+    assert result.checker is None
