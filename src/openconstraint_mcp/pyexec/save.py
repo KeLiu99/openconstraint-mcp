@@ -142,9 +142,24 @@ def _validate_experiment_result_consistency(
 
     source_matches = [a for a in experiment_result.attempts if a.source_sha256 == source_hash]
     if not source_matches:
+        # A script_path attempt hashes the file's bytes on disk, so a client pasting
+        # that script as `source` misses on any whitespace drift and would otherwise
+        # be told it attached the wrong experiment — the wrong cause, since such an
+        # attempt is unsaveable even on an exact match (the `full_matches` gate
+        # below). Same `all` gate as that one, so a mixed experiment still reports
+        # the plain mismatch.
+        hint = (
+            " (every attempt in this experiment ran via script_path, whose "
+            "source_sha256 is the file's bytes on disk — if this IS that script, "
+            "note that a script_path attempt is unsaveable regardless, because this "
+            "save's rerun is always inline source with a fresh temp-dir cwd)"
+            if experiment_result.attempts
+            and all(a.used_script_path for a in experiment_result.attempts)
+            else ""
+        )
         raise ValueError(
             "no attempt in experiment_result has source_sha256 matching the supplied "
-            "source: the experiment_result was attached to a different script"
+            "source: the experiment_result was attached to a different script" + hint
         )
 
     accepted_matches = [a for a in source_matches if a.accepted]

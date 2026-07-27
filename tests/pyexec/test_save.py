@@ -1364,6 +1364,48 @@ def test_save_rejects_experiment_result_when_every_match_used_script_path(
     assert called == []
 
 
+def test_source_mismatch_names_script_path_drift_when_every_attempt_ran_from_a_file(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A pasted copy of a script_path attempt's file drifts by a byte; say so."""
+    called = _patch_executor_counting(monkeypatch, _OPTIMAL_RESULT)
+    experiment_result = _experiment_result_over(
+        [
+            _winning_attempt_row(
+                name="from_file", used_script_path=True, source_sha256="on-disk-bytes"
+            ),
+            _losing_attempt_row(name="also_from_file", used_script_path=True),
+        ]
+    )
+
+    with pytest.raises(ValueError, match="every attempt in this experiment ran via script_path"):
+        save_verified_cpsat_python(
+            _SCRIPT, target_dir=tmp_path / "drift", experiment_result=experiment_result
+        )
+    assert called == []
+
+
+def test_source_mismatch_omits_script_path_hint_when_an_inline_attempt_exists(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """With an inline attempt in the set, a mismatch really is the wrong script."""
+    _patch_executor_counting(monkeypatch, _OPTIMAL_RESULT)
+    experiment_result = _experiment_result_over(
+        [
+            _winning_attempt_row(
+                name="from_file", used_script_path=True, source_sha256="on-disk-bytes"
+            ),
+            _losing_attempt_row(name="inline", used_script_path=False),
+        ]
+    )
+
+    with pytest.raises(ValueError) as excinfo:
+        save_verified_cpsat_python(
+            _SCRIPT, target_dir=tmp_path / "mixed", experiment_result=experiment_result
+        )
+    assert "script_path" not in str(excinfo.value)
+
+
 @pytest.mark.parametrize("script_path_first", [True, False])
 def test_save_accepts_experiment_result_when_any_match_is_inline_regardless_of_order(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, script_path_first: bool

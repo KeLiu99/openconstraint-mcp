@@ -1098,8 +1098,9 @@ server runs it in a **local child process**.
   data_ft10.json`. Omitting `args` runs the script with no arguments, exactly
   as before. `args` is a flag/path list, not a data channel: it is rejected
   before any child is spawned if an entry contains a NUL or the list encodes to
-  more than 32 KiB total, both of which the OS refuses at spawn time. Pass bulk
-  input in a file the script opens.
+  more than 32 KiB total, both of which otherwise fail at spawn time — the NUL
+  as a `ValueError` from `subprocess`, the oversized argv as an OS refusal. Pass
+  bulk input in a file the script opens.
 
   `seed` and `config` are REPLAY inputs for re-running a saved seeded/
   configured artifact through this file tool instead of exporting environment

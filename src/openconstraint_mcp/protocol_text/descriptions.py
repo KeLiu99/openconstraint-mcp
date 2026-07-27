@@ -801,8 +801,8 @@ _CPSAT_ARGS_LIMITS = (
     "`args` is a flag/path list, not a data channel: an entry containing a NUL, "
     "or a list whose combined UTF-8 encoding exceeds 32 KiB, is rejected with an "
     "actionable MCP error UP FRONT rather than surfacing as a spawn-time failure "
-    "(the OS refuses both when the child is launched). Pass bulk input in a file "
-    "the script opens. "
+    "(a NUL raises `ValueError` inside `subprocess`; an oversized argv is refused "
+    "by the OS). Pass bulk input in a file the script opens. "
 )
 
 _RUN_CPSAT_PYTHON_FILE_ARGS = (

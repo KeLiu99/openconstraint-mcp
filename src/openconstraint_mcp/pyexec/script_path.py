@@ -19,8 +19,9 @@ from pathlib import Path
 # the line differently: Linux caps a SINGLE argument at MAX_ARG_STRLEN (32 pages
 # = 128 KiB) and the whole argv+environ block at ARG_MAX, macOS caps argv+environ
 # at 256 KiB, and Windows caps the composed command line at 32767 characters.
-# This bound is the tightest of those, applied to the combined UTF-8 encoding of
-# `args`, because `args` is a flag/path list, not a data channel — a script's
+# This bound is a round 32 KiB — the same order as the tightest of those, and one
+# byte above Windows' — applied to the combined UTF-8 encoding of `args`,
+# because `args` is a flag/path list, not a data channel — a script's
 # bulk input belongs in a file the script opens, which is also the only form the
 # 1 MiB child-output cap and the save path's replay can handle.
 #
