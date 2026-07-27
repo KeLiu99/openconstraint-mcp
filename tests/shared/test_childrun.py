@@ -19,6 +19,7 @@ import pytest
 from openconstraint_mcp.shared.childrun import (
     MAX_OUTPUT_BYTES,
     ChildExecutionResult,
+    ChildSpawnError,
     _read_capped,
     execute_child,
 )
@@ -653,3 +654,58 @@ def test_execute_child_env_none_value_deletes_inherited_key(
     assert env["OPENCONSTRAINT_MCP_CPSAT_SEED"] == "7"
     # Unrelated inherited variables are untouched.
     assert "PATH" in env
+
+
+# --- launch failure vs. post-launch failure ----------------------------------
+
+
+def test_popen_oserror_is_rekeyed_as_child_spawn_error() -> None:
+    with (
+        patch(
+            "openconstraint_mcp.shared.childrun.popen_process_group",
+            side_effect=OSError(7, "Argument list too long"),
+        ),
+        patch("openconstraint_mcp.shared.childrun.terminate_process_tree"),
+        pytest.raises(ChildSpawnError),
+    ):
+        execute_child(_ARGV, Path(tempfile.gettempdir()), timeout_ms=5000, tracker=None)
+
+
+def test_child_spawn_error_preserves_the_original_errno() -> None:
+    with (
+        patch(
+            "openconstraint_mcp.shared.childrun.popen_process_group",
+            side_effect=OSError(7, "Argument list too long"),
+        ),
+        patch("openconstraint_mcp.shared.childrun.terminate_process_tree"),
+        pytest.raises(ChildSpawnError) as excinfo,
+    ):
+        execute_child(_ARGV, Path(tempfile.gettempdir()), timeout_ms=5000, tracker=None)
+    assert excinfo.value.errno == 7
+
+
+def test_child_spawn_error_is_an_oserror_so_minizinc_still_catches_it() -> None:
+    # minizinc.core wraps its launch in `except OSError`; subclassing keeps that
+    # handler firing unchanged.
+    assert issubclass(ChildSpawnError, OSError)
+
+
+def test_on_start_oserror_is_not_rekeyed_as_a_spawn_error() -> None:
+    # A child already exists here, so this must NOT be reported as "never launched".
+    def _raising_on_start(proc: Any) -> None:
+        raise OSError(5, "Input/output error")
+
+    with (
+        patch("openconstraint_mcp.shared.childrun.popen_process_group") as fake_popen,
+        patch("openconstraint_mcp.shared.childrun.terminate_process_tree"),
+        pytest.raises(OSError) as excinfo,
+    ):
+        fake_popen.return_value = MagicMock(pid=1234, returncode=0)
+        execute_child(
+            _ARGV,
+            Path(tempfile.gettempdir()),
+            timeout_ms=5000,
+            tracker=None,
+            on_start=_raising_on_start,
+        )
+    assert not isinstance(excinfo.value, ChildSpawnError)

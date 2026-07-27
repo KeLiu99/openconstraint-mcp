@@ -124,6 +124,46 @@ def _max_parallel_attempts_cap() -> int:
     return min(os.cpu_count() or 1, _MAX_PARALLEL_ATTEMPTS_CAP_LIMIT)
 
 
+class _ResolvedScript(NamedTuple):
+    """A ``script_path`` attempt's validated path plus the digest of its bytes.
+
+    Both are captured in the upfront validation pass so the digest describes
+    content that was provably readable at request time, and so a later change to
+    the file on disk is detectable rather than silently mis-attributed.
+    """
+
+    path: Path
+    sha256: str
+
+
+def _script_invalidated_result(reason: str) -> CpsatPythonResult:
+    """A per-attempt error result for a script that moved out from under the run.
+
+    The upfront pass validated and hashed every ``script_path`` before anything
+    ran, but a serial experiment can take minutes, during which an earlier
+    attempt's own child or an external editor can rewrite or delete the file.
+    Turning that into ONE failed attempt — rather than letting ``path_sha256``
+    or ``validate_script_path`` raise out of ``pool.map`` — keeps the rows for
+    attempts that already completed, the same guarantee the spawn-failure path
+    provides.
+
+    ``duration_ms`` is 0 and ``return_code`` ``None``: this result describes the
+    invalidation, not a child's verdict. Any output the run did produce is
+    deliberately dropped, because it cannot be attributed to known bytes.
+    """
+    return CpsatPythonResult(
+        status="error",
+        solution=None,
+        objective=None,
+        stdout="",
+        stderr=reason,
+        return_code=None,
+        timed_out=False,
+        truncated=False,
+        duration_ms=0,
+    )
+
+
 def _attempt_eligibility(
     result: CpsatPythonResult, objective_sense: CpsatObjectiveSense | None
 ) -> tuple[bool, str | None]:
@@ -166,15 +206,21 @@ def _resolved_name(attempt: CpsatPythonExperimentAttempt, index: int) -> str:
 
 def _validate_attempts(
     attempts: Sequence[CpsatPythonExperimentAttempt],
-) -> tuple[list[str], list[Path | None]]:
-    """Validate attempts and return resolved display names plus script paths, index-aligned.
+) -> tuple[list[str], list[_ResolvedScript | None]]:
+    """Validate attempts and return resolved display names plus scripts, index-aligned.
 
-    ``resolved_paths[i]`` is the validated absolute ``Path`` for a
-    ``script_path`` attempt and ``None`` for an inline ``source`` attempt —
-    this is the one place a client-supplied ``script_path`` string becomes a
-    ``Path``. Every attempt is validated here, before ANY attempt runs, so a
-    bad ``script_path`` at index 2 rejects the whole request rather than only
-    itself after indexes 0 and 1 have already spawned children.
+    ``resolved_scripts[i]`` is the validated absolute ``Path`` plus its content
+    digest for a ``script_path`` attempt, and ``None`` for an inline ``source``
+    attempt — this is the one place a client-supplied ``script_path`` string
+    becomes a ``Path``. Every attempt is validated here, before ANY attempt
+    runs, so a bad ``script_path`` at index 2 rejects the whole request rather
+    than only itself after indexes 0 and 1 have already spawned children.
+
+    The digest is taken HERE, in the same pass that proved the file readable,
+    so every attempt row has a truthful ``source_sha256`` even if the file is
+    later edited or deleted mid-experiment. ``_run_attempt`` re-hashes after its
+    run and fails that ONE attempt when the bytes moved, rather than reporting a
+    digest for content that never executed.
 
     Raises ``ValueError`` for: an empty attempts list, an attempt that sets
     both or neither of ``source``/``script_path``, ``args`` without
@@ -189,7 +235,7 @@ def _validate_attempts(
         raise ValueError("attempts must not be empty")
 
     names: list[str] = []
-    resolved_paths: list[Path | None] = []
+    resolved_paths: list[_ResolvedScript | None] = []
     seen: set[str] = set()
     for index, attempt in enumerate(attempts):
         name = _resolved_name(attempt, index)
@@ -220,11 +266,13 @@ def _validate_attempts(
             # would raise mid-run — as a raw OSError for the size case, after
             # earlier attempts' children had already executed.
             validate_script_args(attempt.args, parameter=f"attempts[{index}].args")
-            resolved_paths.append(
-                validate_script_path(
-                    Path(attempt.script_path), parameter=f"attempts[{index}].script_path"
-                )
+            resolved = validate_script_path(
+                Path(attempt.script_path), parameter=f"attempts[{index}].script_path"
             )
+            # Hash the raw bytes off disk: Path.read_text() would translate
+            # CRLF/lone-CR to "\n" before hashing, which is exactly the
+            # normalization text_sha256's exact-hash contract forbids.
+            resolved_paths.append(_ResolvedScript(resolved, path_sha256(resolved)))
         if attempt.seed is not None:
             validate_cpsat_random_seed(attempt.seed, label=f"attempts[{index}].seed")
         if attempt.config:
@@ -482,7 +530,7 @@ def _run_attempt(
     attempt: CpsatPythonExperimentAttempt,
     name: str,
     *,
-    resolved_path: Path | None,
+    resolved_path: _ResolvedScript | None,
     default_timeout_ms: int,
     objective_sense: CpsatObjectiveSense | None,
     checker: str | None,
@@ -492,10 +540,11 @@ def _run_attempt(
 ) -> tuple[CpsatPythonExperimentAttemptResult, CpsatPythonResult | None]:
     """Run one attempt end to end; return its result row and, if accepted, its raw result.
 
-    ``resolved_path`` is the already-validated path threaded from
-    ``_validate_attempts`` — set for a ``script_path`` attempt, ``None`` for an
-    inline ``source`` one. It is never re-derived from ``attempt.script_path``
-    here, so the upfront pass stays the single place a path is resolved.
+    ``resolved_path`` is the already-validated path AND content digest threaded
+    from ``_validate_attempts`` — set for a ``script_path`` attempt, ``None`` for
+    an inline ``source`` one. It is never re-derived from ``attempt.script_path``
+    here, so the upfront pass stays the single place a path is resolved and the
+    single place its digest is taken.
 
     The config temp file (when ``attempt.config`` is non-empty) lives in a
     ``replay_env_scope`` block scoped to exactly this call: it is created right
@@ -508,17 +557,35 @@ def _run_attempt(
 
     with replay_env_scope(seed=attempt.seed, config=attempt.config) as env:
         if resolved_path is not None:
-            # Hash the raw bytes off disk: Path.read_text() would translate
-            # CRLF/lone-CR to "\n" before hashing, which is exactly the
-            # normalization text_sha256's exact-hash contract forbids.
-            source_hash = path_sha256(resolved_path)
-            result = run_cpsat_python_file(
-                resolved_path,
-                timeout_ms=timeout_ms,
-                args=attempt.args,
-                tracker=tracker,
-                env=env,
-            )
+            # The digest comes from the upfront validation pass, so it is always
+            # present and always describes bytes that were readable at request time.
+            source_hash = resolved_path.sha256
+            try:
+                result = run_cpsat_python_file(
+                    resolved_path.path,
+                    timeout_ms=timeout_ms,
+                    args=attempt.args,
+                    tracker=tracker,
+                    env=env,
+                )
+                # Re-hash AFTER the run: if the file moved between validation and
+                # now, `result` describes bytes `source_hash` does not, so the
+                # attempt is invalidated instead of being reported with a digest
+                # that never ran.
+                if path_sha256(resolved_path.path) != source_hash:
+                    result = _script_invalidated_result(
+                        f"{resolved_path.path} changed on disk during the experiment; "
+                        "this attempt's result cannot be attributed to its recorded "
+                        "source_sha256"
+                    )
+            except (OSError, ValueError) as exc:
+                # OSError: the post-run re-hash found the file gone. ValueError:
+                # run_cpsat_python_file's own validate_script_path rejected a path
+                # that was valid at request time. Either way, fail this attempt
+                # only — never the whole experiment.
+                result = _script_invalidated_result(
+                    f"{resolved_path.path} became unusable during the experiment: {exc}"
+                )
         else:
             assert attempt.source is not None  # guaranteed by _validate_attempts' exactly-one-of
             source_hash = text_sha256(attempt.source)

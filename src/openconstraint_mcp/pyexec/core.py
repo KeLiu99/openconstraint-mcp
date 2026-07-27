@@ -77,7 +77,7 @@ from ..schemas.cpsat import (
     CpsatStatus,
 )
 from ..shared.childproc import ChildProcessTracker
-from ..shared.childrun import ChildExecutionResult, execute_child
+from ..shared.childrun import ChildExecutionResult, ChildSpawnError, execute_child
 from ..shared.save_target import text_sha256
 from .checker import checker_infrastructure_report, run_checker_file
 from .diagnostics import checked_result_diagnostic, cpsat_result_diagnostic
@@ -467,7 +467,7 @@ def run_cpsat_python(
                 on_start=on_start,
                 env=env,
             )
-        except OSError as exc:
+        except ChildSpawnError as exc:
             return _spawn_failure_result(exc)
         return _result_from_child(child)
 
@@ -514,7 +514,7 @@ def run_cpsat_python_file(
             on_start=on_start,
             env=env,
         )
-    except OSError as exc:
+    except ChildSpawnError as exc:
         return _spawn_failure_result(exc)
     return _result_from_child(child)
 

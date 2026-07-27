@@ -1556,12 +1556,12 @@ def _patch_execute_child_failing_on(monkeypatch: pytest.MonkeyPatch, failing_sou
     Patched at ``core.execute_child`` rather than at ``experiment.run_cpsat_python``
     so the real spawn-failure handling in ``core`` is what's under test.
     """
-    from openconstraint_mcp.shared.childrun import ChildExecutionResult
+    from openconstraint_mcp.shared.childrun import ChildExecutionResult, ChildSpawnError
 
     def _fake(argv: Any, cwd: Any, **kw: Any) -> ChildExecutionResult:
         source = (Path(cwd) / "script.py").read_text(encoding="utf-8")
         if source == failing_source:
-            raise OSError(7, "Argument list too long")
+            raise ChildSpawnError(7, "Argument list too long")
         return ChildExecutionResult(
             stdout=json.dumps({"status": "optimal", "objective": 5, "solution": {"x": 1}}),
             stderr="",
@@ -1579,9 +1579,7 @@ def test_experiment_survives_an_attempt_that_cannot_spawn(
 ) -> None:
     _patch_execute_child_failing_on(monkeypatch, "b")
 
-    result = run_cpsat_python_experiment(
-        [_attempt("a"), _attempt("b")], objective_sense="minimize"
-    )
+    result = run_cpsat_python_experiment([_attempt("a"), _attempt("b")], objective_sense="minimize")
 
     assert result.status == "winner"
 
@@ -1593,9 +1591,7 @@ def test_spawn_failure_does_not_discard_the_other_attempts_rows(
     # including attempts whose children had already run to completion.
     _patch_execute_child_failing_on(monkeypatch, "b")
 
-    result = run_cpsat_python_experiment(
-        [_attempt("a"), _attempt("b")], objective_sense="minimize"
-    )
+    result = run_cpsat_python_experiment([_attempt("a"), _attempt("b")], objective_sense="minimize")
 
     assert len(result.attempts) == 2
 
@@ -1605,8 +1601,106 @@ def test_unspawnable_attempt_is_reported_as_not_accepted(
 ) -> None:
     _patch_execute_child_failing_on(monkeypatch, "b")
 
-    result = run_cpsat_python_experiment(
-        [_attempt("a"), _attempt("b")], objective_sense="minimize"
-    )
+    result = run_cpsat_python_experiment([_attempt("a"), _attempt("b")], objective_sense="minimize")
 
     assert result.attempts[1].accepted is False
+
+
+# --- script_path invalidated mid-experiment ----------------------------------
+
+
+def _patch_execute_child_mutating(monkeypatch: pytest.MonkeyPatch, mutate: Any) -> None:
+    """Run every attempt successfully, but let attempt "a" mutate the filesystem.
+
+    Models the reviewer's scenario directly: an EARLIER serial attempt changes a
+    LATER attempt's script_path out from under the upfront validation pass.
+    """
+    from openconstraint_mcp.shared.childrun import ChildExecutionResult
+
+    def _fake(argv: Any, cwd: Any, **kw: Any) -> ChildExecutionResult:
+        if Path(argv[-1]).read_text(encoding="utf-8") == "a":
+            mutate()
+        return ChildExecutionResult(
+            stdout=json.dumps({"status": "optimal", "objective": 5, "solution": {"x": 1}}),
+            stderr="",
+            return_code=0,
+            timed_out=False,
+            truncated=False,
+            duration_ms=1,
+        )
+
+    monkeypatch.setattr("openconstraint_mcp.pyexec.core.execute_child", _fake)
+
+
+def _script_attempt_pair(tmp_path: Path) -> tuple[Path, list[CpsatPythonExperimentAttempt]]:
+    script = tmp_path / "victim.py"
+    script.write_text("print('original')", encoding="utf-8")
+    return script, [
+        CpsatPythonExperimentAttempt(name="a", source="a"),
+        CpsatPythonExperimentAttempt(name="b", script_path=str(script)),
+    ]
+
+
+def test_script_deleted_by_an_earlier_attempt_does_not_abort_the_experiment(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    script, attempts = _script_attempt_pair(tmp_path)
+    _patch_execute_child_mutating(monkeypatch, script.unlink)
+
+    result = run_cpsat_python_experiment(attempts, max_parallel_attempts=1)
+
+    assert len(result.attempts) == 2
+
+
+def test_deleted_script_attempt_is_not_accepted(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    script, attempts = _script_attempt_pair(tmp_path)
+    _patch_execute_child_mutating(monkeypatch, script.unlink)
+
+    result = run_cpsat_python_experiment(attempts, max_parallel_attempts=1)
+
+    assert result.attempts[1].accepted is False
+
+
+def test_script_rewritten_mid_experiment_invalidates_only_that_attempt(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    script, attempts = _script_attempt_pair(tmp_path)
+    _patch_execute_child_mutating(
+        monkeypatch, lambda: script.write_text("print('swapped')", encoding="utf-8")
+    )
+
+    result = run_cpsat_python_experiment(attempts, max_parallel_attempts=1)
+
+    assert result.attempts[0].accepted is True
+    assert result.attempts[1].accepted is False
+
+
+def test_rewritten_script_attempt_says_the_file_changed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    script, attempts = _script_attempt_pair(tmp_path)
+    _patch_execute_child_mutating(
+        monkeypatch, lambda: script.write_text("print('swapped')", encoding="utf-8")
+    )
+
+    result = run_cpsat_python_experiment(attempts, max_parallel_attempts=1)
+
+    assert "changed on disk" in (result.attempts[1].message or "")
+
+
+def test_reported_digest_is_the_validated_content_not_the_replacement(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The digest must describe the bytes the request was admitted against; the
+    # attempt is failed rather than re-labelled with the replacement's hash.
+    script, attempts = _script_attempt_pair(tmp_path)
+    original_digest = path_sha256(script)
+    _patch_execute_child_mutating(
+        monkeypatch, lambda: script.write_text("print('swapped')", encoding="utf-8")
+    )
+
+    result = run_cpsat_python_experiment(attempts, max_parallel_attempts=1)
+
+    assert result.attempts[1].source_sha256 == original_digest

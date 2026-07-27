@@ -40,7 +40,7 @@ from typing import TypedDict
 
 from ..schemas.cpsat import CpsatCheckerReport, CpsatPythonResult
 from ..shared.childproc import ChildProcessTracker
-from ..shared.childrun import execute_child
+from ..shared.childrun import ChildSpawnError, execute_child
 from ..shared.job_errors import exception_summary
 from .diagnostics import checker_report_diagnostic
 from .env_vars import CPSAT_CONFIG_ENV_VAR, CPSAT_SEED_ENV_VAR
@@ -214,7 +214,7 @@ def _execute_checker(
             on_start=on_start,
             env={CPSAT_SEED_ENV_VAR: None, CPSAT_CONFIG_ENV_VAR: None},
         )
-    except OSError as exc:
+    except ChildSpawnError as exc:
         # A launch failure is not a verdict: the checker never ran, so this is a
         # non-accepted report (the model result survives, per this module's
         # contract) rather than a raised exception. Distinguished from the
