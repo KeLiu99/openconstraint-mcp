@@ -532,3 +532,30 @@ def test_checker_module_imports_no_core_minizinc_or_runtime() -> None:
     forbidden = _imported_modules(source) & {"core", "minizinc", "runtime"}
 
     assert not forbidden, f"checker module has forbidden imports: {sorted(forbidden)}"
+
+
+def _patch_runner_spawn_failure(monkeypatch: pytest.MonkeyPatch, exc: OSError) -> None:
+    def _raise(argv: Any, cwd: Any, **kw: Any) -> ChildExecutionResult:
+        raise exc
+
+    monkeypatch.setattr("openconstraint_mcp.pyexec.checker.execute_child", _raise)
+
+
+def test_run_checker_file_spawn_failure_returns_error_report(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    checker = _write_checker(tmp_path, _CHECKER_SOURCE)
+    _patch_runner_spawn_failure(monkeypatch, OSError(24, "Too many open files"))
+    report = run_checker_file(checker, _OPTIMAL_RESULT, problem=None, timeout_ms=5000, tracker=None)
+    assert report.status == "error"
+
+
+def test_run_checker_file_spawn_failure_is_not_reported_as_an_exit_code(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The checker never ran, so the report must not describe a phantom exit status.
+    checker = _write_checker(tmp_path, _CHECKER_SOURCE)
+    _patch_runner_spawn_failure(monkeypatch, OSError(24, "Too many open files"))
+    report = run_checker_file(checker, _OPTIMAL_RESULT, problem=None, timeout_ms=5000, tracker=None)
+    assert any("could not be started" in err for err in report.errors)
+    assert not any("non-zero code" in err for err in report.errors)

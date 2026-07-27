@@ -303,6 +303,41 @@ def _result_from_child(child: ChildExecutionResult) -> CpsatPythonResult:
     return result
 
 
+def _spawn_failure_result(exc: OSError) -> CpsatPythonResult:
+    """Turn a launch failure into the CP-SAT error contract instead of an ``OSError``.
+
+    ``execute_child`` raises whatever ``Popen`` raises, and a spawn can fail for
+    reasons no preflight can rule out: fd exhaustion (``EMFILE``), memory
+    pressure (``ENOMEM``), or an argv that clears ``validate_script_args``'
+    conservative bound but not the kernel's real one (``E2BIG``). Left
+    unhandled, that escapes as a raw exception — aborting an experiment whose
+    earlier attempts already ran, and failing a job that was admitted with a
+    ``job_id`` already returned to the client.
+
+    The MiniZinc runner already wraps its own launch this way
+    (``MiniZincExecutionError``); this is the CP-SAT protocol's equivalent, kept
+    at the protocol layer rather than inside the shared executor so MiniZinc's
+    handler keeps firing.
+
+    ``return_code`` is ``None`` because no child ever existed to exit — the same
+    "no meaningful exit status" contract the timeout branch uses, never a
+    synthesized code. ``duration_ms`` is 0: nothing ran.
+    """
+    result = CpsatPythonResult(
+        status="error",
+        solution=None,
+        objective=None,
+        stdout="",
+        stderr=f"failed to start the Python child process: {exc}",
+        return_code=None,
+        timed_out=False,
+        truncated=False,
+        duration_ms=0,
+    )
+    result.diagnostic = cpsat_result_diagnostic(result)
+    return result
+
+
 def _classify_child_result(child: ChildExecutionResult) -> CpsatPythonResult:
     if child.timed_out:
         # Recover the best-so-far if the script emitted intermediate result blocks
@@ -423,14 +458,17 @@ def run_cpsat_python(
         script = tmp / "script.py"
         script.write_text(source, encoding="utf-8")
         # Run from the temp dir: an inline snippet has no sibling files to find.
-        child = execute_child(
-            _python_script_argv(script),
-            cwd=tmp,
-            timeout_ms=timeout_ms,
-            tracker=tracker,
-            on_start=on_start,
-            env=env,
-        )
+        try:
+            child = execute_child(
+                _python_script_argv(script),
+                cwd=tmp,
+                timeout_ms=timeout_ms,
+                tracker=tracker,
+                on_start=on_start,
+                env=env,
+            )
+        except OSError as exc:
+            return _spawn_failure_result(exc)
         return _result_from_child(child)
 
 
@@ -454,8 +492,9 @@ def run_cpsat_python_file(
     relative ``include`` resolves.
 
     Validates the path (exists / regular file / non-empty / UTF-8) and ``args``
-    (no embedded NUL, which ``Popen`` rejects at spawn time) with a clear
-    ``ValueError`` before any child is spawned. Same execution contract, output
+    (no embedded NUL, and a bounded total encoding — both of which ``Popen``
+    rejects at spawn time) with a clear ``ValueError`` before any child is
+    spawned. Same execution contract, output
     cap, timeout, tree-kill, and INTERNAL ``env`` overlay (see ``run_cpsat_python``)
     as ``run_cpsat_python``.
 
@@ -466,14 +505,17 @@ def run_cpsat_python_file(
     """
     resolved = validate_script_path(script_path)
     validate_script_args(args)
-    child = execute_child(
-        _python_script_argv(resolved, args),
-        cwd=resolved.parent,
-        timeout_ms=timeout_ms,
-        tracker=tracker,
-        on_start=on_start,
-        env=env,
-    )
+    try:
+        child = execute_child(
+            _python_script_argv(resolved, args),
+            cwd=resolved.parent,
+            timeout_ms=timeout_ms,
+            tracker=tracker,
+            on_start=on_start,
+            env=env,
+        )
+    except OSError as exc:
+        return _spawn_failure_result(exc)
     return _result_from_child(child)
 
 

@@ -11,7 +11,11 @@ from typing import Any
 
 import pytest
 
-from openconstraint_mcp.pyexec.script_path import validate_script_args, validate_script_path
+from openconstraint_mcp.pyexec.script_path import (
+    MAX_CHILD_ARGV_BYTES,
+    validate_script_args,
+    validate_script_path,
+)
 
 
 def test_valid_script_returns_the_resolved_absolute_path(tmp_path: Path) -> None:
@@ -87,3 +91,37 @@ def test_nul_arg_is_rejected_with_its_own_index() -> None:
 def test_nul_rejection_names_the_caller_facing_parameter() -> None:
     with pytest.raises(ValueError, match=r"attempts\[2\]\.args\[0\] contains a NUL"):
         validate_script_args(["\0"], parameter="attempts[2].args")
+
+
+def test_argv_at_the_size_bound_is_accepted() -> None:
+    # One entry costs len + 1 for its separating NUL, so this lands exactly on
+    # the cap rather than one byte over it.
+    args = ["x" * (MAX_CHILD_ARGV_BYTES - 1)]
+    assert validate_script_args(args) is None
+
+
+def test_oversized_single_arg_is_rejected() -> None:
+    with pytest.raises(ValueError, match=r"args encodes to \d+ bytes, exceeding"):
+        validate_script_args(["x" * MAX_CHILD_ARGV_BYTES])
+
+
+def test_oversized_argv_total_is_rejected_though_each_entry_is_small() -> None:
+    # Every entry is far under any per-argument cap; only the aggregate is over,
+    # which is the E2BIG mode a per-entry check alone would miss.
+    args = ["y" * 1024] * 64
+    with pytest.raises(ValueError, match=r"args encodes to \d+ bytes, exceeding"):
+        validate_script_args(args)
+
+
+def test_size_rejection_names_the_caller_facing_parameter() -> None:
+    with pytest.raises(ValueError, match=r"attempts\[2\]\.args encodes to \d+ bytes"):
+        validate_script_args(["x" * MAX_CHILD_ARGV_BYTES], parameter="attempts[2].args")
+
+
+def test_size_is_measured_in_utf8_bytes_not_characters() -> None:
+    # A 3-byte-per-character string is over the byte cap while being well under
+    # it by len(), so a character-based check would wrongly admit this.
+    args = ["中" * (MAX_CHILD_ARGV_BYTES // 2)]
+    assert len(args[0]) < MAX_CHILD_ARGV_BYTES
+    with pytest.raises(ValueError, match=r"args encodes to \d+ bytes, exceeding"):
+        validate_script_args(args)

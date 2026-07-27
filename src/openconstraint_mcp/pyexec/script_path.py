@@ -15,6 +15,21 @@ from __future__ import annotations
 
 from pathlib import Path
 
+# `Popen` also rejects argv on SIZE, not just content, and every platform draws
+# the line differently: Linux caps a SINGLE argument at MAX_ARG_STRLEN (32 pages
+# = 128 KiB) and the whole argv+environ block at ARG_MAX, macOS caps argv+environ
+# at 256 KiB, and Windows caps the composed command line at 32767 characters.
+# This bound is the tightest of those, applied to the combined UTF-8 encoding of
+# `args`, because `args` is a flag/path list, not a data channel — a script's
+# bulk input belongs in a file the script opens, which is also the only form the
+# 1 MiB child-output cap and the save path's replay can handle.
+#
+# It is a CONSERVATIVE HEURISTIC, not a reproduction of any OS limit: the real
+# ceiling also counts the interpreter path, the script path, and the inherited
+# environment, none of which this function is given. It shrinks the spawn-failure
+# window to inputs no legitimate caller sends; it does not close it.
+MAX_CHILD_ARGV_BYTES: int = 32 * 1024
+
 
 def validate_script_path(path: Path, *, parameter: str = "script_path") -> Path:
     """Resolve and validate a Python script path before any subprocess.
@@ -46,21 +61,36 @@ def validate_script_path(path: Path, *, parameter: str = "script_path") -> Path:
 def validate_script_args(args: list[str] | None, *, parameter: str = "args") -> None:
     """Reject child ``sys.argv[1:]`` entries that cannot survive a spawn.
 
-    A NUL makes ``subprocess.Popen`` raise ``ValueError: embedded null byte``
-    at spawn time rather than at argument-validation time. Callers that
-    validate up front — the experiment's before-ANY-attempt pass, the job
-    registry's before-admission pass — need that rejection to happen in their
+    ``subprocess.Popen`` rejects argv at SPAWN time rather than at
+    argument-validation time, in two ways Pydantic's ``list[str]`` does not
+    already exclude: an embedded NUL raises ``ValueError: embedded null byte``,
+    and an oversized argv raises ``OSError(E2BIG)`` — the latter from a single
+    argument over the per-argument cap, not only from a large total. Callers
+    that validate up front — the experiment's before-ANY-attempt pass, the job
+    registry's before-admission pass — need both rejections to happen in their
     own preflight, or an already-spawned child (or an already-created job
-    record) outlives a request that was invalid from the start.
+    record) outlives a request that was invalid from the start. An E2BIG raised
+    mid-run is the worse of the two: it surfaces as a raw ``OSError`` rather
+    than a structured result, after earlier attempts have already executed.
 
-    Since Pydantic already constrains these to ``list[str]``, an embedded NUL
-    is the only remaining argv content ``Popen`` rejects on POSIX, so this is
-    the whole check rather than one instance of a broader class. ``None`` and
-    ``[]`` are valid — they mean "no arguments".
+    The size bound is deliberately conservative and cannot be exact (see
+    ``MAX_CHILD_ARGV_BYTES``), so it makes an oversized argv a structured
+    rejection for any plausible caller without claiming a spawn can never fail
+    on size. ``None`` and ``[]`` are valid — they mean "no arguments".
     """
+    total_bytes = 0
     for index, arg in enumerate(args or ()):
         if "\0" in arg:
             raise ValueError(
                 f"{parameter}[{index}] contains a NUL character, which cannot be "
                 "passed to a child process"
             )
+        # Counted per entry (plus one byte for the separating NUL the kernel
+        # stores) so the total reflects the argv block the spawn actually builds.
+        total_bytes += len(arg.encode("utf-8")) + 1
+    if total_bytes > MAX_CHILD_ARGV_BYTES:
+        raise ValueError(
+            f"{parameter} encodes to {total_bytes} bytes, exceeding "
+            f"MAX_CHILD_ARGV_BYTES={MAX_CHILD_ARGV_BYTES}; pass bulk data in a file "
+            "the script opens rather than on the command line"
+        )

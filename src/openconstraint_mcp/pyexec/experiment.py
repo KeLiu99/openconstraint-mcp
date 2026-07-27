@@ -178,7 +178,8 @@ def _validate_attempts(
 
     Raises ``ValueError`` for: an empty attempts list, an attempt that sets
     both or neither of ``source``/``script_path``, ``args`` without
-    ``script_path``, an ``args`` entry containing a NUL character, an
+    ``script_path``, an ``args`` entry containing a NUL character,
+    an ``args`` list whose total encoding exceeds ``MAX_CHILD_ARGV_BYTES``, an
     empty/whitespace-only source, an unusable ``script_path`` (missing, not a
     file, empty, or non-UTF-8), an out-of-range seed, an oversized config, a
     non-positive ``timeout_ms``, or a name collision (explicit vs. explicit, or
@@ -215,8 +216,9 @@ def _validate_attempts(
             resolved_paths.append(None)
         else:
             # `Path.resolve()` below already rejects a NUL in `script_path`
-            # itself; `args` needs its own check or `Popen` would raise mid-run,
-            # after earlier attempts' children had already executed.
+            # itself; `args` needs its own check (NUL and total size) or `Popen`
+            # would raise mid-run — as a raw OSError for the size case, after
+            # earlier attempts' children had already executed.
             validate_script_args(attempt.args, parameter=f"attempts[{index}].args")
             resolved_paths.append(
                 validate_script_path(

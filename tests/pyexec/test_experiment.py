@@ -1545,3 +1545,68 @@ def test_mixed_inline_and_script_path_attempts_race_in_one_experiment(
 
     assert result.winner_name == "from_file"
     assert [row.used_script_path for row in result.attempts] == [False, True]
+
+
+# --- spawn failure: one attempt cannot start ---------------------------------
+
+
+def _patch_execute_child_failing_on(monkeypatch: pytest.MonkeyPatch, failing_source: str) -> None:
+    """Fail the spawn for one attempt's script, run the rest normally.
+
+    Patched at ``core.execute_child`` rather than at ``experiment.run_cpsat_python``
+    so the real spawn-failure handling in ``core`` is what's under test.
+    """
+    from openconstraint_mcp.shared.childrun import ChildExecutionResult
+
+    def _fake(argv: Any, cwd: Any, **kw: Any) -> ChildExecutionResult:
+        source = (Path(cwd) / "script.py").read_text(encoding="utf-8")
+        if source == failing_source:
+            raise OSError(7, "Argument list too long")
+        return ChildExecutionResult(
+            stdout=json.dumps({"status": "optimal", "objective": 5, "solution": {"x": 1}}),
+            stderr="",
+            return_code=0,
+            timed_out=False,
+            truncated=False,
+            duration_ms=1,
+        )
+
+    monkeypatch.setattr("openconstraint_mcp.pyexec.core.execute_child", _fake)
+
+
+def test_experiment_survives_an_attempt_that_cannot_spawn(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _patch_execute_child_failing_on(monkeypatch, "b")
+
+    result = run_cpsat_python_experiment(
+        [_attempt("a"), _attempt("b")], objective_sense="minimize"
+    )
+
+    assert result.status == "winner"
+
+
+def test_spawn_failure_does_not_discard_the_other_attempts_rows(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # The pre-fix behaviour raised OSError out of pool.map, losing every row —
+    # including attempts whose children had already run to completion.
+    _patch_execute_child_failing_on(monkeypatch, "b")
+
+    result = run_cpsat_python_experiment(
+        [_attempt("a"), _attempt("b")], objective_sense="minimize"
+    )
+
+    assert len(result.attempts) == 2
+
+
+def test_unspawnable_attempt_is_reported_as_not_accepted(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _patch_execute_child_failing_on(monkeypatch, "b")
+
+    result = run_cpsat_python_experiment(
+        [_attempt("a"), _attempt("b")], objective_sense="minimize"
+    )
+
+    assert result.attempts[1].accepted is False

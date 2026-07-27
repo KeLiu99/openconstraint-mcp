@@ -1082,3 +1082,54 @@ def test_checked_run_invalid_checker_path_spawns_nothing(tmp_path: Path) -> None
 def test_checked_run_invalid_script_path_spawns_nothing(tmp_path: Path) -> None:
     _, checker = _checked_pair(tmp_path)
     _assert_no_child_spawned(tmp_path / "nope.py", checker, r"script_path does not exist")
+
+
+def test_inline_run_spawn_failure_returns_structured_error(tmp_path: Path) -> None:
+    with patch(
+        "openconstraint_mcp.pyexec.core.execute_child",
+        side_effect=OSError(7, "Argument list too long"),
+    ):
+        result = run_cpsat_python("print(1)", timeout_ms=1000)
+    assert result.status == "error"
+
+
+def test_spawn_failure_reports_no_return_code(tmp_path: Path) -> None:
+    # No child existed, so there is no exit status to report — never a synthesized code.
+    with patch(
+        "openconstraint_mcp.pyexec.core.execute_child",
+        side_effect=OSError(7, "Argument list too long"),
+    ):
+        result = run_cpsat_python("print(1)", timeout_ms=1000)
+    assert result.return_code is None
+
+
+def test_spawn_failure_surfaces_the_os_error_in_stderr() -> None:
+    with patch(
+        "openconstraint_mcp.pyexec.core.execute_child",
+        side_effect=OSError(7, "Argument list too long"),
+    ):
+        result = run_cpsat_python("print(1)", timeout_ms=1000)
+    assert "failed to start the Python child process" in result.stderr
+    assert "Argument list too long" in result.stderr
+
+
+def test_file_run_spawn_failure_returns_structured_error(tmp_path: Path) -> None:
+    script = tmp_path / "model.py"
+    script.write_text("print(1)", encoding="utf-8")
+    with patch(
+        "openconstraint_mcp.pyexec.core.execute_child",
+        side_effect=OSError(24, "Too many open files"),
+    ):
+        result = run_cpsat_python_file(script, timeout_ms=1000)
+    assert result.status == "error"
+    assert "Too many open files" in result.stderr
+
+
+def test_spawn_failure_result_carries_a_diagnostic() -> None:
+    # The error path must be as inspectable as any other result the tools return.
+    with patch(
+        "openconstraint_mcp.pyexec.core.execute_child",
+        side_effect=OSError(12, "Cannot allocate memory"),
+    ):
+        result = run_cpsat_python("print(1)", timeout_ms=1000)
+    assert result.diagnostic is not None

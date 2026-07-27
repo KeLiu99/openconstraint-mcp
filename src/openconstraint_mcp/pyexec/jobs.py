@@ -190,10 +190,10 @@ class CpsatJobRegistry:
 
         Validates ``timeout_ms``, the optional checker args, the path
         (exists / regular file / non-empty / UTF-8), AND ``args`` (no embedded
-        NUL) before admission so a bad argument raises ``ValueError``
-        synchronously and no job record is created — a NUL would otherwise
-        surface only when the queued child was spawned, long after this call
-        returned a ``job_id``. Raises ``JobRejectedError`` when the queue is
+        NUL, bounded total encoding) before admission so a bad argument raises
+        ``ValueError`` synchronously and no job record is created — either would
+        otherwise surface only when the queued child was spawned, long after this
+        call returned a ``job_id``. Raises ``JobRejectedError`` when the queue is
         full.
 
         ``args`` becomes the child's ``sys.argv[1:]``; it is snapshotted here at
