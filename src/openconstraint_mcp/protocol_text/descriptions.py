@@ -795,8 +795,8 @@ _RUN_CPSAT_PYTHON_FILE_MID = (
 )
 
 # Shared by every tool that forwards `args` to a child — `run_cpsat_python_file`
-# (both profiles), `run_cpsat_python_file_checked`, and
-# `submit_cpsat_python_file_job` — so the three cannot drift on what they reject.
+# (both profiles), `run_cpsat_python_file_checked`, `run_cpsat_python_experiment`,
+# and `submit_cpsat_python_file_job` — so they cannot drift on what they reject.
 _CPSAT_ARGS_LIMITS = (
     "`args` is a flag/path list, not a data channel: an entry containing a NUL, "
     "or a list whose combined UTF-8 encoding exceeds 32 KiB, is rejected with an "
@@ -935,8 +935,9 @@ RUN_CPSAT_PYTHON_EXPERIMENT_DESCRIPTION = (
     "path to an existing UTF-8 Python script) [EXACTLY ONE of the two, never "
     "both and never neither], `args` (optional list of strings appended after "
     "`script_path` as the child's `sys.argv[1:]`; rejected when supplied "
-    "alongside `source` rather than silently ignored), `seed` (optional "
-    "non-bool integer "
+    "alongside `source` rather than silently ignored). "
+    + _CPSAT_ARGS_LIMITS
+    + "`seed` (optional non-bool integer "
     "in the CP-SAT random_seed signed-int32 range), `config` (optional JSON "
     "object, default `{}`), `timeout_ms` (optional per-attempt override)}). "
     "A `script_path` attempt runs with `cwd` set to the script's own parent "

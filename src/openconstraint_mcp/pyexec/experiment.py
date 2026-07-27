@@ -278,7 +278,14 @@ def _validate_attempts(
             # Hash the raw bytes off disk: Path.read_text() would translate
             # CRLF/lone-CR to "\n" before hashing, which is exactly the
             # normalization text_sha256's exact-hash contract forbids.
-            resolved_paths.append(_ResolvedScript(resolved, path_sha256(resolved)))
+            try:
+                source_hash = path_sha256(resolved)
+            except OSError as exc:
+                raise ValueError(
+                    f"attempts[{index}].script_path became unreadable during validation: "
+                    f"{resolved} ({exc})"
+                ) from exc
+            resolved_paths.append(_ResolvedScript(resolved, source_hash))
         if attempt.seed is not None:
             validate_cpsat_random_seed(attempt.seed, label=f"attempts[{index}].seed")
         if attempt.config:

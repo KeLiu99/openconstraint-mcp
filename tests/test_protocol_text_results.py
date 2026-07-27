@@ -108,6 +108,35 @@ def test_experiment_timeout_winner_is_best_so_far_and_not_savable_until_rerun() 
     assert "until it reports optimal/feasible" in text
 
 
+def test_experiment_text_marks_script_path_attempts() -> None:
+    result = CpsatPythonExperimentResult(
+        status="no_winner",
+        attempts=[
+            CpsatPythonExperimentAttemptResult(
+                index=0,
+                name="from-file",
+                source_sha256="abc123",
+                used_script_path=True,
+                timeout_ms=1000,
+                status="infeasible",
+                objective=None,
+                accepted=False,
+                timed_out=False,
+                truncated=False,
+                duration_ms=5,
+            )
+        ],
+        elapsed_ms=5,
+        objective_sense=None,
+        selection_policy="accepted_status_then_duration_then_attempt_order",
+        source_sha256=["abc123"],
+    )
+
+    text = format_cpsat_experiment_content(result)
+
+    assert "'from-file' (seed None, via=script_path)" in text
+
+
 def _tabular(headers: list[str], available_sheets: list[str] | None = None) -> TabularData:
     return TabularData(
         headers=headers,

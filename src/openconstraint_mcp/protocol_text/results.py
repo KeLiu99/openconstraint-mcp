@@ -154,7 +154,8 @@ def format_cpsat_experiment_content(result: CpsatPythonExperimentResult) -> str:
     """Return model-visible experiment output: winner first, then the attempt table.
 
     Concise — the full per-attempt ``CpsatPythonResult`` winner and metadata ride in
-    ``structuredContent``. Notes when a ``timeout`` winner is not savable.
+    ``structuredContent``. Marks path-backed attempts and notes when a ``timeout``
+    winner is not savable.
     """
     if result.status == "winner":
         assert result.winner is not None  # guaranteed by the result's status invariant
@@ -187,6 +188,7 @@ def format_cpsat_experiment_content(result: CpsatPythonExperimentResult) -> str:
     )
     for attempt in result.attempts:
         verdict = "accepted" if attempt.accepted else "rejected"
+        origin = ", via=script_path" if attempt.used_script_path else ""
         checker = f", checker={attempt.checker_status}" if attempt.checker_status else ""
         reason = f" — {attempt.message}" if attempt.message and not attempt.accepted else ""
         bound = (
@@ -195,7 +197,7 @@ def format_cpsat_experiment_content(result: CpsatPythonExperimentResult) -> str:
             else ""
         )
         lines.append(
-            f"- {attempt.name!r} (seed {attempt.seed}): status={attempt.status}, "
+            f"- {attempt.name!r} (seed {attempt.seed}{origin}): status={attempt.status}, "
             f"objective={attempt.objective}{bound}, {verdict}{checker}{reason}"
         )
     if result.warnings:

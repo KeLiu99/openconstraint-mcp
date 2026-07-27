@@ -383,15 +383,15 @@ async def test_cpsat_file_tools_advertise_an_args_parameter() -> None:
 
 
 @pytest.mark.asyncio
-async def test_cpsat_file_tools_document_the_args_rejection_limits() -> None:
+async def test_cpsat_tools_document_the_args_rejection_limits() -> None:
     # Every tool that forwards `args` to a child enforces the NUL/size preflight,
     # so every one of them must say so: a client that learns the rule only from a
-    # rejection has already wasted a call, and the experiment tool's own
-    # description already documents it for `attempts[i].args`.
+    # rejection has already wasted a call.
     tools = await _tools_by_name("full")
     for name in (
         "run_cpsat_python_file",
         "run_cpsat_python_file_checked",
+        "run_cpsat_python_experiment",
         "submit_cpsat_python_file_job",
     ):
         description = tools[name].description or ""

@@ -511,6 +511,27 @@ async def test_tool_experiment_budget_exposes_invalid_request() -> None:
     assert "budget" in str(exc_info.value)
 
 
+@pytest.mark.asyncio
+async def test_tool_experiment_hash_race_exposes_indexed_invalid_request(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    script = tmp_path / "model.py"
+    script.write_text("print('x')", encoding="utf-8")
+
+    def _disappeared(_path: Path) -> str:
+        raise FileNotFoundError("disappeared before hashing")
+
+    monkeypatch.setattr("openconstraint_mcp.pyexec.experiment.path_sha256", _disappeared)
+    fn = _tool_fn("run_cpsat_python_experiment")
+
+    with pytest.raises(RuntimeError) as exc_info:
+        await fn(attempts=[CpsatPythonExperimentAttempt(script_path=str(script))])
+
+    assert str(exc_info.value).startswith(
+        "Diagnostic: invalid_request — attempts[0].script_path became unreadable"
+    )
+
+
 # --- tabular I/O tools: every rejection reaches the client as an MCP error ------
 
 
