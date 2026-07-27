@@ -935,12 +935,12 @@ RUN_CPSAT_PYTHON_EXPERIMENT_DESCRIPTION = (
     "path to an existing UTF-8 Python script) [EXACTLY ONE of the two, never "
     "both and never neither], `args` (optional list of strings appended after "
     "`script_path` as the child's `sys.argv[1:]`; rejected when supplied "
-    "alongside `source` rather than silently ignored). "
-    + _CPSAT_ARGS_LIMITS
-    + "`seed` (optional non-bool integer "
+    "alongside `source` rather than silently ignored), `seed` (optional "
+    "non-bool integer "
     "in the CP-SAT random_seed signed-int32 range), `config` (optional JSON "
     "object, default `{}`), `timeout_ms` (optional per-attempt override)}). "
-    "A `script_path` attempt runs with `cwd` set to the script's own parent "
+    + _CPSAT_ARGS_LIMITS
+    + "A `script_path` attempt runs with `cwd` set to the script's own parent "
     "directory — exactly like `run_cpsat_python_file` — so a relative `open()` "
     "of a sibling data file resolves, and several attempts can race existing "
     "on-disk scripts against shared data with no duplicated source in the "

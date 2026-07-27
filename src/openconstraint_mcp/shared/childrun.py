@@ -59,7 +59,7 @@ class ChildSpawnError(OSError):
     """
 
 
-def _raise_spawn_error(exc: OSError) -> ChildSpawnError:
+def _as_spawn_error(exc: OSError) -> ChildSpawnError:
     """Re-key a launch ``OSError`` as ``ChildSpawnError``, preserving its detail.
 
     Message-only errors keep their original args. Structured errors carry over
@@ -215,7 +215,7 @@ def execute_child(
             except OSError as exc:
                 # ONLY this call is re-keyed: past it a child exists, so a later
                 # OSError must not be mistaken for "never launched".
-                raise _raise_spawn_error(exc) from exc
+                raise _as_spawn_error(exc) from exc
 
             registered = False
             try:
