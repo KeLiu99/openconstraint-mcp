@@ -150,6 +150,12 @@ def _script_invalidated_result(reason: str) -> CpsatPythonResult:
     ``duration_ms`` is 0 and ``return_code`` ``None``: this result describes the
     invalidation, not a child's verdict. Any output the run did produce is
     deliberately dropped, because it cannot be attributed to known bytes.
+
+    No ``diagnostic`` is set, unlike ``core._spawn_failure_result``. That one is
+    handed to a client verbatim as a tool result, so it has to carry its own;
+    this one only ever feeds ``_run_attempt``, whose row diagnostic
+    ``experiment_attempt_diagnostic`` derives from the result itself. Setting it
+    here would be redundant, not missing.
     """
     return CpsatPythonResult(
         status="error",
@@ -261,10 +267,10 @@ def _validate_attempts(
                 raise ValueError(f"attempts[{index}].source must be non-empty")
             resolved_paths.append(None)
         else:
-            # `Path.resolve()` below already rejects a NUL in `script_path`
-            # itself; `args` needs its own check (NUL and total size) or `Popen`
-            # would raise mid-run — as a raw OSError for the size case, after
-            # earlier attempts' children had already executed.
+            # `validate_script_path` below rejects a NUL in `script_path` itself;
+            # `args` needs its own check (NUL and total size) or `Popen` would
+            # raise mid-run — as a raw OSError for the size case, after earlier
+            # attempts' children had already executed.
             validate_script_args(attempt.args, parameter=f"attempts[{index}].args")
             resolved = validate_script_path(
                 Path(attempt.script_path), parameter=f"attempts[{index}].script_path"
@@ -568,24 +574,29 @@ def _run_attempt(
                     tracker=tracker,
                     env=env,
                 )
+            except ValueError as exc:
+                # The runner revalidates a path that was valid at request time.
+                result = _script_invalidated_result(
+                    f"{resolved_path.path} became unusable during the experiment: {exc}"
+                )
+            else:
                 # Re-hash AFTER the run: if the file moved between validation and
                 # now, `result` describes bytes `source_hash` does not, so the
                 # attempt is invalidated instead of being reported with a digest
                 # that never ran.
-                if path_sha256(resolved_path.path) != source_hash:
+                try:
+                    current_hash = path_sha256(resolved_path.path)
+                except OSError as exc:
                     result = _script_invalidated_result(
-                        f"{resolved_path.path} changed on disk during the experiment; "
-                        "this attempt's result cannot be attributed to its recorded "
-                        "source_sha256"
+                        f"{resolved_path.path} became unusable during the experiment: {exc}"
                     )
-            except (OSError, ValueError) as exc:
-                # OSError: the post-run re-hash found the file gone. ValueError:
-                # run_cpsat_python_file's own validate_script_path rejected a path
-                # that was valid at request time. Either way, fail this attempt
-                # only — never the whole experiment.
-                result = _script_invalidated_result(
-                    f"{resolved_path.path} became unusable during the experiment: {exc}"
-                )
+                else:
+                    if current_hash != source_hash:
+                        result = _script_invalidated_result(
+                            f"{resolved_path.path} changed on disk during the experiment; "
+                            "this attempt's result cannot be attributed to its recorded "
+                            "source_sha256"
+                        )
         else:
             assert attempt.source is not None  # guaranteed by _validate_attempts' exactly-one-of
             source_hash = text_sha256(attempt.source)

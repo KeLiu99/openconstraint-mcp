@@ -382,6 +382,34 @@ async def test_cpsat_file_tools_advertise_an_args_parameter() -> None:
         )
 
 
+@pytest.mark.asyncio
+async def test_cpsat_file_tools_document_the_args_rejection_limits() -> None:
+    # Every tool that forwards `args` to a child enforces the NUL/size preflight,
+    # so every one of them must say so: a client that learns the rule only from a
+    # rejection has already wasted a call, and the experiment tool's own
+    # description already documents it for `attempts[i].args`.
+    tools = await _tools_by_name("full")
+    for name in (
+        "run_cpsat_python_file",
+        "run_cpsat_python_file_checked",
+        "submit_cpsat_python_file_job",
+    ):
+        description = tools[name].description or ""
+        assert "contains a NUL" in description or "containing a NUL" in description, (
+            f"{name} does not document the NUL rejection"
+        )
+        assert "32 KiB" in description, f"{name} does not document the argv size bound"
+
+
+@pytest.mark.asyncio
+async def test_run_cpsat_python_file_core_profile_documents_the_args_limits() -> None:
+    # The core profile publishes its own trimmed description; the limits are a
+    # rejection rule, not a full-profile extra, so they must survive the trim.
+    tools = await _tools_by_name("core")
+    description = tools["run_cpsat_python_file"].description or ""
+    assert "32 KiB" in description
+
+
 async def _core_solve_description_openings() -> dict[str, str]:
     """Each core solve tool's advertised description, cut to its leading window.
 

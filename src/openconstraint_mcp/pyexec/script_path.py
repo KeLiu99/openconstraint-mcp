@@ -42,6 +42,8 @@ def validate_script_path(path: Path, *, parameter: str = "script_path") -> Path:
     same path for argv and its parent for ``cwd`` — a relative input can't then
     double-count its subdir.
     """
+    if "\0" in str(path):
+        raise ValueError(f"{parameter} contains a NUL character: {path!r}")
     resolved = path.resolve()
     if not resolved.exists():
         raise ValueError(f"{parameter} does not exist: {resolved}")

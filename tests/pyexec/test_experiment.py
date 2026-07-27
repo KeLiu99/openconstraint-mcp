@@ -1606,6 +1606,20 @@ def test_unspawnable_attempt_is_reported_as_not_accepted(
     assert result.attempts[1].accepted is False
 
 
+def test_file_attempt_post_launch_oserror_propagates(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    script = _write_script(tmp_path)
+
+    def _raise(_script_path: Path, **_kwargs: Any) -> CpsatPythonResult:
+        raise OSError(5, "post-launch cleanup failed")
+
+    monkeypatch.setattr("openconstraint_mcp.pyexec.experiment.run_cpsat_python_file", _raise)
+
+    with pytest.raises(OSError, match="post-launch cleanup failed"):
+        run_cpsat_python_experiment([CpsatPythonExperimentAttempt(script_path=str(script))])
+
+
 # --- script_path invalidated mid-experiment ----------------------------------
 
 
@@ -1661,6 +1675,22 @@ def test_deleted_script_attempt_is_not_accepted(
     result = run_cpsat_python_experiment(attempts, max_parallel_attempts=1)
 
     assert result.attempts[1].accepted is False
+
+
+def test_script_deleted_during_its_run_is_not_accepted(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    script = _write_script(tmp_path)
+
+    def _delete(script_path: Path, **_kwargs: Any) -> CpsatPythonResult:
+        script_path.unlink()
+        return _result()
+
+    monkeypatch.setattr("openconstraint_mcp.pyexec.experiment.run_cpsat_python_file", _delete)
+
+    result = run_cpsat_python_experiment([CpsatPythonExperimentAttempt(script_path=str(script))])
+
+    assert result.attempts[0].accepted is False
 
 
 def test_script_rewritten_mid_experiment_invalidates_only_that_attempt(

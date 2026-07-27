@@ -78,6 +78,11 @@ def test_parameter_defaults_to_script_path(tmp_path: Path) -> None:
         validate_script_path(tmp_path / "nope.py")
 
 
+def test_nul_path_names_the_caller_facing_parameter() -> None:
+    with pytest.raises(ValueError, match=r"attempts\[1\]\.script_path contains a NUL"):
+        validate_script_path(Path("bad\0path.py"), parameter="attempts[1].script_path")
+
+
 @pytest.mark.parametrize("args", [None, [], ["ok"], ["--seed", "7"]])
 def test_valid_args_are_accepted(args: list[str] | None) -> None:
     assert validate_script_args(args) is None

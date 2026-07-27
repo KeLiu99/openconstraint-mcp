@@ -794,13 +794,24 @@ _RUN_CPSAT_PYTHON_FILE_MID = (
     "from the server's own launch environment. "
 )
 
+# Shared by every tool that forwards `args` to a child — `run_cpsat_python_file`
+# (both profiles), `run_cpsat_python_file_checked`, and
+# `submit_cpsat_python_file_job` — so the three cannot drift on what they reject.
+_CPSAT_ARGS_LIMITS = (
+    "`args` is a flag/path list, not a data channel: an entry containing a NUL, "
+    "or a list whose combined UTF-8 encoding exceeds 32 KiB, is rejected with an "
+    "actionable MCP error UP FRONT rather than surfacing as a spawn-time failure "
+    "(the OS refuses both when the child is launched). Pass bulk input in a file "
+    "the script opens. "
+)
+
 _RUN_CPSAT_PYTHON_FILE_ARGS = (
     "Optional `args` (a list of strings) is appended after the script path, so "
     "the script reads it as `sys.argv[1:]` — pass it for a script that takes its "
     'data file or a flag on the command line (e.g. `args=["data_ft10.json"]` '
     "runs an `examples/job_shop/model.py`-style script against that instance "
     "instead of its hardcoded default, with no edit to the source). Omitting it "
-    "runs the script with no arguments. "
+    "runs the script with no arguments. " + _CPSAT_ARGS_LIMITS
 )
 
 _RUN_CPSAT_PYTHON_FILE_CHECKED_REPLAY_FULL = (
@@ -864,7 +875,8 @@ RUN_CPSAT_PYTHON_FILE_CHECKED_DESCRIPTION = (
     "`checker_timeout_ms` defaults to `timeout_ms`. `args` is appended after "
     "`script_path` as the model script's `sys.argv[1:]`; `seed`/`config` are "
     "the same replay aids `run_cpsat_python_file` documents. "
-    "Returns a CpsatPythonCheckedResult: every CpsatPythonResult field, plus "
+    + _CPSAT_ARGS_LIMITS
+    + "Returns a CpsatPythonCheckedResult: every CpsatPythonResult field, plus "
     "`checker` (the CpsatCheckerReport, whose `status` is the verdict), "
     "`checker_skipped_reason` (set INSTEAD of `checker` when the run produced no "
     "checkable incumbent — the two are mutually exclusive), and "
@@ -1189,6 +1201,8 @@ SUBMIT_CPSAT_PYTHON_FILE_JOB_DESCRIPTION = (
     "data file or a flag on the command line, exactly as with "
     "`run_cpsat_python_file`. It is recorded at admission, so the job runs the "
     "values supplied on submit even while it waits in the queue. "
+    + _CPSAT_ARGS_LIMITS
+    + "That rejection happens at admission too, so no job record is created. "
     + _CPSAT_JOB_CHECKER_NOTE
     + _REGISTRY_NOTE
     + " "

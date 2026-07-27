@@ -62,12 +62,20 @@ class ChildSpawnError(OSError):
 def _raise_spawn_error(exc: OSError) -> ChildSpawnError:
     """Re-key a launch ``OSError`` as ``ChildSpawnError``, preserving its detail.
 
-    ``errno``/``strerror``/``filename`` are carried over rather than folded into
-    a formatted string, so ``str()`` renders identically to the original and a
-    caller can still branch on ``errno``.
+    Message-only errors keep their original args. Structured errors carry over
+    ``errno``/``strerror``/filenames and Windows ``winerror``, so ``str()``
+    renders identically and callers can still branch on the platform error code.
     """
+    if exc.errno is None:
+        return ChildSpawnError(*exc.args)
+    winerror = getattr(exc, "winerror", None)
+    if winerror is not None:
+        return ChildSpawnError(exc.errno, exc.strerror, exc.filename, winerror, exc.filename2)
     spawn_error = ChildSpawnError(exc.errno, exc.strerror)
-    spawn_error.filename = exc.filename
+    if exc.filename is not None:
+        spawn_error.filename = exc.filename
+    if exc.filename2 is not None:
+        spawn_error.filename2 = exc.filename2
     return spawn_error
 
 

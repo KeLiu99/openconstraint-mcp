@@ -684,6 +684,34 @@ def test_child_spawn_error_preserves_the_original_errno() -> None:
     assert excinfo.value.errno == 7
 
 
+def test_child_spawn_error_preserves_message_only_oserror_text() -> None:
+    original = OSError("posix_spawn failed for some reason")
+    with (
+        patch(
+            "openconstraint_mcp.shared.childrun.popen_process_group",
+            side_effect=original,
+        ),
+        pytest.raises(ChildSpawnError) as excinfo,
+    ):
+        execute_child(_ARGV, Path(tempfile.gettempdir()), timeout_ms=5000, tracker=None)
+    assert str(excinfo.value) == str(original)
+
+
+@pytest.mark.skipif(not hasattr(OSError(), "winerror"), reason="Windows-only OSError metadata")
+def test_child_spawn_error_preserves_windows_error_detail() -> None:
+    original = OSError(5, "Access is denied", "python.exe", 5)
+    with (
+        patch(
+            "openconstraint_mcp.shared.childrun.popen_process_group",
+            side_effect=original,
+        ),
+        pytest.raises(ChildSpawnError) as excinfo,
+    ):
+        execute_child(_ARGV, Path(tempfile.gettempdir()), timeout_ms=5000, tracker=None)
+    assert excinfo.value.winerror == original.winerror
+    assert str(excinfo.value) == str(original)
+
+
 def test_child_spawn_error_is_an_oserror_so_minizinc_still_catches_it() -> None:
     # minizinc.core wraps its launch in `except OSError`; subclassing keeps that
     # handler firing unchanged.
