@@ -687,6 +687,28 @@ async def test_cpsat_python_solution_workflow_prompt_mentions_run_cpsat_python()
 
 
 @pytest.mark.asyncio
+async def test_cpsat_python_solution_workflow_prompt_offers_script_path_attempts() -> None:
+    # Step 6 must not hardcode a mandatory inline `source` any more: an attempt
+    # may instead name an existing on-disk script, with `args`.
+    text = await _get_prompt_text("cpsat_python_solution_workflow", {"problem": SAMPLE_PROBLEM})
+    normalized = " ".join(text.split()).lower()
+
+    assert "`{name, source | script_path, args, seed, config, timeout_ms}`" in normalized
+    assert "exactly one of `source`" in normalized
+
+
+@pytest.mark.asyncio
+async def test_cpsat_python_solution_workflow_prompt_warns_script_path_is_not_save_provenance() -> (
+    None
+):
+    text = await _get_prompt_text("cpsat_python_solution_workflow", {"problem": SAMPLE_PROBLEM})
+    normalized = " ".join(text.split()).lower()
+
+    assert "cannot serve as `save_verified_cpsat_python` provenance" in normalized
+    assert "accepted inline-`source` attempt matching this exact save" in normalized
+
+
+@pytest.mark.asyncio
 async def test_cpsat_python_solution_workflow_prompt_teaches_seed_protocol() -> None:
     # The client-facing protocol must not drift from the env-var contract the
     # save replay relies on: read OPENCONSTRAINT_MCP_CPSAT_SEED, fall back to
@@ -1046,6 +1068,27 @@ async def test_auto_tune_constraint_problem_prompt_cpsat_racing_not_split_per_ca
     assert "one `run_cpsat_python_experiment` call across the smoke-surviving cp-sat" in lower
     assert "not required to split into per-candidate calls" in lower
     assert "present solution" in lower
+
+
+@pytest.mark.asyncio
+async def test_auto_tune_constraint_problem_prompt_offers_script_path_attempts() -> None:
+    text = await _get_prompt_text("auto_tune_constraint_problem", {"problem": SAMPLE_PROBLEM})
+    lower = " ".join(text.split()).lower()
+
+    assert "`{name, source | script_path, args, seed, config, timeout_ms}`" in lower
+    assert "exactly one of a complete, independent inline `source` or a `script_path`" in lower
+    # The tool gained a path option on attempts only — checker/problem stay inline.
+    assert "`checker`/`problem` stay inline text for the whole call" in lower
+
+
+@pytest.mark.asyncio
+async def test_auto_tune_constraint_problem_prompt_requires_inline_source_for_save_provenance() -> (
+    None
+):
+    text = await _get_prompt_text("auto_tune_constraint_problem", {"problem": SAMPLE_PROBLEM})
+    lower = " ".join(text.split()).lower()
+
+    assert "a `script_path` attempt is never accepted as save provenance" in lower
 
 
 @pytest.mark.asyncio

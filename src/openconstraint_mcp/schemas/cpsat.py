@@ -313,8 +313,16 @@ CpsatExperimentCheckerStatus = Literal["accepted", "rejected", "error", "timeout
 class CpsatPythonExperimentAttempt(BaseModel):
     """One explicit attempt in a ``run_cpsat_python_experiment`` request.
 
-    ``source`` is a complete, independent CP-SAT Python script — the server does
-    not diff or merge attempts, so each one must be runnable on its own. ``name``
+    An attempt supplies its script EXACTLY ONE of two ways: inline ``source``,
+    or an on-disk ``script_path``. Setting both, or neither, is rejected before
+    any attempt runs. ``source`` is a complete, independent CP-SAT Python
+    script — the server does not diff or merge attempts, so each one must be
+    runnable on its own. ``script_path`` is a local path to such a script; it
+    runs with ``cwd`` set to the script's own parent directory (identically to
+    ``run_cpsat_python_file``), so a relative ``open()`` of a sibling data file
+    resolves. ``args`` are appended after the script path as ``sys.argv[1:]``
+    and are only meaningful with ``script_path`` — supplying them alongside
+    ``source`` is rejected rather than silently ignored. ``name``
     is optional; an unnamed attempt is assigned the display label
     ``attempt-{index}`` at execution time (see ``CpsatPythonExperimentAttemptResult``).
     ``seed`` injects ``OPENCONSTRAINT_MCP_CPSAT_SEED`` for a cooperating script,
@@ -329,7 +337,9 @@ class CpsatPythonExperimentAttempt(BaseModel):
     """
 
     name: str | None = None
-    source: str
+    source: str | None = None
+    script_path: str | None = None
+    args: list[str] | None = None
     seed: StrictInt | None = None
     config: dict[str, JsonValue] = Field(default_factory=dict)
     timeout_ms: int | None = None
@@ -343,8 +353,17 @@ class CpsatPythonExperimentAttemptResult(BaseModel):
     ``winner_name`` and as the uniqueness key attempts were validated over.
     ``config_sha256`` is the canonical-JSON hash of this attempt's ``config``,
     or ``None`` when the attempt ran with no config (``{}`` and omitted are
-    equivalent). ``source_sha256`` is this attempt's exact source text hash —
-    provenance for a later save's replay-consistency check. ``checker_status``
+    equivalent). ``source_sha256`` is this attempt's exact script hash —
+    provenance for a later save's replay-consistency check; unnormalized in
+    both branches (the inline text as given, or the on-disk file's raw bytes).
+    ``used_script_path`` records that this attempt ran from an on-disk
+    ``script_path`` rather than inline ``source``, which makes it unusable as
+    ``save_verified_cpsat_python`` provenance (that save's rerun is always
+    inline ``source`` with a fresh temp-dir ``cwd``, so it can replay neither
+    ``args`` nor a ``cwd``-relative sibling data file). It defaults to
+    ``False`` because every attempt row produced before this field existed was
+    inline-only, making ``False`` the correct value for such a row rather than
+    a bypass. ``checker_status``
     is ``None`` when no checker was supplied for the experiment, or this
     attempt failed base acceptance before the checker could run.
     ``stderr_tail`` is a bounded tail of ``stderr``, populated only when
@@ -364,6 +383,7 @@ class CpsatPythonExperimentAttemptResult(BaseModel):
     seed: int | None = None
     config_sha256: str | None = None
     source_sha256: str
+    used_script_path: bool = False
     timeout_ms: int
     status: CpsatStatus
     objective: float | int | None

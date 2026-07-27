@@ -470,6 +470,31 @@ async def test_save_verified_cpsat_python_description_states_verify_only_result_
 
 
 @pytest.mark.asyncio
+async def test_save_verified_cpsat_python_description_excludes_script_path_attempt_provenance() -> (
+    None
+):
+    # The advertised contract used to promise "any matching accepted attempt";
+    # a script_path attempt is now excluded, and a client has no other way to
+    # learn that before its save is rejected.
+    tools = await _tools_by_name("full")
+    description = tools["save_verified_cpsat_python"].description
+    assert "`used_script_path: true`" in description
+    assert "At least one matching attempt must be an inline-`source` one" in description
+
+
+@pytest.mark.asyncio
+async def test_run_cpsat_python_experiment_description_documents_script_path_attempts() -> None:
+    tools = await _tools_by_name("full")
+    description = tools["run_cpsat_python_experiment"].description
+    assert "`script_path`" in description
+    assert "EXACTLY ONE of the two, never both and never neither" in description
+    # `args` is rejected, not ignored, when paired with an inline source.
+    assert "rejected when supplied alongside `source`" in description
+    # Only attempts gained a path option; checker/problem stay inline.
+    assert "this tool has no `checker_path`" in description
+
+
+@pytest.mark.asyncio
 async def test_save_verified_cpsat_python_output_schema_does_not_read_saved_as_verdict() -> None:
     # The SaveVerifiedPythonResult docstring is published verbatim as this tool's
     # outputSchema.description, so the corrected two-field rule must reach clients.

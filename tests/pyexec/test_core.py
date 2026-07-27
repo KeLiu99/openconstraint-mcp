@@ -532,6 +532,17 @@ def test_run_cpsat_python_file_missing_path_raises(tmp_path: Path) -> None:
     fake_popen.assert_not_called()
 
 
+def test_run_cpsat_python_file_nul_arg_raises_before_spawn(tmp_path: Path) -> None:
+    """A NUL is caught in validation, not by Popen's own `embedded null byte`."""
+    script = tmp_path / "model.py"
+    script.write_text("print('x')", encoding="utf-8")
+
+    with patch("openconstraint_mcp.shared.childrun.popen_process_group") as fake_popen:
+        with pytest.raises(ValueError, match=r"args\[0\] contains a NUL character"):
+            run_cpsat_python_file(script, args=["\0"])
+    fake_popen.assert_not_called()
+
+
 # --- on_start hook -----------------------------------------------------------
 
 

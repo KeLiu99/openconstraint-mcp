@@ -25,8 +25,9 @@ worst-case wall-clock estimate is checked before any child runs (see
 would exceed the budget.
 
 Imports only the dependency-light leaves (``childproc``, ``proc``,
-``save_target``, ``schemas``, ``eligibility``) and the pyexec siblings
-``core``/``checker``; never ``minizinc`` or ``runtime``.
+``save_target``, ``hashing``, ``schemas``, ``eligibility``, ``script_path``)
+and the pyexec siblings ``core``/``checker``; never ``minizinc`` or
+``runtime``.
 """
 
 from __future__ import annotations
@@ -36,6 +37,7 @@ import os
 import time
 from collections.abc import Sequence
 from concurrent.futures import ThreadPoolExecutor
+from pathlib import Path
 from typing import NamedTuple, cast
 
 from ..schemas.cpsat import (
@@ -47,6 +49,7 @@ from ..schemas.cpsat import (
     CpsatPythonResult,
 )
 from ..shared.childproc import ChildProcessTracker
+from ..shared.hashing import path_sha256
 from ..shared.proc import process_tree_terminate_worst_case_ms
 from ..shared.save_target import text_sha256
 from .checker import run_checker
@@ -57,11 +60,13 @@ from .core import (
     effective_checker_timeout_ms,
     replay_env_scope,
     run_cpsat_python,
+    run_cpsat_python_file,
     validate_checker_args,
     validate_cpsat_random_seed,
 )
 from .diagnostics import experiment_attempt_diagnostic, experiment_diagnostic
 from .eligibility import diagnostic_incumbent_eligibility
+from .script_path import validate_script_args, validate_script_path
 
 # The synchronous experiment's pre-flight wall-clock budget, matching the
 # removed seed sweep's MAX_SWEEP_WALL_CLOCK_MS: comfortably under a typical
@@ -159,18 +164,31 @@ def _resolved_name(attempt: CpsatPythonExperimentAttempt, index: int) -> str:
     return attempt.name if attempt.name is not None else f"attempt-{index}"
 
 
-def _validate_attempts(attempts: Sequence[CpsatPythonExperimentAttempt]) -> list[str]:
-    """Validate attempts and return resolved display names, index-aligned.
+def _validate_attempts(
+    attempts: Sequence[CpsatPythonExperimentAttempt],
+) -> tuple[list[str], list[Path | None]]:
+    """Validate attempts and return resolved display names plus script paths, index-aligned.
 
-    Raises ``ValueError`` for: an empty attempts list, an empty/whitespace-only
-    source, an out-of-range seed, an oversized config, a non-positive
-    ``timeout_ms``, or a name collision (explicit vs. explicit, or explicit vs.
-    a defaulted ``attempt-{index}`` label).
+    ``resolved_paths[i]`` is the validated absolute ``Path`` for a
+    ``script_path`` attempt and ``None`` for an inline ``source`` attempt —
+    this is the one place a client-supplied ``script_path`` string becomes a
+    ``Path``. Every attempt is validated here, before ANY attempt runs, so a
+    bad ``script_path`` at index 2 rejects the whole request rather than only
+    itself after indexes 0 and 1 have already spawned children.
+
+    Raises ``ValueError`` for: an empty attempts list, an attempt that sets
+    both or neither of ``source``/``script_path``, ``args`` without
+    ``script_path``, an ``args`` entry containing a NUL character, an
+    empty/whitespace-only source, an unusable ``script_path`` (missing, not a
+    file, empty, or non-UTF-8), an out-of-range seed, an oversized config, a
+    non-positive ``timeout_ms``, or a name collision (explicit vs. explicit, or
+    explicit vs. a defaulted ``attempt-{index}`` label).
     """
     if not attempts:
         raise ValueError("attempts must not be empty")
 
     names: list[str] = []
+    resolved_paths: list[Path | None] = []
     seen: set[str] = set()
     for index, attempt in enumerate(attempts):
         name = _resolved_name(attempt, index)
@@ -179,8 +197,32 @@ def _validate_attempts(attempts: Sequence[CpsatPythonExperimentAttempt]) -> list
         seen.add(name)
         names.append(name)
 
-        if not attempt.source.strip():
-            raise ValueError(f"attempts[{index}].source must be non-empty")
+        # Presence is `is not None`, never truthiness: an explicitly supplied
+        # source="" alongside script_path is a both-set error (not "only
+        # script_path"), and args=[] alongside source is an args-without-
+        # script_path error (not "args omitted").
+        if (attempt.source is None) == (attempt.script_path is None):
+            raise ValueError(f"attempts[{index}] must set exactly one of source or script_path")
+        if attempt.script_path is None:
+            if attempt.args is not None:
+                raise ValueError(
+                    f"attempts[{index}].args supplied without script_path: args are only "
+                    "passed to a script_path attempt, never to an inline source"
+                )
+            assert attempt.source is not None  # guaranteed by the exactly-one-of check above
+            if not attempt.source.strip():
+                raise ValueError(f"attempts[{index}].source must be non-empty")
+            resolved_paths.append(None)
+        else:
+            # `Path.resolve()` below already rejects a NUL in `script_path`
+            # itself; `args` needs its own check or `Popen` would raise mid-run,
+            # after earlier attempts' children had already executed.
+            validate_script_args(attempt.args, parameter=f"attempts[{index}].args")
+            resolved_paths.append(
+                validate_script_path(
+                    Path(attempt.script_path), parameter=f"attempts[{index}].script_path"
+                )
+            )
         if attempt.seed is not None:
             validate_cpsat_random_seed(attempt.seed, label=f"attempts[{index}].seed")
         if attempt.config:
@@ -192,7 +234,7 @@ def _validate_attempts(attempts: Sequence[CpsatPythonExperimentAttempt]) -> list
                 )
         if attempt.timeout_ms is not None and attempt.timeout_ms <= 0:
             raise ValueError(f"attempts[{index}].timeout_ms must be positive")
-    return names
+    return names, resolved_paths
 
 
 def _validate_max_parallel_attempts(max_parallel_attempts: object) -> int:
@@ -438,6 +480,7 @@ def _run_attempt(
     attempt: CpsatPythonExperimentAttempt,
     name: str,
     *,
+    resolved_path: Path | None,
     default_timeout_ms: int,
     objective_sense: CpsatObjectiveSense | None,
     checker: str | None,
@@ -447,18 +490,39 @@ def _run_attempt(
 ) -> tuple[CpsatPythonExperimentAttemptResult, CpsatPythonResult | None]:
     """Run one attempt end to end; return its result row and, if accepted, its raw result.
 
+    ``resolved_path`` is the already-validated path threaded from
+    ``_validate_attempts`` — set for a ``script_path`` attempt, ``None`` for an
+    inline ``source`` one. It is never re-derived from ``attempt.script_path``
+    here, so the upfront pass stays the single place a path is resolved.
+
     The config temp file (when ``attempt.config`` is non-empty) lives in a
     ``replay_env_scope`` block scoped to exactly this call: it is created right
-    before the child runs and removed right after ``run_cpsat_python`` returns,
+    before the child runs and removed right after the runner returns,
     whether the child exited cleanly, errored, or was tree-killed on timeout —
     no config temp file outlives its attempt.
     """
     timeout_ms = _effective_timeout_ms(attempt, default_timeout_ms)
-    source_hash = text_sha256(attempt.source)
     config_hash = config_sha256(attempt.config)
 
     with replay_env_scope(seed=attempt.seed, config=attempt.config) as env:
-        result = run_cpsat_python(attempt.source, timeout_ms=timeout_ms, tracker=tracker, env=env)
+        if resolved_path is not None:
+            # Hash the raw bytes off disk: Path.read_text() would translate
+            # CRLF/lone-CR to "\n" before hashing, which is exactly the
+            # normalization text_sha256's exact-hash contract forbids.
+            source_hash = path_sha256(resolved_path)
+            result = run_cpsat_python_file(
+                resolved_path,
+                timeout_ms=timeout_ms,
+                args=attempt.args,
+                tracker=tracker,
+                env=env,
+            )
+        else:
+            assert attempt.source is not None  # guaranteed by _validate_attempts' exactly-one-of
+            source_hash = text_sha256(attempt.source)
+            result = run_cpsat_python(
+                attempt.source, timeout_ms=timeout_ms, tracker=tracker, env=env
+            )
 
     base_eligible, base_reject_reason = _attempt_eligibility(result, objective_sense)
     accepted = False
@@ -498,6 +562,7 @@ def _run_attempt(
         seed=attempt.seed,
         config_sha256=config_hash,
         source_sha256=source_hash,
+        used_script_path=resolved_path is not None,
         timeout_ms=timeout_ms,
         status=result.status,
         objective=result.objective,
@@ -550,8 +615,14 @@ def run_cpsat_python_experiment(
 ) -> CpsatPythonExperimentResult:
     """Run every explicit attempt and return the best accepted incumbent plus the table.
 
-    Each attempt runs its own complete ``source`` (the server never diffs or
-    merges attempts), optionally seeded via ``OPENCONSTRAINT_MCP_CPSAT_SEED`` and
+    Each attempt runs its own complete script (the server never diffs or
+    merges attempts), supplied EXACTLY ONE of two ways: inline ``source``, or
+    an on-disk ``script_path`` (plus optional ``args``) that runs from the
+    script's own directory, as ``run_cpsat_python_file`` does. An attempt that
+    ran from ``script_path`` is marked ``used_script_path=True`` in the
+    attempt table and cannot serve as ``save_verified_cpsat_python``
+    provenance, whose rerun is always inline with a fresh temp-dir ``cwd``.
+    Attempts are optionally seeded via ``OPENCONSTRAINT_MCP_CPSAT_SEED`` and
     configured via ``OPENCONSTRAINT_MCP_CPSAT_CONFIG`` — both are cooperative
     protocols a script may ignore. Attempts run through a bounded thread pool
     (``max_parallel_attempts`` workers, default 1 = serial); results are
@@ -587,7 +658,7 @@ def run_cpsat_python_experiment(
     if default_timeout_ms <= 0:
         raise ValueError("default_timeout_ms must be positive")
     validated_max_parallel = _validate_max_parallel_attempts(max_parallel_attempts)
-    names = _validate_attempts(attempts)
+    names, resolved_paths = _validate_attempts(attempts)
     oversubscription_warning = _oversubscription_warning(attempts, names, validated_max_parallel)
 
     _check_wall_clock_budget(
@@ -608,6 +679,7 @@ def run_cpsat_python_experiment(
             index,
             attempt,
             names[index],
+            resolved_path=resolved_paths[index],
             default_timeout_ms=default_timeout_ms,
             objective_sense=validated_objective_sense,
             checker=checker,

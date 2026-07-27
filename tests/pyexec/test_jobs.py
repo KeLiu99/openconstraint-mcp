@@ -281,6 +281,19 @@ def test_submit_file_rejects_missing_path_before_creating_job(tmp_path: Path) ->
         registry.shutdown()
 
 
+def test_submit_file_rejects_nul_arg_before_creating_job(tmp_path: Path) -> None:
+    """A NUL arg fails the submit call, not the spawn of an already-admitted job."""
+    script = tmp_path / "model.py"
+    script.write_text("print('x')", encoding="utf-8")
+    registry = CpsatJobRegistry()
+    try:
+        with pytest.raises(ValueError, match=r"args\[1\] contains a NUL character"):
+            registry.submit_file(script, args=["data.json", "bad\0arg"])
+        assert registry.list() == []
+    finally:
+        registry.shutdown()
+
+
 def test_submit_file_rejects_empty_script_before_creating_job(tmp_path: Path) -> None:
     empty = tmp_path / "empty.py"
     empty.write_text("   \n", encoding="utf-8")

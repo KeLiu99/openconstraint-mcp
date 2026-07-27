@@ -42,7 +42,7 @@ from .core import (
 )
 from .diagnostics import checked_result_diagnostic
 from .eligibility import diagnostic_incumbent_eligibility
-from .script_path import validate_script_path
+from .script_path import validate_script_args, validate_script_path
 
 
 @dataclass(frozen=True)
@@ -188,10 +188,13 @@ class CpsatJobRegistry:
     ) -> str:
         """Admit a CP-SAT script file as a background job; return ``job_id``.
 
-        Validates ``timeout_ms``, the optional checker args, AND the path
-        (exists / regular file / non-empty / UTF-8) before admission so a bad
-        argument raises ``ValueError`` synchronously and no job record is
-        created. Raises ``JobRejectedError`` when the queue is full.
+        Validates ``timeout_ms``, the optional checker args, the path
+        (exists / regular file / non-empty / UTF-8), AND ``args`` (no embedded
+        NUL) before admission so a bad argument raises ``ValueError``
+        synchronously and no job record is created — a NUL would otherwise
+        surface only when the queued child was spawned, long after this call
+        returned a ``job_id``. Raises ``JobRejectedError`` when the queue is
+        full.
 
         ``args`` becomes the child's ``sys.argv[1:]``; it is snapshotted here at
         admission, so mutating the caller's list while the job sits queued
@@ -201,6 +204,7 @@ class CpsatJobRegistry:
             raise ValueError("timeout_ms must be positive")
         validate_checker_args(checker=checker, checker_timeout_ms=checker_timeout_ms)
         resolved = validate_script_path(script_path)
+        validate_script_args(args)
         request = _CpsatJobRequest(
             source=None,
             script_path=resolved,

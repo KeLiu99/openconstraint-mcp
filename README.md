@@ -1270,11 +1270,26 @@ server runs it in a **local child process**.
 - **`run_cpsat_python_experiment(attempts, objective_sense=None, …)`** — run a list
   of **explicit attempts** and return the best accepted result plus the full
   attempt table. Each attempt is
-  `{name, source, seed, config, timeout_ms}`: `source` is a complete,
-  independent script (the server never generates, diffs, or merges attempts —
-  it only executes what the client supplies); `name` defaults to
+  `{name, source | script_path, args, seed, config, timeout_ms}` and must set
+  **exactly one** of `source` or `script_path` — both, or neither, is rejected:
+  - `source` is a complete, independent inline script (the server never
+    generates, diffs, or merges attempts — it only executes what the client
+    supplies).
+  - `script_path` is a local path to an existing UTF-8 Python script. It runs
+    with `cwd` set to the script's own parent directory, exactly like
+    `run_cpsat_python_file`, so a relative `open()` of a sibling data file
+    resolves — several attempts can race existing on-disk scripts against
+    shared data with nothing duplicated in the request. `args` is a list of
+    strings appended after the path as the child's `sys.argv[1:]`; supplying
+    it alongside `source` is **rejected**, not silently ignored.
+
+  `name` defaults to
   `attempt-{index}` when omitted, and every resolved name (explicit or
-  defaulted) must be unique. `seed` and `config` are both **cooperative,
+  defaulted) must be unique. Every attempt — including each `script_path` — is
+  validated **before any child runs**, so one bad path rejects the whole call
+  rather than only its own attempt. `checker` and `problem` remain inline text
+  for the whole experiment; this tool has no `checker_path`. `seed` and
+  `config` are both **cooperative,
   opt-in** protocols, not server-enforced parameters:
   - `seed` sets `OPENCONSTRAINT_MCP_CPSAT_SEED`, identically to the save path's
     seeded replay.
@@ -1320,8 +1335,9 @@ server runs it in a **local child process**.
   Returns `CpsatPythonExperimentResult`: `status` (`"winner"` or
   `"no_winner"`), `winner_index`/`winner_name`/`winner` (a full
   `CpsatPythonResult`, all present iff `"winner"`), `attempts` (every attempt,
-  accepted or not, each with its resolved `name`, `source_sha256`,
-  `config_sha256`, a diagnostic `best_objective_bound` (useful even for a
+  accepted or not, each with its resolved `name`, `source_sha256` (the inline
+  text's hash, or the on-disk file's raw-byte hash — unnormalized either way),
+  `config_sha256`, `used_script_path`, a diagnostic `best_objective_bound` (useful even for a
   rejected `"unknown"` attempt with no incumbent; never used for acceptance or
   winner selection), and — for a `status="error"` attempt — a bounded
   `stderr_tail` for debugging, in addition to the concise one-line `message`),
@@ -1355,7 +1371,35 @@ server runs it in a **local child process**.
   Pass the result as `experiment_result` to `save_verified_cpsat_python` (with
   the saved attempt's exact replay `config`, if any) to persist it with full
   provenance — see below. This works for the experiment's winner or any other
-  accepted attempt you choose to save instead.
+  accepted **inline-`source`** attempt you choose to save instead; a
+  `script_path` attempt can win the race but can never supply save provenance
+  (see below for why).
+
+  Racing two shipped example formulations against the same benchmark instance,
+  with no source duplicated into the request:
+
+  ```json
+  {
+    "attempts": [
+      {
+        "name": "interval_nooverlap",
+        "script_path": ".../examples/job_shop/model.py",
+        "args": ["data_ft10.json"]
+      },
+      {
+        "name": "pairwise_disjunctive",
+        "script_path": ".../examples/job_shop/model_pairwise_disjunctive.py",
+        "args": ["data_ft10.json"]
+      }
+    ],
+    "objective_sense": "minimize",
+    "default_timeout_ms": 20000
+  }
+  ```
+
+  Both scripts read `data_ft10.json` from their own directory, so the shared
+  benchmark instance stays on disk instead of being pasted into the request
+  once per attempt — the duplication this option exists to remove.
 
 #### Persisting an attempt from an experiment
 
@@ -1377,12 +1421,26 @@ experiment provenance:
   not necessarily the experiment's own `winner_index`; you can attach
   provenance for the winner or for any other accepted attempt you choose to
   save instead. A mismatch is **rejected before any child runs**; the fresh
-  re-run and save gates below still decide everything. On a successful save,
+  re-run and save gates below still decide everything.
+
+  A matching attempt that ran from `script_path` (`used_script_path: true`)
+  **does not qualify**. This save's re-run is always inline `source` with a
+  fresh temp-directory `cwd`, so it can replay neither that attempt's `args`
+  nor its `cwd`-relative sibling data — and `source_sha256`, which hashes
+  script content only, cannot even distinguish the same script run against
+  two different data files. At least one matching attempt must therefore be an
+  inline-`source` one; the save is rejected when **every** match is
+  `script_path`-derived, and the order attempts appear in never matters. To
+  keep provenance for a formulation you raced from disk, re-run that script as
+  an inline `source` attempt (or save it without `experiment_result`).
+
+  On a successful save,
   the full attempt table is written as `experiment-log.json` — a
   **provenance summary**, not an archive: every attempt row carries only
   hashes and scalar outcomes (`index`, `name`, `seed`, `source_sha256`,
-  `config_sha256`, `timeout_ms`, `status`, `objective`, `best_objective_bound`,
-  `accepted`, `checker_status`, `message`, `timed_out`, `truncated`, `duration_ms`).
+  `config_sha256`, `used_script_path`, `timeout_ms`, `status`, `objective`,
+  `accepted`, `checker_status`, `message`, `timed_out`, `truncated`,
+  `duration_ms`).
   **Non-saved attempts' full `config` objects are never persisted** — only
   the saved attempt's own config is, via `replay-config.json`.
 
@@ -1620,14 +1678,16 @@ solve or managed runtime and run in the default `just check`.
 `run_cpsat_python_experiment`'s own integration test
 (`tests/pyexec/test_experiment_integration.py`) is self-contained rather than
 reusing the files above: a tiny two-variable optimization problem solved by
-two distinct explicit source variants, plus a script that reads the
-cooperative `OPENCONSTRAINT_MCP_CPSAT_CONFIG` protocol for real — both fast
-and fully deterministic.
+two distinct explicit source variants, a script that reads the
+cooperative `OPENCONSTRAINT_MCP_CPSAT_CONFIG` protocol for real, and two
+on-disk `script_path` attempts raced in parallel from two sibling
+directories, each reading its own sibling data file — all fast and fully
+deterministic.
 
 #### Comparing explicit source variants
 
 ```python
-# The client writes every attempt's complete source; the server never
+# The client supplies every attempt's complete script; the server never
 # generates, diffs, or merges them — it only executes, verifies, and picks
 # the winner.
 result = await mcp.call_tool("run_cpsat_python_experiment", {
@@ -1639,6 +1699,26 @@ result = await mcp.call_tool("run_cpsat_python_experiment", {
 })
 # result["status"] == "winner" and result["winner_name"] name the best accepted
 # attempt; result["attempts"] carries every attempt's status/objective/verdict.
+```
+
+When the variants already exist on disk, name them with `script_path` instead
+of reading them in — each attempt then runs from its own script's directory,
+so a shared sibling data file is read once per child rather than inlined once
+per attempt:
+
+```python
+result = await mcp.call_tool("run_cpsat_python_experiment", {
+    "attempts": [
+        {"name": "baseline", "script_path": "/abs/path/model_v1.py",
+         "args": ["data_ft10.json"]},
+        {"name": "pairwise", "script_path": "/abs/path/model_v2.py",
+         "args": ["data_ft10.json"]},
+    ],
+    "objective_sense": "minimize",
+})
+# These rows carry used_script_path=True, so neither can be attached as
+# save_verified_cpsat_python provenance — see "Persisting an attempt from an
+# experiment".
 ```
 
 #### Satisfaction save with a checker
@@ -1939,8 +2019,10 @@ are **full**-profile only — start the server with
   6. For MULTIPLE explicit attempts (comparing source variants, or the same
      source under different cooperative configs), call
      `run_cpsat_python_experiment` instead of calling `run_cpsat_python`
-     repeatedly — the client always writes every attempt's complete source;
-     the server only executes, verifies, and selects a winner. Coordinate
+     repeatedly — the client always supplies every attempt's complete script,
+     as inline `source` or as a `script_path` (+ `args`) to one already on
+     disk, exactly one of the two per attempt; the server only executes,
+     verifies, and selects a winner. Coordinate
      `max_parallel_attempts` with each script's own
      `solver.parameters.num_workers` to avoid oversubscribing the machine.
   7. Optionally — only when the user asks — call `save_verified_cpsat_python`
@@ -1955,8 +2037,10 @@ are **full**-profile only — start the server with
      `sys.argv[1]` and returns `{"status": "accepted"|"rejected"|"error",
      "errors": [...], "details": {}}` — `accepted` + empty errors is the only
      passing verdict. The checker is not sandboxed. If the saved script came
-     from `run_cpsat_python_experiment` — the winner, or any other attempt you
-     chose to save instead — also pass its `config` and `experiment_result` so
+     from `run_cpsat_python_experiment` — the winner, or any other accepted
+     inline-`source` attempt you chose to save instead (never a `script_path`
+     one, which the save cannot replay) — also pass its `config` and
+     `experiment_result` so
      the full attempt table is persisted as `experiment-log.json` — a
      provenance summary, not an archive.
 
@@ -2025,7 +2109,8 @@ are **full**-profile only — start the server with
   6. **Final solve** on the full instance: `submit_portfolio_job` (for
      `portfolio_result` provenance) or `submit_solve_job` for MiniZinc; the
      synchronous `run_cpsat_python_experiment` (for `experiment_result`
-     provenance) or `submit_cpsat_python_job` for CP-SAT. Poll the matching
+     provenance, which requires the saved attempt to use inline `source`, not
+     `script_path`) or `submit_cpsat_python_job` for CP-SAT. Poll the matching
      `get_*_job` tool for whichever background tool was used. This
      full-instance terminal result — never the smoke, tuning-stage, or
      re-check result — is what gets presented to the user, but only after

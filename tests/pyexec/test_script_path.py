@@ -1,4 +1,4 @@
-"""Unit tests for pyexec/script_path.py — the shared script-path validator.
+"""Unit tests for pyexec/script_path.py — the shared path and argv validators.
 
 Every rejection must name the caller-facing parameter, because that string is
 what reaches the MCP client through `@_as_mcp_error(ValueError)`.
@@ -11,7 +11,7 @@ from typing import Any
 
 import pytest
 
-from openconstraint_mcp.pyexec.script_path import validate_script_path
+from openconstraint_mcp.pyexec.script_path import validate_script_args, validate_script_path
 
 
 def test_valid_script_returns_the_resolved_absolute_path(tmp_path: Path) -> None:
@@ -72,3 +72,18 @@ def test_unreadable_script_raises_value_error(
 def test_parameter_defaults_to_script_path(tmp_path: Path) -> None:
     with pytest.raises(ValueError, match=r"script_path does not exist"):
         validate_script_path(tmp_path / "nope.py")
+
+
+@pytest.mark.parametrize("args", [None, [], ["ok"], ["--seed", "7"]])
+def test_valid_args_are_accepted(args: list[str] | None) -> None:
+    assert validate_script_args(args) is None
+
+
+def test_nul_arg_is_rejected_with_its_own_index() -> None:
+    with pytest.raises(ValueError, match=r"args\[1\] contains a NUL character"):
+        validate_script_args(["fine", "bad\0arg"])
+
+
+def test_nul_rejection_names_the_caller_facing_parameter() -> None:
+    with pytest.raises(ValueError, match=r"attempts\[2\]\.args\[0\] contains a NUL"):
+        validate_script_args(["\0"], parameter="attempts[2].args")

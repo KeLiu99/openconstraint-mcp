@@ -83,7 +83,7 @@ from .checker import checker_infrastructure_report, run_checker_file
 from .diagnostics import checked_result_diagnostic, cpsat_result_diagnostic
 from .eligibility import diagnostic_incumbent_eligibility
 from .env_vars import CPSAT_CONFIG_ENV_VAR, CPSAT_SEED_ENV_VAR
-from .script_path import validate_script_path
+from .script_path import validate_script_args, validate_script_path
 
 DEFAULT_PYEXEC_TIMEOUT_MS: int = 30_000
 
@@ -453,7 +453,8 @@ def run_cpsat_python_file(
     (``solve_model_path``), which likewise run from the model's directory so a
     relative ``include`` resolves.
 
-    Validates the path (exists / regular file / non-empty / UTF-8) with a clear
+    Validates the path (exists / regular file / non-empty / UTF-8) and ``args``
+    (no embedded NUL, which ``Popen`` rejects at spawn time) with a clear
     ``ValueError`` before any child is spawned. Same execution contract, output
     cap, timeout, tree-kill, and INTERNAL ``env`` overlay (see ``run_cpsat_python``)
     as ``run_cpsat_python``.
@@ -464,6 +465,7 @@ def run_cpsat_python_file(
     invocation exactly.
     """
     resolved = validate_script_path(script_path)
+    validate_script_args(args)
     child = execute_child(
         _python_script_argv(resolved, args),
         cwd=resolved.parent,
