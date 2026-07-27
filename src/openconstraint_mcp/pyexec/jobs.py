@@ -417,6 +417,7 @@ class CpsatJobRegistry:
                     args=list(request.args) if request.args is not None else None,
                     on_start=lambda proc: self._on_start(job_id, proc),
                     env=seed_config_env(seed=None, config_path=None),
+                    spawn_failure_as_result=False,
                 )
             else:
                 assert request.source is not None
@@ -425,6 +426,7 @@ class CpsatJobRegistry:
                     timeout_ms=request.timeout_ms,
                     on_start=lambda proc: self._on_start(job_id, proc),
                     env=seed_config_env(seed=None, config_path=None),
+                    spawn_failure_as_result=False,
                 )
         except Exception as exc:  # noqa: BLE001 - worker boundary: never leak; record as failed
             with self._lock:

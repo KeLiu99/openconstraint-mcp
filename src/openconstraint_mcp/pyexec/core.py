@@ -310,9 +310,10 @@ def _spawn_failure_result(exc: OSError) -> CpsatPythonResult:
     reasons no preflight can rule out: fd exhaustion (``EMFILE``), memory
     pressure (``ENOMEM``), or an argv that clears ``validate_script_args``'
     conservative bound but not the kernel's real one (``E2BIG``). Left
-    unhandled, that escapes as a raw exception — aborting an experiment whose
-    earlier attempts already ran, and failing a job that was admitted with a
-    ``job_id`` already returned to the client.
+    unhandled, that escapes from synchronous calls and aborts an experiment
+    whose earlier attempts already ran. Background jobs deliberately preserve
+    the exception so their registry reports the infrastructure failure as
+    ``state="failed"``.
 
     The MiniZinc runner already wraps its own launch this way
     (``MiniZincExecutionError``); this is the CP-SAT protocol's equivalent, kept
@@ -425,6 +426,7 @@ def run_cpsat_python(
     tracker: ChildProcessTracker | None = None,
     on_start: Callable[[Popen[str]], None] | None = None,
     env: dict[str, str | None] | None = None,
+    spawn_failure_as_result: bool = True,
 ) -> CpsatPythonResult:
     """Execute OR-Tools CP-SAT Python ``source`` in a child process.
 
@@ -450,6 +452,10 @@ def run_cpsat_python(
     ``seed_config_env``). It is NOT an MCP-facing parameter — the server never
     exposes arbitrary environment variables.
 
+    ``spawn_failure_as_result`` is INTERNAL. Background jobs set it false so a
+    child that never launches reaches their ``failed`` state; synchronous and
+    experiment callers keep the structured error result.
+
     For an existing local file, use ``run_cpsat_python_file`` instead — it runs
     the script in its own directory so relative file/import references resolve.
     """
@@ -468,6 +474,8 @@ def run_cpsat_python(
                 env=env,
             )
         except ChildSpawnError as exc:
+            if not spawn_failure_as_result:
+                raise
             return _spawn_failure_result(exc)
         return _result_from_child(child)
 
@@ -480,6 +488,7 @@ def run_cpsat_python_file(
     tracker: ChildProcessTracker | None = None,
     on_start: Callable[[Popen[str]], None] | None = None,
     env: dict[str, str | None] | None = None,
+    spawn_failure_as_result: bool = True,
 ) -> CpsatPythonResult:
     """Execute an existing OR-Tools CP-SAT Python file in its own directory.
 
@@ -515,6 +524,8 @@ def run_cpsat_python_file(
             env=env,
         )
     except ChildSpawnError as exc:
+        if not spawn_failure_as_result:
+            raise
         return _spawn_failure_result(exc)
     return _result_from_child(child)
 

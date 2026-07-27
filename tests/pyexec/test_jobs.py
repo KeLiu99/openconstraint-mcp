@@ -11,6 +11,7 @@ import pytest
 
 from openconstraint_mcp.pyexec.jobs import CpsatJobRegistry
 from openconstraint_mcp.schemas.cpsat import CpsatCheckerReport, CpsatPythonResult, CpsatStatus
+from openconstraint_mcp.shared.childrun import ChildSpawnError
 from openconstraint_mcp.shared.job_errors import JobRejectedError
 
 
@@ -129,6 +130,31 @@ def test_submit_source_error_status_yields_succeeded_job(monkeypatch: pytest.Mon
         assert status.state == "succeeded"
         assert status.result is not None
         assert status.result.status == "error"
+    finally:
+        registry.shutdown()
+
+
+@pytest.mark.parametrize("job_kind", ["source", "file"])
+def test_spawn_failure_reaches_failed_without_result(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, job_kind: str
+) -> None:
+    def _fail_spawn(*args: Any, **kwargs: Any) -> None:
+        raise ChildSpawnError(24, "Too many open files")
+
+    monkeypatch.setattr("openconstraint_mcp.pyexec.core.execute_child", _fail_spawn)
+    registry = CpsatJobRegistry()
+    try:
+        if job_kind == "source":
+            job_id = registry.submit_source("print('x')")
+        else:
+            script = tmp_path / "model.py"
+            script.write_text("print('x')", encoding="utf-8")
+            job_id = registry.submit_file(script)
+        assert _wait_until_terminal(registry, job_id) == "failed"
+        status = registry.get(job_id)
+        assert status.result is None
+        assert status.message is not None
+        assert "Too many open files" in status.message
     finally:
         registry.shutdown()
 
