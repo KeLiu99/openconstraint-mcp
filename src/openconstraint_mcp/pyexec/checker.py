@@ -40,7 +40,7 @@ from typing import TypedDict
 
 from ..schemas.cpsat import CpsatCheckerReport, CpsatPythonResult
 from ..shared.childproc import ChildProcessTracker
-from ..shared.childrun import execute_child
+from ..shared.childrun import ChildSpawnError, execute_child
 from ..shared.job_errors import exception_summary
 from .diagnostics import checker_report_diagnostic
 from .env_vars import CPSAT_CONFIG_ENV_VAR, CPSAT_SEED_ENV_VAR
@@ -205,14 +205,27 @@ def _execute_checker(
     # stale OPENCONSTRAINT_MCP_CPSAT_SEED/_CONFIG from the server's own launch
     # environment would leak into the checker and could change its behaviour, so
     # both protocol vars are deleted from the child's environment.
-    child_result = execute_child(
-        [sys.executable, "-u", str(checker_script), str(payload_file)],
-        cwd=cwd,
-        timeout_ms=timeout_ms,
-        tracker=tracker,
-        on_start=on_start,
-        env={CPSAT_SEED_ENV_VAR: None, CPSAT_CONFIG_ENV_VAR: None},
-    )
+    try:
+        child_result = execute_child(
+            [sys.executable, "-u", str(checker_script), str(payload_file)],
+            cwd=cwd,
+            timeout_ms=timeout_ms,
+            tracker=tracker,
+            on_start=on_start,
+            env={CPSAT_SEED_ENV_VAR: None, CPSAT_CONFIG_ENV_VAR: None},
+        )
+    except ChildSpawnError as exc:
+        # A launch failure is not a verdict: the checker never ran, so this is a
+        # non-accepted report (the model result survives, per this module's
+        # contract) rather than a raised exception. Distinguished from the
+        # non-zero-exit branch below, which would otherwise report the absence of
+        # a process as "exited with non-zero code: None".
+        return _error(
+            f"checker process could not be started: {exc}",
+            stdout="",
+            stderr="",
+            duration_ms=0,
+        )
 
     kw: _CheckerKw = {
         "stdout": child_result.stdout,

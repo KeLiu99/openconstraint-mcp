@@ -116,7 +116,13 @@ def _validate_experiment_result_consistency(
     different accepted attempt than the one the experiment picked as its
     winner (e.g. a faster feasible attempt it prefers over the incumbent-best
     one), while still refusing to attach provenance for a script this
-    experiment never accepted. This guards only against *accidental* mismatch
+    experiment never accepted. An attempt that ran from ``script_path``
+    (``used_script_path=True``) never qualifies on its own: this save's rerun
+    is always inline ``source`` with a fresh temp-dir ``cwd``, so it can
+    replay neither the attempt's ``args`` nor its ``cwd``-relative sibling
+    data. A request whose matches are ALL ``script_path``-derived is rejected;
+    one inline match anywhere in the set is enough to accept, regardless of
+    list order. This guards only against *accidental* mismatch
     (wrong script attached, a stale experiment, a seed/config that doesn't
     match any accepted attempt) — it is not, and cannot be, a proof that
     ``experiment_result`` is honest. The save decision itself never reads
@@ -136,9 +142,24 @@ def _validate_experiment_result_consistency(
 
     source_matches = [a for a in experiment_result.attempts if a.source_sha256 == source_hash]
     if not source_matches:
+        # A script_path attempt hashes the file's bytes on disk, so a client pasting
+        # that script as `source` misses on any whitespace drift and would otherwise
+        # be told it attached the wrong experiment — the wrong cause, since such an
+        # attempt is unsaveable even on an exact match (the `full_matches` gate
+        # below). Same `all` gate as that one, so a mixed experiment still reports
+        # the plain mismatch.
+        hint = (
+            " (every attempt in this experiment ran via script_path, whose "
+            "source_sha256 is the file's bytes on disk — if this IS that script, "
+            "note that a script_path attempt is unsaveable regardless, because this "
+            "save's rerun is always inline source with a fresh temp-dir cwd)"
+            if experiment_result.attempts
+            and all(a.used_script_path for a in experiment_result.attempts)
+            else ""
+        )
         raise ValueError(
             "no attempt in experiment_result has source_sha256 matching the supplied "
-            "source: the experiment_result was attached to a different script"
+            "source: the experiment_result was attached to a different script" + hint
         )
 
     accepted_matches = [a for a in source_matches if a.accepted]
@@ -150,15 +171,22 @@ def _validate_experiment_result_consistency(
             "must replay an accepted attempt"
         )
 
-    full_match = next(
-        (
-            a
-            for a in accepted_matches
-            if a.seed == seed and a.config_sha256 == expected_config_sha256
-        ),
-        None,
-    )
-    if full_match is not None:
+    # Every seed/config-matching row, not just the first: a lone `next()` pick
+    # would make the script_path check below order-dependent, wrongly rejecting
+    # an experiment that happens to list a script_path attempt ahead of an
+    # otherwise-identical inline one.
+    full_matches = [
+        a for a in accepted_matches if a.seed == seed and a.config_sha256 == expected_config_sha256
+    ]
+    if full_matches:
+        if all(a.used_script_path for a in full_matches):
+            raise ValueError(
+                "every experiment_result attempt matching this save request ran via "
+                "script_path, which save_verified_cpsat_python cannot replay (its "
+                "rerun is always inline source with a fresh temp-dir cwd) — save "
+                "without experiment_result provenance, or re-run this script as an "
+                "inline `source` attempt if provenance is needed"
+            )
         return
 
     candidate = accepted_matches[0]
@@ -205,6 +233,7 @@ def _build_experiment_log(experiment_result: CpsatPythonExperimentResult) -> dic
                 "seed": attempt.seed,
                 "source_sha256": attempt.source_sha256,
                 "config_sha256": attempt.config_sha256,
+                "used_script_path": attempt.used_script_path,
                 "timeout_ms": attempt.timeout_ms,
                 "status": attempt.status,
                 "objective": attempt.objective,
@@ -385,7 +414,8 @@ def save_verified_cpsat_python(
     ``experiment_result`` is PROVENANCE ONLY, never verification evidence — like
     ``portfolio_result`` on the MiniZinc save path. When supplied, it is validated
     eagerly for self-consistency with this request (winner status, matching
-    ``source``/``seed``/``config`` hashes — see
+    ``source``/``seed``/``config`` hashes on at least one accepted attempt that
+    did NOT run from a ``script_path`` — see
     ``_validate_experiment_result_consistency``) but every save decision still
     comes from the fresh run/gates below. On a successful save, its attempt table
     is copied into ``experiment-log.json`` as a provenance summary (hashes and

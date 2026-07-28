@@ -37,6 +37,48 @@ MAX_OUTPUT_BYTES: int = 1 * 1024 * 1024  # 1 MiB
 _POLL_INTERVAL_S: float = 0.05
 
 
+class ChildSpawnError(OSError):
+    """The child could NEVER be launched — raised only from the ``Popen`` call.
+
+    ``execute_child`` can raise ``OSError`` from several points, and they mean
+    opposite things. Before the spawn there is no child (``E2BIG`` from an
+    oversized argv, ``EMFILE`` from fd exhaustion, ``ENOMEM``); after it, a
+    child exists and MAY STILL BE ALIVE — ``tracker.register`` on a closed
+    tracker tree-kills and can surface a transient error, a caller's
+    ``on_start`` hook can fail, and the ``finally``'s
+    ``terminate_process_tree`` can raise from the Windows ``proc.terminate()``
+    fallback. A caller that catches bare ``OSError`` cannot tell the two apart
+    and would report a live child as a zero-duration launch failure.
+
+    This type marks ONLY the first case, so callers normalize a genuine
+    never-started child into their own error contract while a post-launch
+    failure keeps propagating and stays visible.
+
+    It subclasses ``OSError`` deliberately: ``minizinc.core`` catches ``OSError``
+    around its launch and must keep catching this unchanged.
+    """
+
+
+def _as_spawn_error(exc: OSError) -> ChildSpawnError:
+    """Re-key a launch ``OSError`` as ``ChildSpawnError``, preserving its detail.
+
+    Message-only errors keep their original args. Structured errors carry over
+    ``errno``/``strerror``/filenames and Windows ``winerror``, so ``str()``
+    renders identically and callers can still branch on the platform error code.
+    """
+    if exc.errno is None:
+        return ChildSpawnError(*exc.args)
+    winerror = getattr(exc, "winerror", None)
+    if winerror is not None:
+        return ChildSpawnError(exc.errno, exc.strerror, exc.filename, winerror, exc.filename2)
+    spawn_error = ChildSpawnError(exc.errno, exc.strerror)
+    if exc.filename is not None:
+        spawn_error.filename = exc.filename
+    if exc.filename2 is not None:
+        spawn_error.filename2 = exc.filename2
+    return spawn_error
+
+
 @dataclass(frozen=True)
 class ChildExecutionResult:
     """Raw outcome of one child-process run, with no protocol parsing applied.
@@ -158,17 +200,22 @@ def execute_child(
             stdout_path.open("w", encoding="utf-8") as stdout_f,
             stderr_path.open("w", encoding="utf-8") as stderr_f,
         ):
-            proc = popen_process_group(
-                argv,
-                stdout=stdout_f,
-                stderr=stderr_f,
-                # No stdin: over stdio the server's stdin is the JSON-RPC channel, so
-                # a script that reads input()/sys.stdin would steal protocol bytes or
-                # block the server. DEVNULL gives the child an immediate EOF instead.
-                stdin=subprocess.DEVNULL,
-                cwd=str(cwd),
-                env=child_env,
-            )
+            try:
+                proc = popen_process_group(
+                    argv,
+                    stdout=stdout_f,
+                    stderr=stderr_f,
+                    # No stdin: over stdio the server's stdin is the JSON-RPC channel, so
+                    # a script that reads input()/sys.stdin would steal protocol bytes or
+                    # block the server. DEVNULL gives the child an immediate EOF instead.
+                    stdin=subprocess.DEVNULL,
+                    cwd=str(cwd),
+                    env=child_env,
+                )
+            except OSError as exc:
+                # ONLY this call is re-keyed: past it a child exists, so a later
+                # OSError must not be mistaken for "never launched".
+                raise _as_spawn_error(exc) from exc
 
             registered = False
             try:

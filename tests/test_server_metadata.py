@@ -382,6 +382,34 @@ async def test_cpsat_file_tools_advertise_an_args_parameter() -> None:
         )
 
 
+@pytest.mark.asyncio
+async def test_cpsat_tools_document_the_args_rejection_limits() -> None:
+    # Every tool that forwards `args` to a child enforces the NUL/size preflight,
+    # so every one of them must say so: a client that learns the rule only from a
+    # rejection has already wasted a call.
+    tools = await _tools_by_name("full")
+    for name in (
+        "run_cpsat_python_file",
+        "run_cpsat_python_file_checked",
+        "run_cpsat_python_experiment",
+        "submit_cpsat_python_file_job",
+    ):
+        description = tools[name].description or ""
+        assert "contains a NUL" in description or "containing a NUL" in description, (
+            f"{name} does not document the NUL rejection"
+        )
+        assert "32 KiB" in description, f"{name} does not document the argv size bound"
+
+
+@pytest.mark.asyncio
+async def test_run_cpsat_python_file_core_profile_documents_the_args_limits() -> None:
+    # The core profile publishes its own trimmed description; the limits are a
+    # rejection rule, not a full-profile extra, so they must survive the trim.
+    tools = await _tools_by_name("core")
+    description = tools["run_cpsat_python_file"].description or ""
+    assert "32 KiB" in description
+
+
 async def _core_solve_description_openings() -> dict[str, str]:
     """Each core solve tool's advertised description, cut to its leading window.
 
@@ -467,6 +495,31 @@ async def test_save_verified_cpsat_python_description_states_verify_only_result_
     description = tools["save_verified_cpsat_python"].description
     assert "verify_only=true" in description
     assert "`reason=null` with `saved=false`" in description
+
+
+@pytest.mark.asyncio
+async def test_save_verified_cpsat_python_description_excludes_script_path_attempt_provenance() -> (
+    None
+):
+    # The advertised contract used to promise "any matching accepted attempt";
+    # a script_path attempt is now excluded, and a client has no other way to
+    # learn that before its save is rejected.
+    tools = await _tools_by_name("full")
+    description = tools["save_verified_cpsat_python"].description
+    assert "`used_script_path: true`" in description
+    assert "At least one matching attempt must be an inline-`source` one" in description
+
+
+@pytest.mark.asyncio
+async def test_run_cpsat_python_experiment_description_documents_script_path_attempts() -> None:
+    tools = await _tools_by_name("full")
+    description = tools["run_cpsat_python_experiment"].description
+    assert "`script_path`" in description
+    assert "EXACTLY ONE of the two, never both and never neither" in description
+    # `args` is rejected, not ignored, when paired with an inline source.
+    assert "rejected when supplied alongside `source`" in description
+    # Only attempts gained a path option; checker/problem stay inline.
+    assert "this tool has no `checker_path`" in description
 
 
 @pytest.mark.asyncio

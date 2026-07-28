@@ -794,13 +794,24 @@ _RUN_CPSAT_PYTHON_FILE_MID = (
     "from the server's own launch environment. "
 )
 
+# Shared by every tool that forwards `args` to a child — `run_cpsat_python_file`
+# (both profiles), `run_cpsat_python_file_checked`, `run_cpsat_python_experiment`,
+# and `submit_cpsat_python_file_job` — so they cannot drift on what they reject.
+_CPSAT_ARGS_LIMITS = (
+    "`args` is a flag/path list, not a data channel: an entry containing a NUL, "
+    "or a list whose combined UTF-8 encoding exceeds 32 KiB, is rejected with an "
+    "actionable MCP error UP FRONT rather than surfacing as a spawn-time failure "
+    "(a NUL raises `ValueError` inside `subprocess`; an oversized argv is refused "
+    "by the OS). Pass bulk input in a file the script opens. "
+)
+
 _RUN_CPSAT_PYTHON_FILE_ARGS = (
     "Optional `args` (a list of strings) is appended after the script path, so "
     "the script reads it as `sys.argv[1:]` — pass it for a script that takes its "
     'data file or a flag on the command line (e.g. `args=["data_ft10.json"]` '
     "runs an `examples/job_shop/model.py`-style script against that instance "
     "instead of its hardcoded default, with no edit to the source). Omitting it "
-    "runs the script with no arguments. "
+    "runs the script with no arguments. " + _CPSAT_ARGS_LIMITS
 )
 
 _RUN_CPSAT_PYTHON_FILE_CHECKED_REPLAY_FULL = (
@@ -864,7 +875,8 @@ RUN_CPSAT_PYTHON_FILE_CHECKED_DESCRIPTION = (
     "`checker_timeout_ms` defaults to `timeout_ms`. `args` is appended after "
     "`script_path` as the model script's `sys.argv[1:]`; `seed`/`config` are "
     "the same replay aids `run_cpsat_python_file` documents. "
-    "Returns a CpsatPythonCheckedResult: every CpsatPythonResult field, plus "
+    + _CPSAT_ARGS_LIMITS
+    + "Returns a CpsatPythonCheckedResult: every CpsatPythonResult field, plus "
     "`checker` (the CpsatCheckerReport, whose `status` is the verdict), "
     "`checker_skipped_reason` (set INSTEAD of `checker` when the run produced no "
     "checkable incumbent — the two are mutually exclusive), and "
@@ -911,7 +923,7 @@ MINIZINC_SOLUTION_WORKFLOW_PROMPT_DESCRIPTION = (
 
 RUN_CPSAT_PYTHON_EXPERIMENT_DESCRIPTION = (
     "Run a list of EXPLICIT attempts — each a complete, independent OR-Tools "
-    "CP-SAT Python `source` variant, optionally paired with a `seed` and/or a "
+    "CP-SAT Python script variant, optionally paired with a `seed` and/or a "
     "cooperative `config` — and return the best ACCEPTED result plus a compact "
     "attempt table. This generalizes a seed sweep into explicit attempts: the "
     "CLIENT proposes every attempt (source variants, config variants, or both); "
@@ -919,9 +931,25 @@ RUN_CPSAT_PYTHON_EXPERIMENT_DESCRIPTION = (
     "OR-Tools parameters directly. "
     "Required: `attempts` (non-empty list of {`name` (optional; defaults to "
     "`attempt-{index}`, and every resolved name — explicit or defaulted — must "
-    "be unique), `source` (non-empty script), `seed` (optional non-bool integer "
+    "be unique), `source` (a non-empty inline script) OR `script_path` (a local "
+    "path to an existing UTF-8 Python script) [EXACTLY ONE of the two, never "
+    "both and never neither], `args` (optional list of strings appended after "
+    "`script_path` as the child's `sys.argv[1:]`; rejected when supplied "
+    "alongside `source` rather than silently ignored), `seed` (optional "
+    "non-bool integer "
     "in the CP-SAT random_seed signed-int32 range), `config` (optional JSON "
     "object, default `{}`), `timeout_ms` (optional per-attempt override)}). "
+    + _CPSAT_ARGS_LIMITS
+    + "A `script_path` attempt runs with `cwd` set to the script's own parent "
+    "directory — exactly like `run_cpsat_python_file` — so a relative `open()` "
+    "of a sibling data file resolves, and several attempts can race existing "
+    "on-disk scripts against shared data with no duplicated source in the "
+    "request. Every attempt is validated (including each `script_path`) BEFORE "
+    "any child runs, so one bad path rejects the whole call. `checker` and "
+    "`problem` remain INLINE TEXT for the whole experiment — this tool has no "
+    "`checker_path`; only `attempts[i]` gained a path option. NOTE: an attempt "
+    "that ran from `script_path` is marked `used_script_path: true` and CANNOT "
+    "be used as `save_verified_cpsat_python` provenance (see that tool). "
     "Optional: `objective_sense` ('maximize'|'minimize' for optimization; omit "
     "or pass null for feasibility), `default_timeout_ms` "
     "(fallback for attempts with no `timeout_ms`), `max_parallel_attempts` "
@@ -976,7 +1004,9 @@ RUN_CPSAT_PYTHON_EXPERIMENT_DESCRIPTION = (
     "Returns a CpsatPythonExperimentResult: `status` ('winner'|'no_winner'), "
     "`winner_index`/`winner_name`/`winner` (a full CpsatPythonResult, all "
     "present iff 'winner'), `attempts` (every attempt, accepted or not, with "
-    "its resolved `name`, `source_sha256`, `config_sha256`, and a diagnostic "
+    "its resolved `name`, `source_sha256` (the inline text's hash, or the "
+    "on-disk file's raw-byte hash), `config_sha256`, `used_script_path`, and a "
+    "diagnostic "
     "`best_objective_bound` — useful even on an `unknown`/rejected attempt "
     "with no incumbent, and never used for acceptance or winner selection), "
     "`elapsed_ms`, "
@@ -1048,7 +1078,13 @@ SAVE_VERIFIED_CPSAT_PYTHON_DESCRIPTION = (
     "whose `source_sha256` matches `source`, `seed` matches the supplied `seed`, "
     "and `config_sha256` matches the canonical hash of the supplied `config`; "
     "not necessarily the experiment's own `winner_index`) or the save is "
-    "REJECTED before any child runs; the fresh re-run and gates below still "
+    "REJECTED before any child runs. A matching attempt that ran from "
+    "`script_path` (`used_script_path: true`) does NOT count: this save's "
+    "re-run is always inline `source` with a fresh temp-dir `cwd`, so it can "
+    "replay neither that attempt's `args` nor its `cwd`-relative sibling data. "
+    "At least one matching attempt must be an inline-`source` one; the save is "
+    "rejected when every match is `script_path`-derived (list order never "
+    "matters). The fresh re-run and gates below still "
     "decide everything. On a successful save its full attempt table is "
     "written as `experiment-log.json` — "
     "a provenance SUMMARY (hashes and scalar outcomes per attempt), never an "
@@ -1166,6 +1202,8 @@ SUBMIT_CPSAT_PYTHON_FILE_JOB_DESCRIPTION = (
     "data file or a flag on the command line, exactly as with "
     "`run_cpsat_python_file`. It is recorded at admission, so the job runs the "
     "values supplied on submit even while it waits in the queue. "
+    + _CPSAT_ARGS_LIMITS
+    + "That rejection happens at admission too, so no job record is created. "
     + _CPSAT_JOB_CHECKER_NOTE
     + _REGISTRY_NOTE
     + " "

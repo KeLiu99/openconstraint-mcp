@@ -443,13 +443,26 @@ User problem:
    `run_cpsat_python_experiment(attempts=[<attempt objects>],
    objective_sense=<"minimize" | "maximize"; omit for pure feasibility>)`
    instead of calling `run_cpsat_python` repeatedly yourself. YOU always
-   write every attempt's complete `source`; the server never generates,
+   supply every attempt's complete script; the server never generates,
    diffs, or merges attempts — it only executes what you give it, verifies
    acceptance, and selects a winner.
-   - Each attempt is `{{name, source, seed, config, timeout_ms}}`. `source`
-     is a full, independent script (same SAFETY rule as step 3). `seed` and
-     `config` are optional cooperative protocols: a script must opt in to
-     read them, and a non-cooperating script simply ignores them.
+   - Each attempt is
+     `{{name, source | script_path, args, seed, config, timeout_ms}}`. Set
+     EXACTLY ONE of `source` (a full, independent inline script, same SAFETY
+     rule as step 3) or `script_path` (a local path to an existing script);
+     setting both, or neither, is rejected before anything runs. `args` is a
+     list of strings appended after `script_path` as the child's
+     `sys.argv[1:]`, and is rejected alongside `source` rather than ignored.
+     `seed` and `config` are optional cooperative protocols: a script must
+     opt in to read them, and a non-cooperating script simply ignores them.
+   - Prefer `script_path` when the variants ALREADY EXIST on disk — it runs
+     each script from its own directory, so a relative `open()` of a shared
+     sibling data file resolves and you never paste the same data into
+     several attempts. Note the trade-off: a `script_path` attempt is marked
+     `used_script_path` and cannot serve as `save_verified_cpsat_python`
+     provenance (step 7), because that save re-runs inline source in a fresh
+     temp directory and can replay neither `args` nor sibling data. Use an
+     inline `source` attempt for anything you intend to save with provenance.
    - To vary the SAME script by a cooperative config instead of pasting it
      multiple times, have the script read
      `os.environ.get("OPENCONSTRAINT_MCP_CPSAT_CONFIG")`, load that path as
@@ -490,8 +503,11 @@ User problem:
    and scalar outcomes per attempt), not an archive of every attempt's full
    config. The server still re-verifies independently and never trusts the
    attached result as proof; `experiment_result` must describe an ACCEPTED
-   attempt matching THIS exact save (same source, seed, and config) or the
-   save is rejected before it re-runs anything.
+   INLINE-`source` attempt matching THIS exact save (same source, seed, and
+   config) or the save is rejected before it re-runs anything. A matching
+   attempt that ran from `script_path` does not qualify — the save re-runs
+   inline source in a fresh temp directory and cannot replay that attempt's
+   `args` or `cwd`-relative sibling data.
 
    Save gate options (in order of strictness):
    a. Reported gate (always applied): `status` in `optimal`/`feasible` and
@@ -730,11 +746,21 @@ save-tool provenance.
    checker=<the CP-SAT checker>, problem=<the original problem text, or step
    7's combined JSON object for the instance THIS run solves when the checker parses
    it>)`, where
-   each attempt is `{{name, source, seed, config, timeout_ms}}` with a
-   complete, independent `source`. Attach the checker when comparing
+   each attempt is
+   `{{name, source | script_path, args, seed, config, timeout_ms}}` with
+   EXACTLY ONE of a complete, independent inline `source` or a
+   `script_path` to an existing on-disk script (both set, or neither, is
+   rejected). `script_path` runs each script from its own directory — use it
+   for candidates already on disk that share a sibling data file, passing
+   `args` (rejected alongside `source`) for a per-candidate data argument.
+   `checker`/`problem` stay INLINE TEXT for the whole call; there is no
+   `checker_path` here. Attach the checker when comparing
    candidates. The tool accepts only attempts with a present solution
    and, when supplied, an `"accepted"` checker result, so it is NOT
-   required to split into per-candidate calls.
+   required to split into per-candidate calls. A `script_path` attempt is
+   marked `used_script_path` and can never be save provenance in step 13 —
+   rewrite the finalist as inline `source` there anyway, so this costs
+   nothing.
 
 10. Do not present a provisional candidate as the answer, and do not use its
     result as save-tool provenance.
@@ -793,7 +819,9 @@ save-tool provenance.
       accepts only integers, and an unseeded winner has no seed to
       replay.
     - CP-SAT: use the SYNCHRONOUS `run_cpsat_python_experiment` (step 9's
-      call shape) if `experiment_result` provenance will be saved. If that
+      call shape) if `experiment_result` provenance will be saved, and give
+      the attempt you intend to save an INLINE `source` — a `script_path`
+      attempt is never accepted as save provenance. If that
       cannot fit a synchronous call, use `submit_cpsat_python_job` (step
       11's call shape) and save without `experiment_result`; there is no
       background experiment tool.

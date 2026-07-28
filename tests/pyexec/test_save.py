@@ -1070,6 +1070,7 @@ def test_save_with_matching_experiment_result_writes_experiment_log(
             "seed",
             "source_sha256",
             "config_sha256",
+            "used_script_path",
             "timeout_ms",
             "status",
             "objective",
@@ -1318,6 +1319,149 @@ def test_save_rejects_experiment_result_non_winner_accepted_attempt_seed_mismatc
             _SCRIPT, target_dir=tmp_path / "x", experiment_result=experiment_result
         )
     assert called == []
+
+
+# --- experiment_result provenance: script_path attempts -----------------------
+
+
+def _experiment_result_over(
+    attempts: list[CpsatPythonExperimentAttemptResult],
+) -> CpsatPythonExperimentResult:
+    """An experiment result whose winner is ``attempts[0]``, over arbitrary rows."""
+    return CpsatPythonExperimentResult(
+        status="winner",
+        winner_index=0,
+        winner_name=attempts[0].name,
+        winner=_OPTIMAL_RESULT,
+        attempts=attempts,
+        elapsed_ms=100,
+        objective_sense="maximize",
+        selection_policy=(
+            "best_accepted_incumbent_objective_then_status_then_duration_then_attempt_order"
+        ),
+        source_sha256=[a.source_sha256 for a in attempts],
+        checker_sha256=None,
+        problem_sha256=None,
+    )
+
+
+def test_save_rejects_experiment_result_when_every_match_used_script_path(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A script_path attempt is unreplayable provenance: its args/cwd are unavailable."""
+    called = _patch_executor_counting(monkeypatch, _OPTIMAL_RESULT)
+    experiment_result = _experiment_result_over(
+        [
+            _winning_attempt_row(name="from_file", used_script_path=True),
+            _losing_attempt_row(name="unrelated"),
+        ]
+    )
+
+    with pytest.raises(ValueError, match="ran via script_path"):
+        save_verified_cpsat_python(
+            _SCRIPT, target_dir=tmp_path / "x", experiment_result=experiment_result
+        )
+    assert called == []
+
+
+def test_source_mismatch_names_script_path_drift_when_every_attempt_ran_from_a_file(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A pasted copy of a script_path attempt's file drifts by a byte; say so."""
+    called = _patch_executor_counting(monkeypatch, _OPTIMAL_RESULT)
+    experiment_result = _experiment_result_over(
+        [
+            _winning_attempt_row(
+                name="from_file", used_script_path=True, source_sha256="on-disk-bytes"
+            ),
+            _losing_attempt_row(name="also_from_file", used_script_path=True),
+        ]
+    )
+
+    with pytest.raises(ValueError, match="every attempt in this experiment ran via script_path"):
+        save_verified_cpsat_python(
+            _SCRIPT, target_dir=tmp_path / "drift", experiment_result=experiment_result
+        )
+    assert called == []
+
+
+def test_source_mismatch_omits_script_path_hint_when_an_inline_attempt_exists(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """With an inline attempt in the set, a mismatch really is the wrong script."""
+    _patch_executor_counting(monkeypatch, _OPTIMAL_RESULT)
+    experiment_result = _experiment_result_over(
+        [
+            _winning_attempt_row(
+                name="from_file", used_script_path=True, source_sha256="on-disk-bytes"
+            ),
+            _losing_attempt_row(name="inline", used_script_path=False),
+        ]
+    )
+
+    with pytest.raises(ValueError) as excinfo:
+        save_verified_cpsat_python(
+            _SCRIPT, target_dir=tmp_path / "mixed", experiment_result=experiment_result
+        )
+    assert "script_path" not in str(excinfo.value)
+
+
+@pytest.mark.parametrize("script_path_first", [True, False])
+def test_save_accepts_experiment_result_when_any_match_is_inline_regardless_of_order(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, script_path_first: bool
+) -> None:
+    """One inline match is enough, wherever it sits in ``attempts``."""
+    _patch_executor(monkeypatch, _OPTIMAL_RESULT)
+    from_file = _winning_attempt_row(index=0, name="from_file", used_script_path=True)
+    inline = _winning_attempt_row(index=1, name="inline", used_script_path=False)
+    rows = [from_file, inline] if script_path_first else [inline, from_file]
+    target = tmp_path / f"mixed_{script_path_first}"
+
+    result = save_verified_cpsat_python(
+        _SCRIPT, target_dir=target, experiment_result=_experiment_result_over(rows)
+    )
+
+    assert result.saved is True
+
+
+def test_save_accepts_experiment_result_whose_only_match_is_inline(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _patch_executor(monkeypatch, _OPTIMAL_RESULT)
+    experiment_result = _experiment_result_over(
+        [
+            _winning_attempt_row(name="inline", used_script_path=False),
+            _losing_attempt_row(name="unrelated"),
+        ]
+    )
+    target = tmp_path / "inline_only"
+
+    result = save_verified_cpsat_python(
+        _SCRIPT, target_dir=target, experiment_result=experiment_result
+    )
+
+    assert result.saved is True
+
+
+def test_experiment_log_attempt_rows_record_used_script_path(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _patch_executor(monkeypatch, _OPTIMAL_RESULT)
+    experiment_result = _experiment_result_over(
+        [
+            _winning_attempt_row(index=0, name="inline", used_script_path=False),
+            _winning_attempt_row(index=1, name="from_file", used_script_path=True),
+        ]
+    )
+    target = tmp_path / "used_script_path_log"
+
+    save_verified_cpsat_python(_SCRIPT, target_dir=target, experiment_result=experiment_result)
+
+    log = json.loads((target / EXPERIMENT_LOG_FILENAME).read_text())
+    assert {a["name"]: a["used_script_path"] for a in log["attempts"]} == {
+        "inline": False,
+        "from_file": True,
+    }
 
 
 # --- verify_only mode ---------------------------------------------------------

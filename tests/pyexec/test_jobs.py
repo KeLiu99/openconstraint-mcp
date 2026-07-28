@@ -11,6 +11,7 @@ import pytest
 
 from openconstraint_mcp.pyexec.jobs import CpsatJobRegistry
 from openconstraint_mcp.schemas.cpsat import CpsatCheckerReport, CpsatPythonResult, CpsatStatus
+from openconstraint_mcp.shared.childrun import ChildSpawnError
 from openconstraint_mcp.shared.job_errors import JobRejectedError
 
 
@@ -129,6 +130,31 @@ def test_submit_source_error_status_yields_succeeded_job(monkeypatch: pytest.Mon
         assert status.state == "succeeded"
         assert status.result is not None
         assert status.result.status == "error"
+    finally:
+        registry.shutdown()
+
+
+@pytest.mark.parametrize("job_kind", ["source", "file"])
+def test_spawn_failure_reaches_failed_without_result(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, job_kind: str
+) -> None:
+    def _fail_spawn(*args: Any, **kwargs: Any) -> None:
+        raise ChildSpawnError(24, "Too many open files")
+
+    monkeypatch.setattr("openconstraint_mcp.pyexec.core.execute_child", _fail_spawn)
+    registry = CpsatJobRegistry()
+    try:
+        if job_kind == "source":
+            job_id = registry.submit_source("print('x')")
+        else:
+            script = tmp_path / "model.py"
+            script.write_text("print('x')", encoding="utf-8")
+            job_id = registry.submit_file(script)
+        assert _wait_until_terminal(registry, job_id) == "failed"
+        status = registry.get(job_id)
+        assert status.result is None
+        assert status.message is not None
+        assert "Too many open files" in status.message
     finally:
         registry.shutdown()
 
@@ -276,6 +302,19 @@ def test_submit_file_rejects_missing_path_before_creating_job(tmp_path: Path) ->
     try:
         with pytest.raises(ValueError, match="does not exist"):
             registry.submit_file(missing)
+        assert registry.list() == []
+    finally:
+        registry.shutdown()
+
+
+def test_submit_file_rejects_nul_arg_before_creating_job(tmp_path: Path) -> None:
+    """A NUL arg fails the submit call, not the spawn of an already-admitted job."""
+    script = tmp_path / "model.py"
+    script.write_text("print('x')", encoding="utf-8")
+    registry = CpsatJobRegistry()
+    try:
+        with pytest.raises(ValueError, match=r"args\[1\] contains a NUL character"):
+            registry.submit_file(script, args=["data.json", "bad\0arg"])
         assert registry.list() == []
     finally:
         registry.shutdown()

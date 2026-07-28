@@ -28,7 +28,7 @@ from openconstraint_mcp.pyexec.diagnostics import (
     cpsat_result_diagnostic,
 )
 from openconstraint_mcp.schemas.cpsat import CpsatCheckerReport, CpsatPythonResult
-from openconstraint_mcp.shared.childrun import MAX_OUTPUT_BYTES
+from openconstraint_mcp.shared.childrun import MAX_OUTPUT_BYTES, ChildSpawnError
 
 _VALID_SOLUTION = {"x": 3, "y": 7}
 _VALID_STDOUT = json.dumps({"status": "optimal", "objective": 10, "solution": _VALID_SOLUTION})
@@ -529,6 +529,17 @@ def test_run_cpsat_python_file_missing_path_raises(tmp_path: Path) -> None:
     with patch("openconstraint_mcp.shared.childrun.popen_process_group") as fake_popen:
         with pytest.raises(ValueError, match="does not exist"):
             run_cpsat_python_file(missing)
+    fake_popen.assert_not_called()
+
+
+def test_run_cpsat_python_file_nul_arg_raises_before_spawn(tmp_path: Path) -> None:
+    """A NUL is caught in validation, not by Popen's own `embedded null byte`."""
+    script = tmp_path / "model.py"
+    script.write_text("print('x')", encoding="utf-8")
+
+    with patch("openconstraint_mcp.shared.childrun.popen_process_group") as fake_popen:
+        with pytest.raises(ValueError, match=r"args\[0\] contains a NUL character"):
+            run_cpsat_python_file(script, args=["\0"])
     fake_popen.assert_not_called()
 
 
@@ -1071,3 +1082,54 @@ def test_checked_run_invalid_checker_path_spawns_nothing(tmp_path: Path) -> None
 def test_checked_run_invalid_script_path_spawns_nothing(tmp_path: Path) -> None:
     _, checker = _checked_pair(tmp_path)
     _assert_no_child_spawned(tmp_path / "nope.py", checker, r"script_path does not exist")
+
+
+def test_inline_run_spawn_failure_returns_structured_error(tmp_path: Path) -> None:
+    with patch(
+        "openconstraint_mcp.pyexec.core.execute_child",
+        side_effect=ChildSpawnError(7, "Argument list too long"),
+    ):
+        result = run_cpsat_python("print(1)", timeout_ms=1000)
+    assert result.status == "error"
+
+
+def test_spawn_failure_reports_no_return_code(tmp_path: Path) -> None:
+    # No child existed, so there is no exit status to report — never a synthesized code.
+    with patch(
+        "openconstraint_mcp.pyexec.core.execute_child",
+        side_effect=ChildSpawnError(7, "Argument list too long"),
+    ):
+        result = run_cpsat_python("print(1)", timeout_ms=1000)
+    assert result.return_code is None
+
+
+def test_spawn_failure_surfaces_the_os_error_in_stderr() -> None:
+    with patch(
+        "openconstraint_mcp.pyexec.core.execute_child",
+        side_effect=ChildSpawnError(7, "Argument list too long"),
+    ):
+        result = run_cpsat_python("print(1)", timeout_ms=1000)
+    assert "failed to start the Python child process" in result.stderr
+    assert "Argument list too long" in result.stderr
+
+
+def test_file_run_spawn_failure_returns_structured_error(tmp_path: Path) -> None:
+    script = tmp_path / "model.py"
+    script.write_text("print(1)", encoding="utf-8")
+    with patch(
+        "openconstraint_mcp.pyexec.core.execute_child",
+        side_effect=ChildSpawnError(24, "Too many open files"),
+    ):
+        result = run_cpsat_python_file(script, timeout_ms=1000)
+    assert result.status == "error"
+    assert "Too many open files" in result.stderr
+
+
+def test_spawn_failure_result_carries_a_diagnostic() -> None:
+    # The error path must be as inspectable as any other result the tools return.
+    with patch(
+        "openconstraint_mcp.pyexec.core.execute_child",
+        side_effect=ChildSpawnError(12, "Cannot allocate memory"),
+    ):
+        result = run_cpsat_python("print(1)", timeout_ms=1000)
+    assert result.diagnostic is not None

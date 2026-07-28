@@ -77,13 +77,13 @@ from ..schemas.cpsat import (
     CpsatStatus,
 )
 from ..shared.childproc import ChildProcessTracker
-from ..shared.childrun import ChildExecutionResult, execute_child
+from ..shared.childrun import ChildExecutionResult, ChildSpawnError, execute_child
 from ..shared.save_target import text_sha256
 from .checker import checker_infrastructure_report, run_checker_file
 from .diagnostics import checked_result_diagnostic, cpsat_result_diagnostic
 from .eligibility import diagnostic_incumbent_eligibility
 from .env_vars import CPSAT_CONFIG_ENV_VAR, CPSAT_SEED_ENV_VAR
-from .script_path import validate_script_path
+from .script_path import validate_script_args, validate_script_path
 
 DEFAULT_PYEXEC_TIMEOUT_MS: int = 30_000
 
@@ -303,6 +303,42 @@ def _result_from_child(child: ChildExecutionResult) -> CpsatPythonResult:
     return result
 
 
+def _spawn_failure_result(exc: OSError) -> CpsatPythonResult:
+    """Turn a launch failure into the CP-SAT error contract instead of an ``OSError``.
+
+    ``execute_child`` raises whatever ``Popen`` raises, and a spawn can fail for
+    reasons no preflight can rule out: fd exhaustion (``EMFILE``), memory
+    pressure (``ENOMEM``), or an argv that clears ``validate_script_args``'
+    conservative bound but not the kernel's real one (``E2BIG``). Left
+    unhandled, that escapes from synchronous calls and aborts an experiment
+    whose earlier attempts already ran. Background jobs deliberately preserve
+    the exception so their registry reports the infrastructure failure as
+    ``state="failed"``.
+
+    The MiniZinc runner already wraps its own launch this way
+    (``MiniZincExecutionError``); this is the CP-SAT protocol's equivalent, kept
+    at the protocol layer rather than inside the shared executor so MiniZinc's
+    handler keeps firing.
+
+    ``return_code`` is ``None`` because no child ever existed to exit — the same
+    "no meaningful exit status" contract the timeout branch uses, never a
+    synthesized code. ``duration_ms`` is 0: nothing ran.
+    """
+    result = CpsatPythonResult(
+        status="error",
+        solution=None,
+        objective=None,
+        stdout="",
+        stderr=f"failed to start the Python child process: {exc}",
+        return_code=None,
+        timed_out=False,
+        truncated=False,
+        duration_ms=0,
+    )
+    result.diagnostic = cpsat_result_diagnostic(result)
+    return result
+
+
 def _classify_child_result(child: ChildExecutionResult) -> CpsatPythonResult:
     if child.timed_out:
         # Recover the best-so-far if the script emitted intermediate result blocks
@@ -390,6 +426,7 @@ def run_cpsat_python(
     tracker: ChildProcessTracker | None = None,
     on_start: Callable[[Popen[str]], None] | None = None,
     env: dict[str, str | None] | None = None,
+    spawn_failure_as_result: bool = True,
 ) -> CpsatPythonResult:
     """Execute OR-Tools CP-SAT Python ``source`` in a child process.
 
@@ -415,6 +452,10 @@ def run_cpsat_python(
     ``seed_config_env``). It is NOT an MCP-facing parameter — the server never
     exposes arbitrary environment variables.
 
+    ``spawn_failure_as_result`` is INTERNAL. Background jobs set it false so a
+    child that never launches reaches their ``failed`` state; synchronous and
+    experiment callers keep the structured error result.
+
     For an existing local file, use ``run_cpsat_python_file`` instead — it runs
     the script in its own directory so relative file/import references resolve.
     """
@@ -423,14 +464,19 @@ def run_cpsat_python(
         script = tmp / "script.py"
         script.write_text(source, encoding="utf-8")
         # Run from the temp dir: an inline snippet has no sibling files to find.
-        child = execute_child(
-            _python_script_argv(script),
-            cwd=tmp,
-            timeout_ms=timeout_ms,
-            tracker=tracker,
-            on_start=on_start,
-            env=env,
-        )
+        try:
+            child = execute_child(
+                _python_script_argv(script),
+                cwd=tmp,
+                timeout_ms=timeout_ms,
+                tracker=tracker,
+                on_start=on_start,
+                env=env,
+            )
+        except ChildSpawnError as exc:
+            if not spawn_failure_as_result:
+                raise
+            return _spawn_failure_result(exc)
         return _result_from_child(child)
 
 
@@ -442,6 +488,7 @@ def run_cpsat_python_file(
     tracker: ChildProcessTracker | None = None,
     on_start: Callable[[Popen[str]], None] | None = None,
     env: dict[str, str | None] | None = None,
+    spawn_failure_as_result: bool = True,
 ) -> CpsatPythonResult:
     """Execute an existing OR-Tools CP-SAT Python file in its own directory.
 
@@ -453,8 +500,10 @@ def run_cpsat_python_file(
     (``solve_model_path``), which likewise run from the model's directory so a
     relative ``include`` resolves.
 
-    Validates the path (exists / regular file / non-empty / UTF-8) with a clear
-    ``ValueError`` before any child is spawned. Same execution contract, output
+    Validates the path (exists / regular file / non-empty / UTF-8) and ``args``
+    (no embedded NUL, and a bounded total encoding — both of which ``Popen``
+    rejects at spawn time) with a clear ``ValueError`` before any child is
+    spawned. Same execution contract, output
     cap, timeout, tree-kill, and INTERNAL ``env`` overlay (see ``run_cpsat_python``)
     as ``run_cpsat_python``.
 
@@ -464,14 +513,20 @@ def run_cpsat_python_file(
     invocation exactly.
     """
     resolved = validate_script_path(script_path)
-    child = execute_child(
-        _python_script_argv(resolved, args),
-        cwd=resolved.parent,
-        timeout_ms=timeout_ms,
-        tracker=tracker,
-        on_start=on_start,
-        env=env,
-    )
+    validate_script_args(args)
+    try:
+        child = execute_child(
+            _python_script_argv(resolved, args),
+            cwd=resolved.parent,
+            timeout_ms=timeout_ms,
+            tracker=tracker,
+            on_start=on_start,
+            env=env,
+        )
+    except ChildSpawnError as exc:
+        if not spawn_failure_as_result:
+            raise
+        return _spawn_failure_result(exc)
     return _result_from_child(child)
 
 

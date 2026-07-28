@@ -21,6 +21,8 @@ from openconstraint_mcp.schemas.cpsat import (
     CpsatPythonExperimentAttempt,
     CpsatPythonResult,
 )
+from openconstraint_mcp.shared.hashing import path_sha256
+from openconstraint_mcp.shared.save_target import text_sha256
 
 
 def _result(
@@ -1307,3 +1309,428 @@ def test_run_cpsat_python_experiment_warnings_empty_when_no_winner(
 
     assert result.status == "no_winner"
     assert result.warnings == []
+
+
+# --- script_path attempts ----------------------------------------------------
+
+_SCRIPT_BODY = "print('{}')\n"
+
+
+def _patch_file_runner(
+    monkeypatch: pytest.MonkeyPatch,
+    result: CpsatPythonResult | None = None,
+    calls: list[dict[str, Any]] | None = None,
+) -> None:
+    def _fake(
+        script_path: Path,
+        *,
+        timeout_ms: int,
+        args: list[str] | None = None,
+        tracker: Any = None,
+        env: Any = None,
+    ) -> CpsatPythonResult:
+        if calls is not None:
+            calls.append(
+                {
+                    "script_path": script_path,
+                    "args": args,
+                    "timeout_ms": timeout_ms,
+                    "tracker": tracker,
+                    "env": env,
+                }
+            )
+        return result if result is not None else _result()
+
+    monkeypatch.setattr("openconstraint_mcp.pyexec.experiment.run_cpsat_python_file", _fake)
+
+
+def _write_script(tmp_path: Path, name: str = "model.py", body: str | None = None) -> Path:
+    path = tmp_path / name
+    path.write_text(body if body is not None else _SCRIPT_BODY.format(name), encoding="utf-8")
+    return path
+
+
+def test_attempt_with_neither_source_nor_script_path_rejected() -> None:
+    with pytest.raises(ValueError, match=r"attempts\[0\] must set exactly one of source"):
+        run_cpsat_python_experiment([CpsatPythonExperimentAttempt()])
+
+
+def test_attempt_with_both_source_and_script_path_rejected(tmp_path: Path) -> None:
+    script = _write_script(tmp_path)
+    attempt = CpsatPythonExperimentAttempt(source="print('hi')", script_path=str(script))
+
+    with pytest.raises(ValueError, match=r"attempts\[0\] must set exactly one of source"):
+        run_cpsat_python_experiment([attempt])
+
+
+def test_empty_source_alongside_script_path_is_the_both_set_rejection(tmp_path: Path) -> None:
+    # Presence is `is not None`: an explicitly supplied source="" must NOT read
+    # as "only script_path was set" and silently discard the source parameter.
+    script = _write_script(tmp_path)
+    attempt = CpsatPythonExperimentAttempt(source="", script_path=str(script))
+
+    with pytest.raises(ValueError, match=r"attempts\[0\] must set exactly one of source"):
+        run_cpsat_python_experiment([attempt])
+
+
+def test_args_without_script_path_rejected(tmp_path: Path) -> None:
+    attempt = CpsatPythonExperimentAttempt(source="print('hi')", args=["--seed", "7"])
+
+    with pytest.raises(ValueError, match=r"attempts\[0\]\.args supplied without script_path"):
+        run_cpsat_python_experiment([attempt])
+
+
+def test_empty_args_list_alongside_source_is_still_rejected() -> None:
+    # Presence is `is not None`: args=[] must NOT read as "args omitted".
+    attempt = CpsatPythonExperimentAttempt(source="print('hi')", args=[])
+
+    with pytest.raises(ValueError, match=r"attempts\[0\]\.args supplied without script_path"):
+        run_cpsat_python_experiment([attempt])
+
+
+def test_missing_script_path_surfaces_indexed_validation_error(tmp_path: Path) -> None:
+    attempt = CpsatPythonExperimentAttempt(script_path=str(tmp_path / "nope.py"))
+
+    with pytest.raises(ValueError, match=r"attempts\[0\]\.script_path does not exist"):
+        run_cpsat_python_experiment([attempt])
+
+
+def test_empty_script_path_file_surfaces_indexed_validation_error(tmp_path: Path) -> None:
+    script = _write_script(tmp_path, body="   \n")
+    attempt = CpsatPythonExperimentAttempt(script_path=str(script))
+
+    with pytest.raises(ValueError, match=r"attempts\[0\]\.script_path file is empty"):
+        run_cpsat_python_experiment([attempt])
+
+
+def test_non_utf8_script_path_surfaces_indexed_validation_error(tmp_path: Path) -> None:
+    script = tmp_path / "latin1.py"
+    script.write_bytes(b"print('\xff\xfe caf\xe9')\n")
+    attempt = CpsatPythonExperimentAttempt(script_path=str(script))
+
+    with pytest.raises(ValueError, match=r"attempts\[0\]\.script_path is not valid UTF-8"):
+        run_cpsat_python_experiment([attempt])
+
+
+def test_error_message_names_the_offending_attempt_index(tmp_path: Path) -> None:
+    attempts = [
+        _attempt("a"),
+        CpsatPythonExperimentAttempt(script_path=str(tmp_path / "nope.py")),
+    ]
+
+    with pytest.raises(ValueError, match=r"attempts\[1\]\.script_path does not exist"):
+        run_cpsat_python_experiment(attempts)
+
+
+def test_invalid_script_path_rejects_before_any_earlier_attempt_runs(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Validation is a full upfront pass: a bad index-1 path spawns no index-0 child."""
+    inline_calls: list[dict[str, Any]] = []
+    file_calls: list[dict[str, Any]] = []
+    _patch_runner(monkeypatch, {"a": _result()}, calls=inline_calls)
+    _patch_file_runner(monkeypatch, calls=file_calls)
+    attempts = [
+        _attempt("a"),
+        CpsatPythonExperimentAttempt(script_path=str(tmp_path / "nope.py")),
+    ]
+
+    with pytest.raises(ValueError, match=r"attempts\[1\]\.script_path does not exist"):
+        run_cpsat_python_experiment(attempts)
+
+    assert inline_calls == []
+    assert file_calls == []
+
+
+def test_args_containing_nul_rejects_before_any_earlier_attempt_runs(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A NUL arg is caught in preflight, not by Popen after index 0 already ran."""
+    inline_calls: list[dict[str, Any]] = []
+    file_calls: list[dict[str, Any]] = []
+    _patch_runner(monkeypatch, {"a": _result()}, calls=inline_calls)
+    _patch_file_runner(monkeypatch, calls=file_calls)
+    attempts = [
+        _attempt("a"),
+        CpsatPythonExperimentAttempt(
+            script_path=str(_write_script(tmp_path)), args=["ok", "bad\0arg"]
+        ),
+    ]
+
+    with pytest.raises(ValueError, match=r"attempts\[1\]\.args\[1\] contains a NUL character"):
+        run_cpsat_python_experiment(attempts)
+
+    assert inline_calls == []
+    assert file_calls == []
+
+
+def test_script_path_attempt_row_records_used_script_path_and_file_hash(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    script = _write_script(tmp_path)
+    _patch_file_runner(monkeypatch, _result(objective=3))
+
+    result = run_cpsat_python_experiment(
+        [CpsatPythonExperimentAttempt(name="from_file", script_path=str(script))],
+        objective_sense="minimize",
+    )
+
+    row = result.attempts[0]
+    assert row.used_script_path is True
+    assert row.source_sha256 == path_sha256(script)
+
+
+def test_inline_source_attempt_row_does_not_set_used_script_path(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _patch_runner(monkeypatch, {"a": _result(objective=3)})
+
+    result = run_cpsat_python_experiment([_attempt("a")], objective_sense="minimize")
+
+    assert result.attempts[0].used_script_path is False
+
+
+def test_script_path_hash_is_unnormalized_raw_bytes_for_crlf_script(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A read_text()-based hash would normalize CRLF to \\n; path_sha256 must not."""
+    script = tmp_path / "crlf.py"
+    script.write_bytes(b"import sys\r\nprint('hi')\r\n")
+    _patch_file_runner(monkeypatch, _result(objective=3))
+
+    result = run_cpsat_python_experiment(
+        [CpsatPythonExperimentAttempt(script_path=str(script))], objective_sense="minimize"
+    )
+
+    assert result.attempts[0].source_sha256 == path_sha256(script)
+    assert result.attempts[0].source_sha256 != text_sha256(script.read_text(encoding="utf-8"))
+
+
+def test_script_path_attempt_forwards_args_and_resolved_path_to_the_file_runner(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    script = _write_script(tmp_path)
+    calls: list[dict[str, Any]] = []
+    _patch_file_runner(monkeypatch, _result(objective=3), calls=calls)
+
+    run_cpsat_python_experiment(
+        [
+            CpsatPythonExperimentAttempt(
+                script_path=str(script), args=["--seed", "7"], timeout_ms=1234
+            )
+        ],
+        objective_sense="minimize",
+    )
+
+    assert len(calls) == 1
+    assert calls[0]["args"] == ["--seed", "7"]
+    assert calls[0]["script_path"] == script.resolve()
+    assert calls[0]["timeout_ms"] == 1234
+
+
+def test_mixed_inline_and_script_path_attempts_race_in_one_experiment(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    script = _write_script(tmp_path)
+    _patch_runner(monkeypatch, {"a": _result(objective=9)})
+    _patch_file_runner(monkeypatch, _result(objective=2))
+
+    result = run_cpsat_python_experiment(
+        [
+            _attempt("a", name="inline"),
+            CpsatPythonExperimentAttempt(name="from_file", script_path=str(script)),
+        ],
+        objective_sense="minimize",
+    )
+
+    assert result.winner_name == "from_file"
+    assert [row.used_script_path for row in result.attempts] == [False, True]
+
+
+# --- spawn failure: one attempt cannot start ---------------------------------
+
+
+def _patch_execute_child_failing_on(monkeypatch: pytest.MonkeyPatch, failing_source: str) -> None:
+    """Fail the spawn for one attempt's script, run the rest normally.
+
+    Patched at ``core.execute_child`` rather than at ``experiment.run_cpsat_python``
+    so the real spawn-failure handling in ``core`` is what's under test.
+    """
+    from openconstraint_mcp.shared.childrun import ChildExecutionResult, ChildSpawnError
+
+    def _fake(argv: Any, cwd: Any, **kw: Any) -> ChildExecutionResult:
+        source = (Path(cwd) / "script.py").read_text(encoding="utf-8")
+        if source == failing_source:
+            raise ChildSpawnError(7, "Argument list too long")
+        return ChildExecutionResult(
+            stdout=json.dumps({"status": "optimal", "objective": 5, "solution": {"x": 1}}),
+            stderr="",
+            return_code=0,
+            timed_out=False,
+            truncated=False,
+            duration_ms=1,
+        )
+
+    monkeypatch.setattr("openconstraint_mcp.pyexec.core.execute_child", _fake)
+
+
+def test_experiment_survives_an_attempt_that_cannot_spawn(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _patch_execute_child_failing_on(monkeypatch, "b")
+
+    result = run_cpsat_python_experiment([_attempt("a"), _attempt("b")], objective_sense="minimize")
+
+    assert result.status == "winner"
+
+
+def test_spawn_failure_does_not_discard_the_other_attempts_rows(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # The pre-fix behaviour raised OSError out of pool.map, losing every row —
+    # including attempts whose children had already run to completion.
+    _patch_execute_child_failing_on(monkeypatch, "b")
+
+    result = run_cpsat_python_experiment([_attempt("a"), _attempt("b")], objective_sense="minimize")
+
+    assert len(result.attempts) == 2
+
+
+def test_unspawnable_attempt_is_reported_as_not_accepted(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _patch_execute_child_failing_on(monkeypatch, "b")
+
+    result = run_cpsat_python_experiment([_attempt("a"), _attempt("b")], objective_sense="minimize")
+
+    assert result.attempts[1].accepted is False
+
+
+def test_file_attempt_post_launch_oserror_propagates(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    script = _write_script(tmp_path)
+
+    def _raise(_script_path: Path, **_kwargs: Any) -> CpsatPythonResult:
+        raise OSError(5, "post-launch cleanup failed")
+
+    monkeypatch.setattr("openconstraint_mcp.pyexec.experiment.run_cpsat_python_file", _raise)
+
+    with pytest.raises(OSError, match="post-launch cleanup failed"):
+        run_cpsat_python_experiment([CpsatPythonExperimentAttempt(script_path=str(script))])
+
+
+# --- script_path invalidated mid-experiment ----------------------------------
+
+
+def _patch_execute_child_mutating(monkeypatch: pytest.MonkeyPatch, mutate: Any) -> None:
+    """Run every attempt successfully, but let attempt "a" mutate the filesystem.
+
+    Models the reviewer's scenario directly: an EARLIER serial attempt changes a
+    LATER attempt's script_path out from under the upfront validation pass.
+    """
+    from openconstraint_mcp.shared.childrun import ChildExecutionResult
+
+    def _fake(argv: Any, cwd: Any, **kw: Any) -> ChildExecutionResult:
+        if Path(argv[-1]).read_text(encoding="utf-8") == "a":
+            mutate()
+        return ChildExecutionResult(
+            stdout=json.dumps({"status": "optimal", "objective": 5, "solution": {"x": 1}}),
+            stderr="",
+            return_code=0,
+            timed_out=False,
+            truncated=False,
+            duration_ms=1,
+        )
+
+    monkeypatch.setattr("openconstraint_mcp.pyexec.core.execute_child", _fake)
+
+
+def _script_attempt_pair(tmp_path: Path) -> tuple[Path, list[CpsatPythonExperimentAttempt]]:
+    script = tmp_path / "victim.py"
+    script.write_text("print('original')", encoding="utf-8")
+    return script, [
+        CpsatPythonExperimentAttempt(name="a", source="a"),
+        CpsatPythonExperimentAttempt(name="b", script_path=str(script)),
+    ]
+
+
+def test_script_deleted_by_an_earlier_attempt_does_not_abort_the_experiment(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    script, attempts = _script_attempt_pair(tmp_path)
+    _patch_execute_child_mutating(monkeypatch, script.unlink)
+
+    result = run_cpsat_python_experiment(attempts, max_parallel_attempts=1)
+
+    assert len(result.attempts) == 2
+
+
+def test_deleted_script_attempt_is_not_accepted(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    script, attempts = _script_attempt_pair(tmp_path)
+    _patch_execute_child_mutating(monkeypatch, script.unlink)
+
+    result = run_cpsat_python_experiment(attempts, max_parallel_attempts=1)
+
+    assert result.attempts[1].accepted is False
+
+
+def test_script_deleted_during_its_run_is_not_accepted(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    script = _write_script(tmp_path)
+
+    def _delete(script_path: Path, **_kwargs: Any) -> CpsatPythonResult:
+        script_path.unlink()
+        return _result()
+
+    monkeypatch.setattr("openconstraint_mcp.pyexec.experiment.run_cpsat_python_file", _delete)
+
+    result = run_cpsat_python_experiment([CpsatPythonExperimentAttempt(script_path=str(script))])
+
+    assert result.attempts[0].accepted is False
+
+
+def test_script_rewritten_mid_experiment_invalidates_only_that_attempt(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    script, attempts = _script_attempt_pair(tmp_path)
+    _patch_execute_child_mutating(
+        monkeypatch, lambda: script.write_text("print('swapped')", encoding="utf-8")
+    )
+
+    result = run_cpsat_python_experiment(attempts, max_parallel_attempts=1)
+
+    assert result.attempts[0].accepted is True
+    assert result.attempts[1].accepted is False
+
+
+def test_rewritten_script_attempt_says_the_file_changed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    script, attempts = _script_attempt_pair(tmp_path)
+    _patch_execute_child_mutating(
+        monkeypatch, lambda: script.write_text("print('swapped')", encoding="utf-8")
+    )
+
+    result = run_cpsat_python_experiment(attempts, max_parallel_attempts=1)
+
+    assert "changed on disk" in (result.attempts[1].message or "")
+
+
+def test_reported_digest_is_the_validated_content_not_the_replacement(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The digest must describe the bytes the request was admitted against; the
+    # attempt is failed rather than re-labelled with the replacement's hash.
+    script, attempts = _script_attempt_pair(tmp_path)
+    original_digest = path_sha256(script)
+    _patch_execute_child_mutating(
+        monkeypatch, lambda: script.write_text("print('swapped')", encoding="utf-8")
+    )
+
+    result = run_cpsat_python_experiment(attempts, max_parallel_attempts=1)
+
+    assert result.attempts[1].source_sha256 == original_digest

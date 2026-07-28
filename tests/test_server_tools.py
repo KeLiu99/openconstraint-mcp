@@ -2772,6 +2772,48 @@ async def test_run_cpsat_python_experiment_routes_to_experiment_result(
 
 
 @pytest.mark.asyncio
+async def test_run_cpsat_python_experiment_forwards_script_path_attempt(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A script_path/args attempt survives the MCP schema boundary intact."""
+    script = tmp_path / "model.py"
+    script.write_text("print('hi')\n", encoding="utf-8")
+    fake_result = CpsatPythonExperimentResult(
+        status="no_winner",
+        attempts=[],
+        elapsed_ms=1,
+        objective_sense=None,
+        selection_policy="accepted_status_then_duration_then_attempt_order",
+        source_sha256=[],
+    )
+    seen: dict[str, object] = {}
+
+    def _fake(
+        attempts: list[CpsatPythonExperimentAttempt], **kw: object
+    ) -> CpsatPythonExperimentResult:
+        seen["attempts"] = attempts
+        return fake_result
+
+    monkeypatch.setattr("openconstraint_mcp.server.run_cpsat_python_experiment", _fake)
+
+    mcp = create_mcp_server()
+    await mcp.call_tool(
+        "run_cpsat_python_experiment",
+        {
+            "attempts": [
+                {"name": "from_file", "script_path": str(script), "args": ["data_ft10.json"]}
+            ]
+        },
+    )
+
+    assert seen["attempts"] == [
+        CpsatPythonExperimentAttempt(
+            name="from_file", script_path=str(script), args=["data_ft10.json"]
+        )
+    ]
+
+
+@pytest.mark.asyncio
 async def test_run_cpsat_python_experiment_forwards_include_winner_stdout(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
