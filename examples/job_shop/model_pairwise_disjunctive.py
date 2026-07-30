@@ -80,7 +80,7 @@ def greedy_schedule() -> dict[tuple[int, int], int]:
     total_ops = sum(len(j) for j in jobs)
     scheduled = 0
     while scheduled < total_ops:
-        best_job, best_start = None, None
+        best_job, best_start = -1, None
         for j in range(num_jobs):
             if job_next_op[j] >= len(jobs[j]):
                 continue
@@ -88,6 +88,7 @@ def greedy_schedule() -> dict[tuple[int, int], int]:
             candidate_start = max(job_ready[j], machine_ready[machine])
             if best_start is None or candidate_start < best_start:
                 best_start, best_job = candidate_start, j
+        assert best_job >= 0
         j = best_job
         task_id = job_next_op[j]
         machine, duration = jobs[j][task_id]

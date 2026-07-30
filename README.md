@@ -1405,6 +1405,36 @@ server runs it in a **local child process**.
   benchmark instance stays on disk instead of being pasted into the request
   once per attempt — the duplication this option exists to remove.
 
+  `examples/flexible_job_shop/` carries the same pattern one step further: five
+  CP-SAT formulations of the *flexible* job shop problem (`model.py` canonical
+  optional intervals, `model_direct_optional_intervals.py`,
+  `model_pairwise_disjunctive.py`, `model_redundant_bounds.py`,
+  `model_composite.py`), each self-contained and taking
+  `[data_file.json] [time_limit_seconds] [results_dir]` on the command line,
+  with a shared `checker.py`. Every model prints its full result on stdout, and
+  the printed `solution` CONTAINS the schedule rather than describing it,
+  because the checked tools build the checker's payload from stdout — a summary
+  that only pointed elsewhere would leave the checker nothing to grade. Writing
+  that result to a file is **opt-in**: a model touches the disk only when the
+  third argument names a directory (the committed runs used `results`), so
+  solving through the MCP file tools never mutates the checkout on its own.
+  Because the 600s runs needed for the
+  larger instances exceed `run_cpsat_python_experiment`'s non-overridable
+  120s wall-clock budget, those were driven with `submit_cpsat_python_file_job`
+  instead, three at a time so the compared models see identical machine load.
+  Each model's docstring records its measured result; the short version is that
+  no formulation wins outright. On mk01 all five prove the optimum of 40 in
+  ~0.1s. On mk15 the plain optional-interval encoding holds the best incumbent
+  (347, against `model_composite.py`'s 349 and `model_pairwise_disjunctive.py`'s
+  381). At 60 machines the split is between bounds and incumbents: the
+  machine-load inequality carried by `model_redundant_bounds.py` and
+  `model_composite.py` is the only thing that lifts the lower bound off the
+  trivial 77 (both reach 344), while a greedy dispatching heuristic's 427 still
+  beats every formulation except `model_composite.py`, which combines the load
+  bound with that same greedy schedule as a warm start and improves on it to
+  418. `model_direct_optional_intervals.py` is a size-only ablation so far —
+  measured on mk01 only, with its runtime question deliberately open.
+
 #### Persisting an attempt from an experiment
 
 `save_verified_cpsat_python` accepts two additional, optional arguments for
