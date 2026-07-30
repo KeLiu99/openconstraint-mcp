@@ -25,12 +25,14 @@ nothing and stay invisible to `add_no_overlap`.
 
     new_optional_interval_var(start, d, end, lit)
 
-Measured model sizes (pre-presolve):
+Measured model sizes (pre-presolve, `len(model.proto.{variables,constraints})`;
+"canonical" is model_composite.py, the file this one was forked from, so the
+encoding is the only difference between the columns):
 
     instance      canonical                direct                saved
-    mk01            447 vars /   542 con     210 /   206     -53% / -62%
-    mk15          3,176     / 3,957        1,365 / 1,350     -57% / -66%
-    behnke       29,281     / 38,501      10,261 / 10,221    -65% / -73%
+    mk01            450 vars /   548 con     210 /   212     -53% / -61%
+    mk15          3,183     / 3,972        1,365 / 1,365     -57% / -66%
+    behnke       29,281     / 38,561      10,261 / 10,281    -65% / -73%
 
 WHY THE CANONICAL FORM EXISTS ANYWAY: the private copies matter when
 alternatives need different timing semantics -- machine-dependent setup times,
@@ -242,14 +244,23 @@ stats = {
 }
 result_name = f"{stats['formulation']}__{DATA_PATH.stem}.json"
 
-# The full schedule is written to results/; stdout carries only a compact
-# summary, so a 500-task behnke result does not travel back through the MCP
-# tool response. checker.py reads the saved file to verify feasibility.
+# The result is written to results/ AND printed verbatim. The printed `solution`
+# must CONTAIN the schedule, not describe it: the checked MCP tools build the
+# checker's payload from this stdout object, so a summary that merely points at
+# the saved file leaves the checker with nothing to grade and it reports an
+# ungradeable payload. The cost is real -- a 500-task behnke solution is ~40 KB
+# of tool response -- and it is the price of an in-band verification pass.
 full = {
     "status": status_map.get(status, "error"),
     "objective": objective,
     "solution": (
-        {"makespan": objective, "schedule": schedule, "instance": DATA_PATH.name}
+        {
+            "makespan": objective,
+            "schedule": schedule,
+            "instance": DATA_PATH.name,
+            "num_tasks": len(schedule),
+            "result_file": f"results/{result_name}",
+        }
         if objective is not None
         else {}
     ),
@@ -260,20 +271,4 @@ results_dir = Path(__file__).parent / "results"
 results_dir.mkdir(exist_ok=True)
 (results_dir / result_name).write_text(json.dumps(full), encoding="utf-8")
 
-print(
-    json.dumps(
-        {
-            **full,
-            "solution": (
-                {
-                    "makespan": objective,
-                    "num_tasks": len(schedule),
-                    "instance": DATA_PATH.name,
-                    "result_file": f"results/{result_name}",
-                }
-                if objective is not None
-                else {}
-            ),
-        }
-    )
-)
+print(json.dumps(full))

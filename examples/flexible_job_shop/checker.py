@@ -29,17 +29,6 @@ Checker protocol:
   {"status": "accepted"|"rejected"|"error", "errors": [...], "details": {}}
 - "accepted" with an empty errors list is the only passing verdict.
 
-The two failing verdicts are split by WHAT failed, because the caller acts on
-them differently. "error" means the payload could not be graded at all -- an
-unusable instance, or a solution/solver_status that is not a well-formed
-schedule claim. "rejected" means a well-formed schedule WAS graded against the
-instance and violates it. Collapsing the two is actively harmful: a client told
-"rejected" for a missing `solution.schedule` key is being pointed at the
-constraint model when the bug is in the model's print statement, and the
-plausible next move is to "fix" correct scheduling constraints. Both verdicts
-still fail the server's verification gate, so nothing unsafe is accepted
-either way -- the split only buys the caller an accurate diagnosis.
-
 Runs standalone: python checker.py <payload.json>
 """
 
@@ -103,7 +92,7 @@ def _resolve_problem(problem: object) -> tuple[dict[str, Any] | None, str, str |
 
 def _parse_instance(instance: dict[str, Any]) -> tuple[Jobs | None, int | None, str | None]:
     """Parse and validate the FJSP instance. Returns (jobs, num_machines, error)."""
-    num_machines: int | None = instance.get("num_machines")
+    num_machines = instance.get("num_machines")
     if not _is_int(num_machines):
         return None, None, "problem instance num_machines missing or not an int"
     if num_machines < 1:
@@ -185,100 +174,95 @@ def check_payload(payload: dict[str, Any]) -> dict[str, Any]:
         return {"status": "error", "errors": [instance_error], "details": {}}
     assert jobs is not None and num_machines is not None
 
-    details: dict[str, Any] = {
-        "instance_source": source,
-        "num_jobs": len(jobs),
-        "num_machines": num_machines,
-        "num_tasks": sum(len(job) for job in jobs),
-    }
-
-    # Gate: the payload has to be a well-formed schedule CLAIM before grading it
-    # against the instance means anything. A missing solver_status or a solution
-    # that is not a list of int-valued entries is a serialization fault in the
-    # producer, not an infeasible schedule, so it is an "error" -- see the
-    # verdict split in the module docstring.
-    protocol_errors: list[str] = []
+    errors: list[str] = []
     solver_status = payload.get("solver_status")
     if solver_status not in {"optimal", "feasible"}:
-        protocol_errors.append(f"solver_status is {solver_status!r}, expected optimal or feasible")
+        errors.append(f"solver_status is {solver_status!r}, expected optimal or feasible")
 
     schedule, schedule_errors = _load_schedule(payload.get("solution"))
-    protocol_errors.extend(schedule_errors)
+    errors.extend(schedule_errors)
 
-    if protocol_errors:
-        return {"status": "error", "errors": protocol_errors, "details": details}
-    assert schedule is not None
+    if schedule is not None:
+        seen: set[tuple[int, int]] = set()
+        by_machine: dict[int, list[tuple[int, int, int]]] = {}
+        max_end = 0
 
-    errors: list[str] = []
-    seen: set[tuple[int, int]] = set()
-    by_machine: dict[int, list[tuple[int, int, int]]] = {}
-    max_end = 0
+        for entry in schedule:
+            job_id, task_id = entry["job"], entry["task"]
+            key = (job_id, task_id)
+            if key in seen:
+                errors.append(f"job {job_id} task {task_id} appears more than once")
+                continue
+            seen.add(key)
 
-    for entry in schedule:
-        job_id, task_id = entry["job"], entry["task"]
-        key = (job_id, task_id)
-        if key in seen:
-            errors.append(f"job {job_id} task {task_id} appears more than once")
-            continue
-        seen.add(key)
+            if not (0 <= job_id < len(jobs)) or not (0 <= task_id < len(jobs[job_id])):
+                errors.append(f"job {job_id} task {task_id} is out of range")
+                continue
 
-        if not (0 <= job_id < len(jobs)) or not (0 <= task_id < len(jobs[job_id])):
-            errors.append(f"job {job_id} task {task_id} is out of range")
-            continue
-
-        start, duration, end, machine = (
-            entry["start"],
-            entry["duration"],
-            entry["end"],
-            entry["machine"],
-        )
-        # The FJSP rule: the pair must be one the instance actually offers.
-        alternatives = jobs[job_id][task_id]
-        if (machine, duration) not in alternatives:
-            errors.append(
-                f"job {job_id} task {task_id} uses (machine {machine}, "
-                f"duration {duration}), which is not among its alternatives "
-                f"{[list(a) for a in alternatives]}"
+            start, duration, end, machine = (
+                entry["start"],
+                entry["duration"],
+                entry["end"],
+                entry["machine"],
             )
-        if start < 0 or end != start + duration:
-            errors.append(f"job {job_id} task {task_id} has inconsistent start/duration/end")
-
-        by_machine.setdefault(machine, []).append((start, end, job_id))
-        max_end = max(max_end, end)
-
-    missing = {
-        (job_id, task_id) for job_id, job in enumerate(jobs) for task_id in range(len(job))
-    } - seen
-    if missing:
-        errors.append(f"missing tasks: {sorted(missing)}")
-
-    for job_id in range(len(jobs)):
-        job_entries = sorted((e for e in schedule if e["job"] == job_id), key=lambda e: e["task"])
-        for prev, nxt in zip(job_entries, job_entries[1:], strict=False):
-            if nxt["start"] < prev["end"]:
+            # The FJSP rule: the pair must be one the instance actually offers.
+            alternatives = jobs[job_id][task_id]
+            if (machine, duration) not in alternatives:
                 errors.append(
-                    f"job {job_id} task {nxt['task']} starts before task {prev['task']} ends"
+                    f"job {job_id} task {task_id} uses (machine {machine}, "
+                    f"duration {duration}), which is not among its alternatives "
+                    f"{[list(a) for a in alternatives]}"
                 )
+            if start < 0 or end != start + duration:
+                errors.append(f"job {job_id} task {task_id} has inconsistent start/duration/end")
 
-    for machine, intervals in by_machine.items():
-        intervals.sort()
-        for (_start_a, end_a, job_a), (start_b, _end_b, job_b) in zip(
-            intervals, intervals[1:], strict=False
-        ):
-            if start_b < end_a:
-                errors.append(f"machine {machine} overlaps job {job_a} and job {job_b}")
+            by_machine.setdefault(machine, []).append((start, end, job_id))
+            max_end = max(max_end, end)
 
-    objective = payload.get("objective")
-    if not isinstance(objective, int | float) or isinstance(objective, bool):
-        errors.append(
-            f"objective must be a number equal to the schedule makespan {max_end}, "
-            f"got {objective!r}"
-        )
-    elif objective != max_end:
-        errors.append(f"objective {objective} does not match schedule makespan {max_end}")
+        missing = {
+            (job_id, task_id) for job_id, job in enumerate(jobs) for task_id in range(len(job))
+        } - seen
+        if missing:
+            errors.append(f"missing tasks: {sorted(missing)}")
+
+        for job_id in range(len(jobs)):
+            job_entries = sorted(
+                (e for e in schedule if e["job"] == job_id), key=lambda e: e["task"]
+            )
+            for prev, nxt in zip(job_entries, job_entries[1:], strict=False):
+                if nxt["start"] < prev["end"]:
+                    errors.append(
+                        f"job {job_id} task {nxt['task']} starts before task {prev['task']} ends"
+                    )
+
+        for machine, intervals in by_machine.items():
+            intervals.sort()
+            for (_start_a, end_a, job_a), (start_b, _end_b, job_b) in zip(
+                intervals, intervals[1:], strict=False
+            ):
+                if start_b < end_a:
+                    errors.append(f"machine {machine} overlaps job {job_a} and job {job_b}")
+
+        objective = payload.get("objective")
+        if not isinstance(objective, int | float) or isinstance(objective, bool):
+            errors.append(
+                f"objective must be a number equal to the schedule makespan {max_end}, "
+                f"got {objective!r}"
+            )
+        elif objective != max_end:
+            errors.append(f"objective {objective} does not match schedule makespan {max_end}")
 
     status = "accepted" if not errors else "rejected"
-    return {"status": status, "errors": errors, "details": details}
+    return {
+        "status": status,
+        "errors": errors,
+        "details": {
+            "instance_source": source,
+            "num_jobs": len(jobs),
+            "num_machines": num_machines,
+            "num_tasks": sum(len(job) for job in jobs),
+        },
+    }
 
 
 def main() -> None:

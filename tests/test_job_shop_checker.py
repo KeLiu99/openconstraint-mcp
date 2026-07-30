@@ -188,16 +188,73 @@ def test_instance_with_negative_duration_yields_error_status() -> None:
         ("end", True),
     ],
 )
-def test_rejects_bool_in_schedule_field(field: str, value: bool) -> None:
+def test_bool_in_schedule_field_yields_error_status(field: str, value: bool) -> None:
     """`bool` is an `int` subclass, so an unguarded `true`/`false` behaves as 1/0 in
     every downstream comparison, index, and sum — the type guard is the only place it
     can be caught. Each parameter substitutes a bool that is NUMERICALLY EQUAL to the
-    correct value, so nothing but the bool exclusion itself can produce a rejection."""
+    correct value, so nothing but the bool exclusion itself can produce the verdict.
+    A JSON boolean where an int belongs is a serialization fault in the producer, not
+    an infeasible schedule, hence `error` rather than `rejected`."""
     problem = json.dumps({"num_machines": 2, "jobs": [[[1, 1]]]})
-    entry = {"job": 0, "task": 0, "machine": 1, "start": 0, "duration": 1, "end": 1}
+    entry: dict[str, Any] = {"job": 0, "task": 0, "machine": 1, "start": 0, "duration": 1, "end": 1}
     entry[field] = value
     result = _checker.check_payload(_payload(problem, [entry], 1))
-    assert result["status"] == "rejected"
+    assert result["status"] == "error"
+
+
+def test_missing_schedule_key_yields_error_status() -> None:
+    """A solution with no `schedule` key cannot be graded at all. Reporting it as
+    `rejected` would point the caller at the constraint model when the bug is in the
+    model's print statement."""
+    _, jobs = _load_instance("data_ft06.json")
+    problem = (_DATA_DIR / "data_ft06.json").read_text(encoding="utf-8")
+    result = _checker.check_payload(
+        {
+            "problem": problem,
+            "solution": {"makespan": 55, "num_tasks": len(jobs)},
+            "objective": 55,
+            "solver_status": "optimal",
+        }
+    )
+    assert result["status"] == "error"
+    assert result["errors"] == ["solution.schedule must be a list"]
+
+
+def test_solution_not_a_dict_yields_error_status() -> None:
+    problem = json.dumps({"num_machines": 1, "jobs": [[[0, 3]]]})
+    result = _checker.check_payload(
+        {"problem": problem, "solution": [], "objective": 3, "solver_status": "optimal"}
+    )
+    assert result["status"] == "error"
+
+
+def test_schedule_entry_missing_field_yields_error_status() -> None:
+    problem = json.dumps({"num_machines": 1, "jobs": [[[0, 3]]]})
+    entry: dict[str, int] = {"job": 0, "task": 0, "machine": 0, "start": 0, "duration": 3}
+    result = _checker.check_payload(_payload(problem, [entry], 3))
+    assert result["status"] == "error"
+
+
+@pytest.mark.parametrize("solver_status", ["unknown", "infeasible", "timeout", "error", None])
+def test_unsolved_solver_status_yields_error_status(solver_status: object) -> None:
+    """A status that does not claim a solution makes the schedule ungradeable: there
+    is no asserted solution to grade, so the checker cannot pronounce on feasibility."""
+    problem, jobs = _load_instance("data_ft06.json")
+    schedule, makespan = _valid_schedule(jobs)
+    payload = _payload(problem, schedule, makespan)
+    payload["solver_status"] = solver_status
+    result = _checker.check_payload(payload)
+    assert result["status"] == "error"
+
+
+def test_error_verdict_carries_instance_details() -> None:
+    """A protocol-gate error still reports which instance it tried to grade against,
+    so the caller can tell "wrong output shape" from "wrong instance loaded"."""
+    problem, jobs = _load_instance("data_ft06.json")
+    result = _checker.check_payload(
+        {"problem": problem, "solution": {}, "objective": 55, "solver_status": "optimal"}
+    )
+    assert result["details"] == {"num_jobs": len(jobs), "num_machines": 6}
 
 
 def test_instance_with_no_jobs_yields_error_status() -> None:

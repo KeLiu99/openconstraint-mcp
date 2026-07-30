@@ -176,12 +176,13 @@ def test_rejects_duplicate_task() -> None:
 
 
 def test_compact_summary_solution_yields_error_status() -> None:
-    """The regression this split exists for. Every model in the examples directory
-    prints a COMPACT summary to stdout and writes the full schedule to results/, so
-    the checked MCP tool hands the checker a solution with no `schedule` key at all.
-    That is a serialization mismatch in the producer, not an infeasible schedule --
-    reporting it as `rejected` points the caller at the constraint model and invites
-    it to "fix" scheduling logic that was never wrong."""
+    """The regression this split exists for. A producer whose `solution` DESCRIBES
+    the schedule (makespan, task count, a pointer to a saved file) instead of
+    CONTAINING it hands the checker nothing to grade — the shape every model in this
+    directory emitted before they were changed to print the schedule itself. That is
+    a serialization mismatch in the producer, not an infeasible schedule; reporting
+    it as `rejected` points the caller at the constraint model and invites it to
+    "fix" scheduling logic that was never wrong."""
     payload = {
         "problem": "data_mk01.json",
         "solution": {

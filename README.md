@@ -1405,13 +1405,17 @@ server runs it in a **local child process**.
   benchmark instance stays on disk instead of being pasted into the request
   once per attempt — the duplication this option exists to remove.
 
-  `examples/flexible_job_shop/` carries the same pattern one step further: three
-  CP-SAT formulations of the *flexible* job shop problem (`model.py` optional
-  intervals, `model_pairwise_disjunctive.py`, `model_redundant_bounds.py`),
-  each self-contained and taking `[data_file.json] [time_limit_seconds]` on the
-  command line, with a shared `checker.py`. Every model writes its full schedule to
-  `results/` and prints a compact summary, so a 500-task result does not have to
-  travel back through the tool response. Because the 600s runs needed for the
+  `examples/flexible_job_shop/` carries the same pattern one step further: five
+  CP-SAT formulations of the *flexible* job shop problem (`model.py` canonical
+  optional intervals, `model_direct_optional_intervals.py`,
+  `model_pairwise_disjunctive.py`, `model_redundant_bounds.py`,
+  `model_composite.py`), each self-contained and taking
+  `[data_file.json] [time_limit_seconds]` on the command line, with a shared
+  `checker.py`. Every model writes its full result to `results/` and prints that
+  same object on stdout: the printed `solution` CONTAINS the schedule rather than
+  describing it, because the checked tools build the checker's payload from
+  stdout — a summary that only pointed at the saved file would leave the checker
+  nothing to grade. Because the 600s runs needed for the
   larger instances exceed `run_cpsat_python_experiment`'s non-overridable
   120s wall-clock budget, those were driven with `submit_cpsat_python_file_job`
   instead, three at a time so the compared models see identical machine load.
