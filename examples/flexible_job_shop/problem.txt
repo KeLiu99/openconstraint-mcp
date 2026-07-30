@@ -1,0 +1,213 @@
+Flexible job shop scheduling (FJSP).
+
+Problem
+-------
+
+Each job is a sequence of tasks that must run in a fixed order. Unlike the
+classic job shop problem in ../job_shop, a task is not tied to one machine.
+It has one or more eligible alternatives, and each alternative names a
+machine and the processing duration on that machine.
+
+A feasible schedule must:
+
+- choose exactly one machine alternative for every task;
+- preserve the task order within every job;
+- prevent tasks assigned to the same machine from overlapping; and
+- run each started task to completion without interruption.
+
+All jobs are initially available at time zero. Time and durations are
+non-negative integers. The initial objective is to minimize makespan: the
+time at which the last task finishes.
+
+This adds one decision to the classic job shop problem: the solver chooses
+both the machine assignment and the timing. "Task" and "operation" refer to
+the same concept in this example.
+
+Illustrative data shape
+-----------------------
+
+A compact representation for a later data file is:
+
+    jobs -> job -> task -> alternative -> [machine, duration]
+
+For example:
+
+    {
+      "jobs": [
+        [
+          [[0, 3], [2, 5]]
+        ],
+        [
+          [[1, 4]]
+        ]
+      ]
+    }
+
+Job 1 has one task that can run on machine 0 for 3 time units or machine 2
+for 5 time units. Job 2 has one task that can run only on machine 1 for 4
+time units. The benchmark files below use this schema.
+
+Included benchmark data
+-----------------------
+
+Three instances provide a small-to-large progression:
+
+- data_mk01.json: 10 jobs, 6 machines, 55 tasks, and 115 alternatives.
+  The proven optimal makespan is 40.
+- data_mk15.json: 30 jobs, 15 machines, 284 tasks, and 861 alternatives.
+  The proven optimal makespan is 333.
+- data_behnke_lar04_1.json: 100 jobs, 60 machines, 500 tasks, and 9,260
+  alternatives. It corresponds to behnke56 in FJSPLib; the current best
+  known lower and upper bounds are 103 and 390.
+
+The files were converted mechanically from these public JSON downloads:
+
+- https://raw.githubusercontent.com/SchedulingLab/fjsp-instances/main/brandimarte/mk01.json
+- https://raw.githubusercontent.com/SchedulingLab/fjsp-instances/main/brandimarte/mk15.json
+- https://raw.githubusercontent.com/SchedulingLab/fjsp-instances/main/behnke/lar04_1.json
+
+Repository metadata and license:
+
+- https://github.com/SchedulingLab/fjsp-instances
+- https://github.com/SchedulingLab/fjsp-instances/blob/main/instances.json
+- https://github.com/SchedulingLab/fjsp-instances/blob/main/LICENSE
+
+Further public dataset downloads
+--------------------------------
+
+SchedulingLab provides the simplest one-stop download:
+
+- Complete ZIP:
+  https://github.com/SchedulingLab/fjsp-instances/archive/refs/heads/main.zip
+- Brandimarte, 15 Mk instances ranging from small cases to 30-job cases:
+  https://github.com/SchedulingLab/fjsp-instances/tree/main/brandimarte
+- Hurink, 3 sets of 66 modified job-shop instances with different levels of
+  machine flexibility:
+  https://github.com/SchedulingLab/fjsp-instances/tree/main/hurink
+- Dauzere-Peres, 18 general multiprocessor job-shop instances:
+  https://github.com/SchedulingLab/fjsp-instances/tree/main/dauzere
+- Chambers and Barnes, 21 instances in three seven-instance groups:
+  https://github.com/SchedulingLab/fjsp-instances/tree/main/barnes
+- Kacem, 4 small instances often used in early and multi-objective studies:
+  https://github.com/SchedulingLab/fjsp-instances/tree/main/kacem
+- Fattahi, 20 instances designed for exact and heuristic comparisons:
+  https://github.com/SchedulingLab/fjsp-instances/tree/main/fattahi
+- Behnke, 60 work-center instances, including the largest 100-job,
+  60-machine cases in this repository:
+  https://github.com/SchedulingLab/fjsp-instances/tree/main/behnke
+
+FJSPLib is the broader maintained catalog. It currently indexes 452
+instances, supplies JSON and two text formats, adds Hurink's non-flexible
+sdata cases and 50 Birgin instances, and tracks current lower and upper
+bounds:
+
+- Catalog and bounds:
+  https://scheduleopt.github.io/benchmarks/fjsplib
+- Data repository:
+  https://github.com/ScheduleOpt/benchmarks/tree/main/flexible%20jobshop
+- Complete repository ZIP:
+  https://github.com/ScheduleOpt/benchmarks/archive/refs/heads/main.zip
+
+SchedulingLab uses the MIT license; ScheduleOpt/benchmarks uses CC BY-SA
+4.0. Both catalogs should be checked against the cited original publication
+before using an instance as a research reference.
+
+These benchmark families are primarily instances of the base FJSP, not a
+catalog of extra real-world constraints. Hurink's sdata, edata, rdata, and
+vdata variants change how many machine alternatives operations have; Behnke
+varies problem scale and work-center structure. Setup times, calendars,
+workers, transport, and similar extensions remain separate problem variants.
+
+Scope: grow one layer at a time
+--------------------------------
+
+The first future model should implement only the problem above. The
+following real-world constraints are deliberately deferred:
+
+- release dates, due dates, priorities, and tardiness objectives;
+- machine calendars, planned maintenance, and breakdowns;
+- sequence-dependent setup and changeover times;
+- operators, tools, molds, and other secondary resources;
+- material availability, transport, buffers, and storage;
+- preemption, overlapping tasks, batches, and alternative task routes; and
+- dynamic rescheduling and multi-objective optimization.
+
+These are not assumptions about real factories. They are the boundary of the
+smallest useful FJSP example and provide a clear path for later examples.
+
+Industrial evidence
+-------------------
+
+This machine-choice requirement is used outside academic benchmark work:
+
+- Novares, an automotive plastic-injection supplier, deployed production
+  planning and scheduling across 18 plants. Its case study describes an
+  injection mold that can be mounted on several pieces of equipment and
+  explicitly identifies management of alternative machines as a production
+  requirement:
+  https://www.3ds.com/fileadmin/PRODUCTS-SERVICES/DELMIA/PDF/Case-studies/ORTEMS/DELMIA-ORTEMS-NOVARES-Case-Study.pdf
+
+- Ortakci Cam manufactures automotive and industrial glass through ordered
+  steps including cutting, preparation, tempering, and packaging. Its case
+  study describes manual routing selection being replaced by scheduling that
+  associates work orders with suitable machinery while also considering
+  finite capacity, due dates, setup, and changeover times:
+  https://www.3ds.com/assets/invest/2024-02/delmia-ortakci-cam-case-study.pdf
+
+Vendor case studies are evidence that the operational requirement exists;
+their performance claims are not treated here as independently verified
+results.
+
+The same concept appears directly in mainstream manufacturing software:
+
+- SAP S/4HANA PP/DS defines a mode by its production resource and duration,
+  and allows multiple modes to represent alternative production resources:
+  https://help.sap.com/docs/SAP_S4HANA_ON-PREMISE/f899ce30af9044299d573ea30b533f1c/5318c4530b29b44ce10000000a174cb4.html
+  https://help.sap.com/docs/SAP_S4HANA_ON-PREMISE/f899ce30af9044299d573ea30b533f1c/a14dc95360267614e10000000a174cb4.html
+
+- Microsoft Dynamics 365 job scheduling selects among capable resources and
+  accounts for resource-specific efficiency when calculating reserved time:
+  https://learn.microsoft.com/en-us/dynamics365/supply-chain/production-control/job-scheduling
+  https://learn.microsoft.com/en-us/dynamics365/supply-chain/production-control/operations-resources
+
+- Odoo Manufacturing supports alternative work centers when the primary
+  work center is unavailable or at capacity:
+  https://www.odoo.com/documentation/18.0/applications/inventory_and_mrp/manufacturing/advanced_configuration/using_work_centers.html
+
+- Siemens describes an Opcenter integration that receives operations,
+  estimated durations, and available resources, then returns planned start
+  and end times and the selected execution equipment:
+  https://blogs.sw.siemens.com/opcenter/available-now-opcenter-execution-process-4-1/
+
+Models, literature, and public benchmarks
+-----------------------------------------
+
+- The MiniZinc Handbook presents a flexible job shop model using optional
+  tasks, `alternative`, and `disjunctive` scheduling constraints:
+  https://docs.minizinc.dev/en/stable/optiontypes.html#option-types-in-scheduling-problems
+  https://docs.minizinc.dev/en/stable/lib-globals-scheduling.html
+
+- SchedulingLab collects several established public FJSP benchmark families,
+  including Brandimarte, Hurink, Dauzere-Peres, Barnes, Kacem, Fattahi, and
+  Behnke instances. Its own warning says to verify data against the original
+  publications:
+  https://github.com/SchedulingLab/fjsp-instances
+
+- Brandimarte introduced the widely used Mk benchmark family:
+  https://doi.org/10.1007/BF02023073
+
+- Hurink, Jurisch, and Thole studied job shops with multi-purpose machines:
+  https://doi.org/10.1007/BF01719451
+
+- A 2023 review surveys FJSP variants and 467 benchmark instances:
+  https://doi.org/10.1016/j.ejor.2023.05.017
+
+- The online printing shop scheduling problem is a documented real
+  industrial extension of FJSP with machine unavailability,
+  sequence-dependent setups, release times, fixed operations, and more:
+  https://doi.org/10.1016/j.cor.2020.105020
+
+Public benchmarks are suitable for solver validation, but they are not proof
+that their records are live company production data. Any future example data
+in this directory must identify whether it is synthetic or a public
+benchmark and preserve its source and licensing information.
