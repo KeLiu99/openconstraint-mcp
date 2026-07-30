@@ -289,6 +289,31 @@ def test_problem_with_path_separator_yields_error_status() -> None:
     assert result["status"] == "error"
 
 
+def test_bare_filename_from_a_copied_checker_names_the_path_based_requirement(
+    tmp_path: Path,
+) -> None:
+    """The filename form resolves next to `__file__`, so it only works when the
+    checker runs IN PLACE. `run_cpsat_python`/`run_cpsat_python_experiment` take the
+    checker as inline text and copy it to a temp directory, where no data file is a
+    sibling -- the case the other filename tests miss by importing the repository
+    file. Loading a COPY reproduces that execution context, and the resulting error
+    must point the caller at `checker_path` rather than merely reporting a missing
+    file, since the filename is right and only the run mode is wrong."""
+    copied = tmp_path / "checker.py"
+    copied.write_text(_CHECKER_PATH.read_text(encoding="utf-8"), encoding="utf-8")
+    spec = importlib.util.spec_from_file_location("copied_fjs_checker", copied)
+    assert spec is not None and spec.loader is not None
+    copied_checker = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(copied_checker)
+
+    _, jobs = _load_instance("data_mk01.json")
+    schedule, makespan = _valid_schedule(jobs)
+    result = copied_checker.check_payload(_payload("data_mk01.json", schedule, makespan))
+
+    assert result["status"] == "error"
+    assert "checker_path" in result["errors"][0]
+
+
 def test_alternative_pair_of_wrong_arity_yields_error_status() -> None:
     """A malformed alternative is not valid ground truth, so no schedule laid
     against it can be certified."""

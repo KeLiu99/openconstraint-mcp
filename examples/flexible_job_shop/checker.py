@@ -21,6 +21,14 @@ every call would be pure waste. Passing the name keeps `problem` an
 INDEPENDENT channel: the model script does not get to tell the checker which
 instance to grade it against.
 
+THE FILENAME FORM REQUIRES A PATH-BASED CHECKER RUN -- `checker_path`, i.e.
+`run_cpsat_python_file_checked` or `submit_cpsat_python_file_job`, which run
+this file in place. Handing the same source to a tool that takes the checker as
+INLINE TEXT (`run_cpsat_python`'s or `run_cpsat_python_experiment`'s `checker`)
+copies it into a temporary directory, so `__file__` no longer sits next to the
+data files and every bare filename resolves to nothing. Inline-checker callers
+must inline the instance JSON too; the resolver's not-found error says so.
+
 Checker protocol:
 - Receives the payload JSON path as sys.argv[1].
 - Payload keys: problem (str|null), solution (dict), objective (float|null),
@@ -64,6 +72,11 @@ def _resolve_problem(problem: object) -> tuple[dict[str, Any] | None, str, str |
     other string is treated as a data filename resolved next to this checker.
     A filename containing a path separator is rejected rather than followed --
     the payload names one of this directory's data files, not an arbitrary path.
+
+    Resolving next to `__file__` only reaches the data files when this checker
+    runs IN PLACE (`checker_path`); an inline-checker tool copies the source to
+    a temp directory, where the lookup necessarily fails. That is the likeliest
+    cause of a not-found error, so the message names it.
     """
     if not isinstance(problem, str):
         return None, "", "payload.problem is missing or not a string"
@@ -86,7 +99,14 @@ def _resolve_problem(problem: object) -> tuple[dict[str, Any] | None, str, str |
 
     path = Path(__file__).parent / text
     if not path.is_file():
-        return None, "", f"payload.problem names {text!r}, which is not a file in {path.parent}"
+        return (
+            None,
+            "",
+            f"payload.problem names {text!r}, which is not a file in {path.parent}. "
+            "The filename form needs this checker to run from its own directory "
+            "(checker_path); an inline checker is copied to a temp directory, so "
+            "pass the instance JSON inline instead.",
+        )
     try:
         instance = json.loads(path.read_text(encoding="utf-8"))
     except (json.JSONDecodeError, UnicodeDecodeError) as exc:

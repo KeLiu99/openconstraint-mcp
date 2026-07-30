@@ -31,7 +31,23 @@ That omission makes this file a partial ablation as well as a composite: if the
 behnke bound still lands near 344, the machine-load inequality was what carried
 model_redundant_bounds.py's bound win, and the cumulative was dead weight.
 
-Runs standalone: python model_composite.py [data.json] [seconds]
+Measured (single worker, seed 42, 600s cap; raw runs in results/): the ablation
+answered YES, and the composite is the only run to improve on its own warm start.
+- mk01: optimal 40 in 0.1s.
+- mk15: best 349, bound 332 -- between model.py's 347/333 and
+  model_redundant_bounds.py's 363/332. At 15 machines the machine-load bound
+  still buys nothing, so this is model.py plus overhead.
+- behnke lar04_1: best 418, bound 344. The bound MATCHES
+  model_redundant_bounds.py's 344 with the add_cumulative removed, so the
+  machine-load inequality carried that file's entire bound win and the
+  cumulative was dead weight -- which is exactly what this file was built to
+  test. The incumbent is the headline: 418 beats the greedy warm start it was
+  handed (427), where model_pairwise_disjunctive.py merely tied it and the two
+  formulations without the load bound finished at 504 and 624. Combining the
+  cheap encoding, the load bound and the warm start is what made search
+  productive at 60 machines.
+
+Runs standalone: python model_composite.py [data.json] [seconds] [results_dir]
 """
 
 import collections
@@ -44,6 +60,13 @@ from ortools.sat.python import cp_model
 
 DATA_PATH = Path(__file__).parent / (sys.argv[1] if len(sys.argv) > 1 else "data_mk01.json")
 TIME_LIMIT = float(sys.argv[2]) if len(sys.argv) > 2 else 60.0
+# Saving the result is OPT-IN. These scripts are meant to be run through the MCP
+# file tools against the user's own checkout, and a plain solve must not mutate
+# it -- so nothing is written unless this third argument names a directory (the
+# committed runs used `results`). A relative name resolves next to this script,
+# so the write target never depends on the caller's cwd; an absolute path is
+# taken as given.
+RESULTS_DIR = (Path(__file__).parent / sys.argv[3]) if len(sys.argv) > 3 else None
 
 data = json.loads(DATA_PATH.read_text())
 # jobs -> job -> task -> alternative -> [machine, duration]
@@ -230,33 +253,41 @@ stats = {
     "model_variables": len(model.proto.variables),
     "model_constraints": len(model.proto.constraints),
 }
-result_name = f"{stats['formulation']}__{DATA_PATH.stem}.json"
+RESULT_PATH = (
+    RESULTS_DIR / f"{stats['formulation']}__{DATA_PATH.stem}.json"
+    if RESULTS_DIR is not None
+    else None
+)
 
-# The result is written to results/ AND printed verbatim. The printed `solution`
-# must CONTAIN the schedule, not describe it: the checked MCP tools build the
-# checker's payload from this stdout object, so a summary that merely points at
-# the saved file leaves the checker with nothing to grade and it reports an
-# ungradeable payload. The cost is real -- a 500-task behnke solution is ~40 KB
-# of tool response -- and it is the price of an in-band verification pass.
+# The result is ALWAYS printed verbatim, and written to a file only when the
+# caller opted in. The printed `solution` must CONTAIN the schedule, not
+# describe it: the checked MCP tools build the checker's payload from this
+# stdout object, so a summary that merely points at a saved file leaves the
+# checker with nothing to grade and it reports an ungradeable payload. The cost
+# is real -- a 500-task behnke solution is ~40 KB of tool response -- and it is
+# the price of an in-band verification pass.
+solution = (
+    {
+        "makespan": objective,
+        "schedule": schedule,
+        "instance": DATA_PATH.name,
+        "num_tasks": len(schedule),
+    }
+    if objective is not None
+    else {}
+)
+if RESULT_PATH is not None and solution:
+    solution["result_file"] = str(RESULT_PATH)
+
 full = {
     "status": status_map.get(status, "error"),
     "objective": objective,
-    "solution": (
-        {
-            "makespan": objective,
-            "schedule": schedule,
-            "instance": DATA_PATH.name,
-            "num_tasks": len(schedule),
-            "result_file": f"results/{result_name}",
-        }
-        if objective is not None
-        else {}
-    ),
+    "solution": solution,
     "best_objective_bound": solver.best_objective_bound,
     "stats": stats,
 }
-results_dir = Path(__file__).parent / "results"
-results_dir.mkdir(exist_ok=True)
-(results_dir / result_name).write_text(json.dumps(full), encoding="utf-8")
+if RESULT_PATH is not None:
+    RESULT_PATH.parent.mkdir(parents=True, exist_ok=True)
+    RESULT_PATH.write_text(json.dumps(full), encoding="utf-8")
 
 print(json.dumps(full))

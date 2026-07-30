@@ -66,11 +66,14 @@ The files were converted mechanically from these public JSON downloads:
 - https://raw.githubusercontent.com/SchedulingLab/fjsp-instances/main/brandimarte/mk15.json
 - https://raw.githubusercontent.com/SchedulingLab/fjsp-instances/main/behnke/lar04_1.json
 
-Repository metadata and license:
+SchedulingLab publishes them under the MIT license, whose notice requirement
+travels with the copies bundled here: the upstream copyright and full license
+text are reproduced in ../../LICENSES/fjsp-instances.txt.
+
+Repository metadata:
 
 - https://github.com/SchedulingLab/fjsp-instances
 - https://github.com/SchedulingLab/fjsp-instances/blob/main/instances.json
-- https://github.com/SchedulingLab/fjsp-instances/blob/main/LICENSE
 
 Further public dataset downloads
 --------------------------------
