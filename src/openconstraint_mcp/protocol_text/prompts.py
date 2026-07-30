@@ -528,6 +528,31 @@ User problem:
       - Print exactly ONE JSON object as its FINAL stdout line:
         `{{"status": "accepted"|"rejected"|"error", "errors": [...], "details": {{...}}}}`
         `accepted` with an empty `errors` list is the only passing verdict.
+      - Split the two FAILING verdicts by what failed, because the client
+        fixes a different artifact for each. `error` means the payload could
+        not be graded at all — an unusable instance, or a `solution`/
+        `solver_status` that is not a well-formed claim — and points at the
+        `problem` value or the script's output code. `rejected` means a
+        well-formed solution WAS graded against the instance and violates
+        it, and points at the model's constraints. Both fail the gate either
+        way, so the split costs nothing and is what stops a client from
+        "fixing" correct constraints when the real bug is a missing output
+        key.
+      - Be a PREDICATE, not a solver: grade the solution you were handed
+        with plain arithmetic over the payload, standard library only. Never
+        `import ortools` and never re-solve. The checker runs in the SAME
+        interpreter as the model and under its own timeout, so a solving
+        checker inherits the failure modes it exists to catch — it can time
+        out, exhaust memory, or repeat the model's own modeling bug on
+        exactly the hard instances where an independent verdict matters.
+      - Never accept VACUOUSLY. Validate the instance BEFORE grading against
+        it and return `error` for an empty or degenerate one (no jobs, no
+        items, a missing dimension): every constraint loop trivially
+        succeeds over an empty collection, so a serialization slip that
+        dropped the instance would otherwise score a clean `accepted`. For
+        the same reason check COVERAGE — every element the instance requires
+        is present in the solution — not only that the entries present are
+        self-consistent.
       - SAFETY: generate only validation code — no network access, no file
         mutations, no subprocess spawning — unless the user explicitly
         requested it. The server executes this code locally and does not
@@ -700,7 +725,11 @@ save-tool provenance.
 7. Choose winners WITHIN a backend only; never merge candidates from both
    backends into one race. Draft a checker whenever more than one candidate is
    being compared, not only across backends: a checker is what stops an
-   incorrect formulation from winning the tuning-stage race. For a
+   incorrect formulation from winning the tuning-stage race. That only holds
+   if each checker is a PREDICATE that grades the emitted solution against
+   the instance — one that re-solves the problem inherits the very failure it
+   exists to catch, and one that accepts an empty or degenerate instance
+   instead of erroring passes every candidate alike. For a
    cross-backend comparison, draft TWO backend-specific checkers that enforce
    the same problem constraints. They are NOT interchangeable source:
    MiniZinc uses inline MiniZinc solution-checker source; CP-SAT uses a Python
