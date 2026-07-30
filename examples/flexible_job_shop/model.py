@@ -17,7 +17,10 @@ uses a plain fixed-duration interval: there is no choice to model, and a
 non-optional interval is cheaper to propagate. On mk01 and mk15 that covers
 29% and 23% of tasks respectively; on the behnke instance it covers none.
 
-Measured (single worker, seed 42, 600s cap; raw runs in results/):
+Measured (single worker, seed 42, 600s cap; raw runs in results/ -- mk01
+current, mk15 and behnke predating a later stdout change that added
+num_tasks, kept rather than re-solved because no change since touched the
+model itself):
 - mk01: optimal 40 in 0.1s.
 - mk15: best 347, bound 333. The bound REACHES the known optimum of 333, so
   the shortfall is finding the matching schedule, not proving it -- which is
@@ -189,7 +192,10 @@ RESULT_PATH = (
 # stdout object, so a summary that merely points at a saved file leaves the
 # checker with nothing to grade and it reports an ungradeable payload. The cost
 # is real -- a 500-task behnke solution is ~40 KB of tool response -- and it is
-# the price of an in-band verification pass.
+# the price of an in-band verification pass. It carries no path to the saved
+# file either: the name is derivable from the formulation and instance already
+# in `stats`, and an absolute path would bake this machine's filesystem into
+# every committed artifact under results/.
 solution = (
     {
         "makespan": objective,
@@ -200,8 +206,6 @@ solution = (
     if objective is not None
     else {}
 )
-if RESULT_PATH is not None and solution:
-    solution["result_file"] = str(RESULT_PATH)
 
 full = {
     "status": status_map.get(status, "error"),

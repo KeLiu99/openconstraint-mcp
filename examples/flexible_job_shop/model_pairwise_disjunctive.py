@@ -30,8 +30,10 @@ Two prunings keep the encoding honest rather than needlessly bloated:
 A greedy earliest-completion-time warm start supplies hints for both the
 timing and the machine choice.
 
-Measured (single worker, seed 42, 600s cap; raw runs in results/): the ft10
-advantage does NOT survive machine flexibility.
+Measured (single worker, seed 42, 600s cap; raw runs in results/ -- mk01
+current, mk15 and behnke predating a later stdout change that added
+num_tasks, kept rather than re-solved because no change since touched the
+model itself): the ft10 advantage does NOT survive machine flexibility.
 - mk01: optimal 40 in 0.1s, tying the other two.
 - mk15: best 381 (worst of three) with a bound of just 199 against a known
   optimum of 333 -- a lower-bound collapse, not a search failure. Two causes,
@@ -285,7 +287,10 @@ RESULT_PATH = (
 # stdout object, so a summary that merely points at a saved file leaves the
 # checker with nothing to grade and it reports an ungradeable payload. The cost
 # is real -- a 500-task behnke solution is ~40 KB of tool response -- and it is
-# the price of an in-band verification pass.
+# the price of an in-band verification pass. It carries no path to the saved
+# file either: the name is derivable from the formulation and instance already
+# in `stats`, and an absolute path would bake this machine's filesystem into
+# every committed artifact under results/.
 solution = (
     {
         "makespan": objective,
@@ -296,8 +301,6 @@ solution = (
     if objective is not None
     else {}
 )
-if RESULT_PATH is not None and solution:
-    solution["result_file"] = str(RESULT_PATH)
 
 full = {
     "status": status_map.get(status, "error"),

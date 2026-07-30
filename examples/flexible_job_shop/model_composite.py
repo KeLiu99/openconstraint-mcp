@@ -31,8 +31,11 @@ That omission makes this file a partial ablation as well as a composite: if the
 behnke bound still lands near 344, the machine-load inequality was what carried
 model_redundant_bounds.py's bound win, and the cumulative was dead weight.
 
-Measured (single worker, seed 42, 600s cap; raw runs in results/): the ablation
-answered YES, and the composite is the only run to improve on its own warm start.
+Measured (single worker, seed 42, 600s cap; raw runs in results/ -- mk01
+current, mk15 and behnke predating a later stdout change that added
+num_tasks, kept rather than re-solved because no change since touched the
+model itself): the ablation answered YES, and the composite is the only run
+to improve on its own warm start.
 - mk01: optimal 40 in 0.1s.
 - mk15: best 349, bound 332 -- between model.py's 347/333 and
   model_redundant_bounds.py's 363/332. At 15 machines the machine-load bound
@@ -265,7 +268,10 @@ RESULT_PATH = (
 # stdout object, so a summary that merely points at a saved file leaves the
 # checker with nothing to grade and it reports an ungradeable payload. The cost
 # is real -- a 500-task behnke solution is ~40 KB of tool response -- and it is
-# the price of an in-band verification pass.
+# the price of an in-band verification pass. It carries no path to the saved
+# file either: the name is derivable from the formulation and instance already
+# in `stats`, and an absolute path would bake this machine's filesystem into
+# every committed artifact under results/.
 solution = (
     {
         "makespan": objective,
@@ -276,8 +282,6 @@ solution = (
     if objective is not None
     else {}
 )
-if RESULT_PATH is not None and solution:
-    solution["result_file"] = str(RESULT_PATH)
 
 full = {
     "status": status_map.get(status, "error"),

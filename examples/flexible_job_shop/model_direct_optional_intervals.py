@@ -261,7 +261,10 @@ RESULT_PATH = (
 # stdout object, so a summary that merely points at a saved file leaves the
 # checker with nothing to grade and it reports an ungradeable payload. The cost
 # is real -- a 500-task behnke solution is ~40 KB of tool response -- and it is
-# the price of an in-band verification pass.
+# the price of an in-band verification pass. It carries no path to the saved
+# file either: the name is derivable from the formulation and instance already
+# in `stats`, and an absolute path would bake this machine's filesystem into
+# every committed artifact under results/.
 solution = (
     {
         "makespan": objective,
@@ -272,8 +275,6 @@ solution = (
     if objective is not None
     else {}
 )
-if RESULT_PATH is not None and solution:
-    solution["result_file"] = str(RESULT_PATH)
 
 full = {
     "status": status_map.get(status, "error"),
