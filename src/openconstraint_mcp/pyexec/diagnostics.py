@@ -110,7 +110,9 @@ def _run_diagnostic(result: CpsatPythonResult) -> Diagnostic | None:
     (``experiment._script_invalidated_result``), which falls through to the
     recompute.
     """
-    return result.diagnostic or cpsat_result_diagnostic(result)
+    if result.diagnostic is not None:
+        return result.diagnostic
+    return cpsat_result_diagnostic(result)
 
 
 def checker_report_diagnostic(report: CpsatCheckerReport) -> Diagnostic | None:

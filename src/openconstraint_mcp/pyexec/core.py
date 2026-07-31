@@ -113,9 +113,10 @@ VERIFIED_STATUSES: frozenset[CpsatStatus] = frozenset[CpsatStatus]({"optimal", "
 
 # Statuses a script may legitimately report. "timeout" is executor-determined, so a
 # script claiming it is treated as a contract violation and normalized to "error".
-_SCRIPT_STATUSES: frozenset[str] = frozenset(
-    {"optimal", "feasible", "infeasible", "unknown", "error"}
-)
+# The tuple carries the order the violation message lists them in (solution-bearing
+# first); the frozenset is derived from it so the two can never disagree.
+_SCRIPT_STATUS_ORDER: tuple[str, ...] = ("optimal", "feasible", "infeasible", "unknown", "error")
+_SCRIPT_STATUSES: frozenset[str] = frozenset(_SCRIPT_STATUS_ORDER)
 
 
 def validate_checker_timeout_ms(checker_timeout_ms: int | None) -> None:
@@ -308,9 +309,7 @@ def _envelope_violation(parsed: dict) -> tuple[str, str] | None:
     if not isinstance(raw_status, str):
         return "status", f"must be a string, got {type(raw_status).__name__}"
     if raw_status not in _SCRIPT_STATUSES:
-        return "status", (
-            f"must be one of optimal, feasible, infeasible, unknown, error; got {raw_status!r}"
-        )
+        return "status", (f"must be one of {', '.join(_SCRIPT_STATUS_ORDER)}; got {raw_status!r}")
     if "objective" not in parsed:
         return "objective", "required key is missing"
     objective = parsed["objective"]
@@ -497,7 +496,7 @@ def _classify_child_result(
             violation,
         )
 
-    status = normalize_status(parsed.get("status"))
+    status = normalize_status(parsed["status"])
     solution, objective, best_objective_bound = _extract_solution_objective(parsed)
     return (
         CpsatPythonResult(

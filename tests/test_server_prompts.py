@@ -231,6 +231,13 @@ async def test_cpsat_prompt_carries_the_shared_output_contract_fragment() -> Non
     assert CPSAT_OUTPUT_CONTRACT_GUIDANCE in text
 
 
+def test_output_contract_fragment_is_brace_free_for_str_format() -> None:
+    # Both host prompts are `str.format`ted with the user's problem text, so a brace
+    # in the spliced fragment would surface as an unrelated-looking KeyError.
+    assert "{" not in CPSAT_OUTPUT_CONTRACT_GUIDANCE
+    assert "}" not in CPSAT_OUTPUT_CONTRACT_GUIDANCE
+
+
 def test_output_contract_fragment_requires_a_complete_in_band_solution() -> None:
     normalized = " ".join(CPSAT_OUTPUT_CONTRACT_GUIDANCE.split())
 

@@ -525,6 +525,15 @@ def test_run_cpsat_python_malformed_timeout_partial_is_not_recovered() -> None:
     assert result.solution is None
 
 
+def test_run_cpsat_python_off_vocabulary_timeout_partial_is_not_recovered() -> None:
+    # An intermediate block is where a script is most likely to invent a status;
+    # the envelope gate drops it rather than recovering an unclassifiable partial.
+    partial = json.dumps({"status": "in_progress", "objective": 3, "solution": {"x": 1}})
+    result = _run_with_mocked_proc(timeout=True, stdout_content=partial, timeout_ms=50)
+
+    assert result.solution is None
+
+
 def test_run_cpsat_python_malformed_timeout_partial_keeps_the_timeout_diagnostic() -> None:
     # Timeout is executor-owned and its diagnostic keeps precedence: a malformed
     # partial must never turn the run into a protocol error.
