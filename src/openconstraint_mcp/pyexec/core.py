@@ -121,6 +121,15 @@ VERIFIED_STATUSES: frozenset[CpsatStatus] = frozenset[CpsatStatus]({"optimal", "
 _SCRIPT_STATUS_ORDER: tuple[str, ...] = ("optimal", "feasible", "infeasible", "unknown", "error")
 _SCRIPT_STATUSES: frozenset[str] = frozenset(_SCRIPT_STATUS_ORDER)
 
+# Bounds the offending status echoed back in the envelope-violation reason. The
+# status comes from the child's stdout, capped only at MAX_OUTPUT_BYTES (1 MiB),
+# and the reason is copied into BOTH the diagnostic's message and its `details`
+# — so an unbounded echo would amplify one oversized string threefold and blow
+# the `Diagnostic` contract's "compact details" rule. 40 chars covers every real
+# status (the longest legal one is "infeasible") plus the case/typo mistakes a
+# client needs to see to repair its emit block.
+_STATUS_ECHO_MAX_CHARS: int = 40
+
 
 def validate_checker_timeout_ms(checker_timeout_ms: int | None) -> None:
     """Reject a non-positive explicit checker timeout.
@@ -312,7 +321,9 @@ def _envelope_violation(parsed: dict) -> tuple[str, str] | None:
     if not isinstance(raw_status, str):
         return "status", f"must be a string, got {type(raw_status).__name__}"
     if raw_status not in _SCRIPT_STATUSES:
-        return "status", (f"must be one of {', '.join(_SCRIPT_STATUS_ORDER)}; got {raw_status!r}")
+        echo = raw_status[:_STATUS_ECHO_MAX_CHARS]
+        elided = "(truncated)" if len(raw_status) > _STATUS_ECHO_MAX_CHARS else ""
+        return "status", (f"must be one of {', '.join(_SCRIPT_STATUS_ORDER)}; got {echo!r}{elided}")
     if "objective" not in parsed:
         return "objective", "required key is missing"
     objective = parsed["objective"]

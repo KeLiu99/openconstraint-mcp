@@ -444,6 +444,37 @@ def test_run_cpsat_python_off_vocabulary_status_drops_the_solution() -> None:
     assert result.solution is None
 
 
+def test_run_cpsat_python_oversized_status_is_truncated_in_the_diagnostic() -> None:
+    # The status arrives from stdout, which is capped only at MAX_OUTPUT_BYTES, and
+    # the reason is copied into BOTH the message and `details` — so echoing it whole
+    # would amplify one ~1 MiB string threefold. It is bounded and marked truncated.
+    huge_status = "X" * 100_000
+    payload = json.dumps({"status": huge_status, "objective": 1, "solution": {"x": 1}})
+    result = _run_with_mocked_proc(stdout_content=payload)
+
+    assert result.diagnostic is not None
+    details = result.diagnostic.details
+    assert details is not None
+    reason = str(details["reason"])
+    assert "(truncated)" in reason
+    assert len(reason) < 200
+    assert len(result.diagnostic.message) < 300
+
+
+def test_run_cpsat_python_short_off_vocabulary_status_is_echoed_whole() -> None:
+    # The bound must not cost the repair signal for a realistic mistake: a client
+    # fixing its emit block needs to see the exact status it printed.
+    payload = json.dumps({"status": "OPTIMAL", "objective": 1, "solution": {"x": 1}})
+    result = _run_with_mocked_proc(stdout_content=payload)
+
+    assert result.diagnostic is not None
+    details = result.diagnostic.details
+    assert details is not None
+    reason = str(details["reason"])
+    assert "'OPTIMAL'" in reason
+    assert "(truncated)" not in reason
+
+
 def test_run_cpsat_python_non_object_solution_is_a_contract_error() -> None:
     payload = {"status": "optimal", "objective": 1, "solution": [{"x": 1}]}
     assert _envelope_error_field(payload) == "solution"
