@@ -15,7 +15,10 @@ from __future__ import annotations
 # full-only tool, because the backend-neutral prompt is served in the core
 # profile. Prompts are fetched on demand and carry no byte budget, so the fuller
 # wording lives here rather than in the metadata-budgeted tool descriptions.
-CPSAT_OUTPUT_CONTRACT_GUIDANCE = """\
+#
+# Everything up to the execution-role bullet is profile-independent; only that
+# bullet is composed per profile (see `_CPSAT_CONTRACT_ROLE_CORE`).
+_CPSAT_OUTPUT_CONTRACT_HEAD = """\
 CP-SAT OUTPUT CONTRACT — the transport the server parses and a checker grades:
 - Emit ONE JSON object as the LAST stdout line, carrying all three REQUIRED
   keys: `status` (str), `objective` (a number or null — the key is present
@@ -34,14 +37,42 @@ CP-SAT OUTPUT CONTRACT — the transport the server parses and a checker grades:
   in-band answer.
 - Variants of the SAME problem must share ONE `solution` schema, so a single
   checker grades every variant.
-- You generate and repair the script; the server only executes it and runs the
-  checker you supply. This guidance is advisory — the deterministic guarantee
-  starts only when an MCP execution tool actually runs the script, so a script
-  you write and never run carries no server guarantee at all.
 """
 
-SOLVE_CONSTRAINT_PROBLEM_PROMPT = (
-    """\
+# The one profile-dependent clause. CP-SAT checker EXECUTION is full-only —
+# `run_cpsat_python_file_checked`, the experiment, save, and job tools all live
+# in `_FULL_ONLY_TOOL_NAMES`; core exposes only `run_cpsat_python` and
+# `run_cpsat_python_file`, neither of which takes a checker. So the core variant
+# must not promise the server will run one, the same core/full split
+# `_RUN_CPSAT_PYTHON_FILE_SHAPE_CORE`/`_FULL` already make in the tool
+# descriptions. Naming no full-only TOOL is not enough on its own: the core
+# leak-guard test matches names, and a promised capability names nothing.
+_CPSAT_CONTRACT_ROLE_FULL = """\
+- You generate and repair the script; the server only executes it and runs the
+  checker you supply.
+"""
+
+_CPSAT_CONTRACT_ROLE_CORE = """\
+- You generate and repair the script; the server only executes it.
+"""
+
+# Shared tail of the execution-role bullet: true in both profiles, so it stays
+# one string rather than being duplicated into each variant.
+_CPSAT_CONTRACT_ADVISORY = """\
+  This guidance is advisory — the deterministic guarantee starts only when an
+  MCP execution tool actually runs the script, so a script you write and never
+  run carries no server guarantee at all.
+"""
+
+CPSAT_OUTPUT_CONTRACT_GUIDANCE = (
+    _CPSAT_OUTPUT_CONTRACT_HEAD + _CPSAT_CONTRACT_ROLE_FULL + _CPSAT_CONTRACT_ADVISORY
+)
+
+CPSAT_OUTPUT_CONTRACT_GUIDANCE_CORE = (
+    _CPSAT_OUTPUT_CONTRACT_HEAD + _CPSAT_CONTRACT_ROLE_CORE + _CPSAT_CONTRACT_ADVISORY
+)
+
+_SOLVE_CONSTRAINT_PROBLEM_HEAD = """\
 You are the MCP client's reasoning model, helping the user solve a constraint
 or discrete-optimization problem with openconstraint-mcp. The server calls no
 LLM and embeds no agent framework: you write the model or the script, and its
@@ -79,8 +110,8 @@ User problem:
    it. The server executes this code locally and does not sandbox it.
 
 """
-    + CPSAT_OUTPUT_CONTRACT_GUIDANCE
-    + """
+
+_SOLVE_CONSTRAINT_PROBLEM_TAIL = """
 4. Verify and execute, using the file sibling instead of pasting contents
    whenever the user already has the artifact on disk:
    - MiniZinc: call `check_minizinc_model(model=<model text>, data=<dzn
@@ -104,6 +135,20 @@ User problem:
    complete model-visible `Statistics:` section verbatim whenever it is
    present — never condense it to selected fields.
 """
+
+# The one backend-neutral prompt, served by BOTH profiles, so it gets the same
+# core/full treatment `server.create_mcp_server` already applies to the
+# profile-varying tool descriptions. Only the spliced output-contract fragment
+# differs; full's wording is unchanged (the advisory sentence re-wrapped onto
+# its own line when it became a shared fragment, which is prose layout only).
+SOLVE_CONSTRAINT_PROBLEM_PROMPT = (
+    _SOLVE_CONSTRAINT_PROBLEM_HEAD + CPSAT_OUTPUT_CONTRACT_GUIDANCE + _SOLVE_CONSTRAINT_PROBLEM_TAIL
+)
+
+SOLVE_CONSTRAINT_PROBLEM_PROMPT_CORE = (
+    _SOLVE_CONSTRAINT_PROBLEM_HEAD
+    + CPSAT_OUTPUT_CONTRACT_GUIDANCE_CORE
+    + _SOLVE_CONSTRAINT_PROBLEM_TAIL
 )
 
 MINIZINC_SOLUTION_WORKFLOW_PROMPT = """\

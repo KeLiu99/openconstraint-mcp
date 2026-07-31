@@ -15,6 +15,7 @@ from openconstraint_mcp.protocol_text.descriptions import (
 )
 from openconstraint_mcp.protocol_text.prompts import (
     CPSAT_OUTPUT_CONTRACT_GUIDANCE,
+    CPSAT_OUTPUT_CONTRACT_GUIDANCE_CORE,
     MINIZINC_SOLUTION_WORKFLOW_PROMPT,
     SOLVE_CPSAT_PYTHON_PROMPT,
 )
@@ -221,7 +222,51 @@ async def test_solve_constraint_problem_prompt_carries_the_cpsat_generation_rule
 async def test_backend_neutral_prompt_carries_the_shared_output_contract_fragment() -> None:
     text = await _get_core_prompt_text("solve_constraint_problem", {"problem": SAMPLE_PROBLEM})
 
+    assert CPSAT_OUTPUT_CONTRACT_GUIDANCE_CORE in text
+
+
+@pytest.mark.asyncio
+async def test_full_backend_neutral_prompt_carries_the_full_output_contract_fragment() -> None:
+    # Full exposes the checker-capable CP-SAT tools, so its copy of the same
+    # prompt keeps the wording core has to drop.
+    text = await _get_prompt_text("solve_constraint_problem", {"problem": SAMPLE_PROBLEM})
+
     assert CPSAT_OUTPUT_CONTRACT_GUIDANCE in text
+
+
+def test_core_output_contract_fragment_promises_no_checker_execution() -> None:
+    # Core exposes only run_cpsat_python / run_cpsat_python_file, neither of
+    # which takes a checker — so the fragment must not say the server runs one.
+    normalized = " ".join(CPSAT_OUTPUT_CONTRACT_GUIDANCE_CORE.split())
+
+    assert "the server only executes it." in normalized
+    assert "runs the checker you supply" not in normalized
+
+
+def test_full_output_contract_fragment_keeps_the_checker_execution_clause() -> None:
+    normalized = " ".join(CPSAT_OUTPUT_CONTRACT_GUIDANCE.split())
+
+    assert "the server only executes it and runs the checker you supply" in normalized
+
+
+def test_output_contract_fragment_variants_differ_only_in_the_role_clause() -> None:
+    # The variants share one head and one advisory tail, so every contract RULE
+    # and the advisory framing stay byte-identical; only the execution-role
+    # clause between them may differ. This is the no-drift property the single
+    # constant used to give for free, now that there are two.
+    def _shared_halves(fragment: str) -> tuple[str, str]:
+        rules, _, rest = fragment.partition("- You generate and repair the script")
+        _, _, advisory = rest.partition("This guidance is advisory")
+        return rules, advisory
+
+    assert _shared_halves(CPSAT_OUTPUT_CONTRACT_GUIDANCE) == _shared_halves(
+        CPSAT_OUTPUT_CONTRACT_GUIDANCE_CORE
+    )
+
+
+def test_core_output_contract_fragment_is_brace_free_for_str_format() -> None:
+    assert "{" not in CPSAT_OUTPUT_CONTRACT_GUIDANCE_CORE
+    assert "}" not in CPSAT_OUTPUT_CONTRACT_GUIDANCE_CORE
 
 
 @pytest.mark.asyncio
