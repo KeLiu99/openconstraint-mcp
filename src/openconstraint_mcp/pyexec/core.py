@@ -51,7 +51,10 @@ from a ``CpSolverSolutionCallback``). On a clean exit the final block wins as
 usual; on a timeout the executor recovers the last intermediate block's
 ``solution``/``objective``/``best_objective_bound`` (status stays ``"timeout"``
 — a partial is unproven), and only when that block satisfies the same required
-envelope shape — a malformed partial is not recovered as an incumbent.
+envelope shape — a malformed partial is not recovered as an incumbent. The drop
+is not silent: the timeout diagnostic's ``details`` gain
+``rejected_partial_field``/``rejected_partial_reason``, so a client still learns
+what to repair without the category changing away from ``timeout_*``.
 
 Canonical emit snippet (inlined in scripts, never imported from here):
 
@@ -352,15 +355,21 @@ def _result_from_child(child: ChildExecutionResult) -> CpsatPythonResult:
     field-specific ``child_process_error``, and everything else goes through
     ``cpsat_result_diagnostic``. The violation never reaches the public result
     model — the diagnostic is the whole client-visible surface for it.
+
+    A violation is routed by whether the run TIMED OUT. On a clean exit it
+    selects ``output_contract_diagnostic`` (the result is a contract error). On
+    a timeout the status is executor-owned, so the violation is passed as
+    ``rejected_partial`` into the timeout diagnostic's ``details`` instead —
+    same category, but the dropped partial's field is no longer invisible.
     """
     result, violation = _classify_child_result(child)
-    if violation is not None:
+    if violation is not None and not result.timed_out:
         field, reason = violation
         result.diagnostic = output_contract_diagnostic(
             field=field, reason=reason, return_code=result.return_code
         )
     else:
-        result.diagnostic = cpsat_result_diagnostic(result)
+        result.diagnostic = cpsat_result_diagnostic(result, rejected_partial=violation)
     return result
 
 
@@ -406,10 +415,11 @@ def _classify_child_result(
     """Classify a finished child into a result plus an optional envelope violation.
 
     The ``(field, reason)`` second element is PRIVATE to this module and
-    ``_result_from_child``: it selects the field-specific diagnostic and is never
-    added to ``CpsatPythonResult``. It is set only on the clean-exit path — a
-    timeout keeps its executor-owned status and timeout diagnostic even when the
-    recovered partial block is malformed.
+    ``_result_from_child``: it feeds the diagnostic and is never added to
+    ``CpsatPythonResult``. It is NOT a "this run is a contract error" flag — on
+    the timeout path it reports a dropped partial while the status stays the
+    executor-owned ``"timeout"``; only ``_result_from_child`` decides which
+    diagnostic a violation selects, keyed on ``timed_out``.
     """
     if child.timed_out:
         # Recover the best-so-far if the script emitted intermediate result blocks
@@ -417,11 +427,12 @@ def _classify_child_result(
         # last block wins; the unbuffered child (-u) is what lets it survive the
         # kill. Status stays the executor-owned "timeout" — a partial is unproven,
         # never "optimal". A partial that fails the envelope gate is dropped
-        # rather than recovered: an ill-typed block is not an incumbent.
+        # rather than recovered: an ill-typed block is not an incumbent. The
+        # violation is still returned so the drop shows up in the timeout
+        # diagnostic's details instead of vanishing.
         partial = parse_last_json(child.stdout)
-        recoverable = (
-            partial if partial is not None and _envelope_violation(partial) is None else None
-        )
+        partial_violation = _envelope_violation(partial) if partial is not None else None
+        recoverable = partial if partial is not None and partial_violation is None else None
         solution, objective, best_objective_bound = (
             _extract_solution_objective(recoverable)
             if recoverable is not None
@@ -443,7 +454,7 @@ def _classify_child_result(
                 truncated=child.truncated,
                 duration_ms=child.duration_ms,
             ),
-            None,
+            partial_violation,
         )
 
     if child.truncated:

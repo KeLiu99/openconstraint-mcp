@@ -25,7 +25,9 @@ from ..schemas.diagnostics import (
 )
 
 
-def cpsat_result_diagnostic(result: CpsatPythonResult) -> Diagnostic | None:
+def cpsat_result_diagnostic(
+    result: CpsatPythonResult, *, rejected_partial: tuple[str, str] | None = None
+) -> Diagnostic | None:
     """Diagnose a CP-SAT child run.
 
     Precedence (most-specific-first): a timeout (with/without incumbent) wins
@@ -34,12 +36,23 @@ def cpsat_result_diagnostic(result: CpsatPythonResult) -> Diagnostic | None:
     with a missing/empty solution is ``child_process_error`` (valid JSON that
     violates the solution contract save/job/experiment flows expect).
     ``infeasible`` maps to ``infeasible`` and ``unknown`` to ``unknown``.
+
+    ``rejected_partial`` is the ``(field, reason)`` of a timeout partial that
+    the executor found but dropped for violating the stdout envelope. It only
+    ever applies to the TIMEOUT branch — on a clean exit the same violation
+    routes to ``output_contract_diagnostic`` instead — and it enriches
+    ``details`` without changing the category: a timeout stays executor-owned
+    ``timeout_*``, never a contract error. Without it the drop would be silent,
+    leaving an experiment attempt row (which carries no ``stdout``, and no
+    ``stderr_tail`` for a non-``error`` status) with nothing to repair from.
     """
     if result.timed_out or result.status == "timeout":
-        return timeout_diagnostic(
-            has_incumbent=bool(result.solution),
-            details={"truncated": result.truncated},
-        )
+        details: dict[str, JsonValue] = {"truncated": result.truncated}
+        if rejected_partial is not None:
+            details["rejected_partial_field"], details["rejected_partial_reason"] = (
+                rejected_partial
+            )
+        return timeout_diagnostic(has_incumbent=bool(result.solution), details=details)
     if result.truncated:
         return Diagnostic(
             category="output_truncated",

@@ -1142,8 +1142,11 @@ core profile, so start the server with `openconstraint-mcp stdio --toolset full`
   if none was printed in time. The same required-key check applies to that
   block: a malformed partial is not recovered as an incumbent, and the run keeps
   its `timeout` status and timeout diagnostic rather than becoming a contract
-  error. On a clean run the final block (printed after `Solve` returns) is the
-  authoritative result.
+  error. The rejection is still reported — the timeout diagnostic's `details`
+  carry `rejected_partial_field` and `rejected_partial_reason` naming the
+  offending key, so a client can repair its progress block; both keys are absent
+  when no JSON block was printed at all. On a clean run the final block (printed
+  after `Solve` returns) is the authoritative result.
 
 - **`run_cpsat_python_file(script_path: str, timeout_ms: int = 30000, args:
   list[str] | None = None, seed: int | None = None, config: dict | None =

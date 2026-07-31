@@ -84,6 +84,20 @@ def test_timeout_without_incumbent() -> None:
     assert diag.category == "timeout_no_incumbent"
 
 
+def test_rejected_partial_enriches_details_without_changing_the_category() -> None:
+    diag = cpsat_result_diagnostic(
+        _result("timeout", timed_out=True),
+        rejected_partial=("objective", "required key is missing"),
+    )
+    assert diag is not None
+    assert diag.category == "timeout_no_incumbent"
+    assert diag.details == {
+        "truncated": False,
+        "rejected_partial_field": "objective",
+        "rejected_partial_reason": "required key is missing",
+    }
+
+
 def test_truncation_maps_to_output_truncated() -> None:
     diag = cpsat_result_diagnostic(_result("error", truncated=True, return_code=0))
     assert diag is not None
@@ -408,6 +422,23 @@ def test_cpsat_succeeded_job_derives_from_result() -> None:
     result = _result("optimal", solution={"x": 1})
     diag = CpsatJobRegistry._job_diagnostic(_cpsat_record("succeeded", result=result))
     assert diag is None
+
+
+def test_cpsat_job_envelope_violation_keeps_the_offending_field() -> None:
+    # The background-job route reaches the client as a CpsatPythonJobStatus with
+    # no stdout of its own, so `_job_diagnostic` must carry the field through
+    # rather than recomputing the generic child-process message. The violated
+    # run is never checker-eligible, hence checker=None + a skipped reason.
+    diag = CpsatJobRegistry._job_diagnostic(
+        _cpsat_record(
+            "succeeded",
+            result=_envelope_violation_result(),
+            checker_skipped_reason="status is 'error'",
+        )
+    )
+    assert diag is not None
+    assert diag.details is not None
+    assert diag.details["field"] == "objective"
 
 
 def test_cpsat_job_checker_rejection_overrides_result_diagnostic() -> None:

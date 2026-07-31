@@ -545,6 +545,28 @@ def test_run_cpsat_python_malformed_timeout_partial_keeps_the_timeout_diagnostic
     assert result.diagnostic.category == "timeout_no_incumbent"
 
 
+def test_run_cpsat_python_malformed_timeout_partial_reports_the_rejected_field() -> None:
+    # Dropping the partial must not drop the repair signal: an experiment attempt
+    # row carries no stdout, so the diagnostic is the only place a client can
+    # learn a partial existed and why it was rejected.
+    partial = json.dumps({"status": "feasible", "solution": {"x": 1}})
+    result = _run_with_mocked_proc(timeout=True, stdout_content=partial, timeout_ms=50)
+
+    assert result.diagnostic is not None
+    assert result.diagnostic.details is not None
+    assert result.diagnostic.details["rejected_partial_field"] == "objective"
+
+
+def test_run_cpsat_python_timeout_without_partial_reports_no_rejected_field() -> None:
+    # No JSON block at all is not a rejected partial; the key must be absent
+    # rather than null, so its presence always means "a block was dropped".
+    result = _run_with_mocked_proc(timeout=True, stdout_content="searching...", timeout_ms=50)
+
+    assert result.diagnostic is not None
+    assert result.diagnostic.details is not None
+    assert "rejected_partial_field" not in result.diagnostic.details
+
+
 # (h2) trailing output after the JSON block must not defeat parsing, and a nested
 # object inside the payload must not be mistaken for the result.
 def test_run_cpsat_python_parses_json_with_trailing_output() -> None:
@@ -1050,6 +1072,25 @@ def test_checked_run_accepted_leaves_the_top_level_diagnostic_clean(
     result = run_cpsat_python_file_checked(script, checker)
 
     assert result.diagnostic is None
+
+
+def test_checked_run_envelope_violation_keeps_the_offending_field(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # `checked_result_diagnostic` recomposes the top-level diagnostic from the
+    # run and the checker, so this route could silently downgrade the
+    # field-specific contract error to the generic child-process message. The
+    # violated run is never checker-eligible, so the run's own diagnostic is
+    # what must survive the recomposition.
+    script, checker = _checked_pair(tmp_path)
+    violated = _run_with_mocked_proc(stdout_content=json.dumps({"status": "optimal"}))
+    _patch_checked(monkeypatch, violated, _checker_report("accepted"))
+
+    result = run_cpsat_python_file_checked(script, checker)
+
+    assert result.diagnostic is not None
+    assert result.diagnostic.details is not None
+    assert result.diagnostic.details["field"] == "objective"
 
 
 def test_checked_run_rejected_carries_the_rejected_verdict(
