@@ -535,6 +535,21 @@ async def test_save_verified_cpsat_python_output_schema_does_not_read_saved_as_v
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("toolset", ["core", "full"])
+async def test_run_cpsat_python_advertises_the_required_envelope_vocabulary(toolset: str) -> None:
+    # The required-key/type contract is what a client's script is graded against,
+    # so it must survive the core profile's trimmed description too.
+    tools = await _tools_by_name(toolset)
+    description = tools["run_cpsat_python"].description or ""
+
+    assert "all three REQUIRED keys" in description
+    assert "`status` (str)" in description
+    assert "`objective` (number|null)" in description
+    assert "`solution` (object; `{}` with no incumbent)" in description
+    assert "a missing or invalid required key is rejected" in description
+
+
+@pytest.mark.asyncio
 async def test_core_metadata_is_within_budget() -> None:
     tools = await create_mcp_server("core").list_tools()
     total = len(_serialize_tools(tools).encode("utf-8"))

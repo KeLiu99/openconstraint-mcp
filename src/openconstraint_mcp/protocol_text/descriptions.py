@@ -49,12 +49,19 @@ _SOLVE_CONTROLS_LIST = (
     "solver-gated, satisfaction-only `num_solutions`"
 )
 
+# Fans out to 2 core tools (and 4 full ones), so every byte here costs 2 of the
+# core metadata budget. Keep it to the TERSE TYPE CONTRACT: what `solution` must
+# semantically carry lives in the prompts and the server `instructions`.
 _CPSAT_JSON_CONTRACT = (
     "The script MUST emit a single JSON object to stdout as its last line "
-    "with `status` (str), `objective` (float|null), and `solution` (dict), "
-    "and MAY include an optional `best_objective_bound` (float|null) for "
-    'diagnostics, e.g. `{"status": "<status>", "objective": <float|null>, '
-    '"solution": {<str: val>}, "best_objective_bound": <float|null>}`.'
+    "with all three REQUIRED keys `status` (str), `objective` (number|null), "
+    "and `solution` (object; `{}` with no incumbent), and MAY include an "
+    "optional `best_objective_bound` (number|null) for diagnostics, e.g. "
+    '`{"status": "<status>", "objective": <number|null>, "solution": '
+    '{<str: val>}, "best_objective_bound": <number|null>}`. Extra keys are '
+    "ignored; a missing or invalid required key is rejected as "
+    '`status="error"` with no solution and a `child_process_error` diagnostic '
+    "naming the field."
 )
 
 _SAVE_TARGET_DIR_RULE = (
@@ -149,6 +156,15 @@ MCP_SERVER_INSTRUCTIONS = (
     "the solve tools (`checker` inline, `checker_path` for file solves).\n"
     "- CP-SAT: write a conforming script and run it with run_cpsat_python "
     "(bounded child process: timeout, 1 MB output cap, tree-kill).\n"
+    "\n"
+    "CP-SAT OUTPUT: `json.dumps` only builds a string that `print` sends to "
+    "stdout — it writes no file, and the result is not saved anywhere. "
+    "`solution` must carry the COMPLETE, problem-specific answer a checker can "
+    "grade — every decision value — never prose, statistics alone, or only a "
+    "path to a separately written result file. You write and repair the "
+    "script; the server only executes it and runs the checker you supply. This "
+    "text is advisory: nothing is verified until an MCP execution tool "
+    "actually runs the script.\n"
     "\n"
     "SOLUTION COUNTS: use `num_solutions` only with `org.gecode.gecode` or "
     "`org.chuffed.chuffed`, not the default `cp-sat`; for multiple optimal "

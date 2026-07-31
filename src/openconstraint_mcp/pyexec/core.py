@@ -13,6 +13,15 @@ stdout block, one JSON object:
     {"status": "<CpsatStatus value>", "objective": <number|null>, "solution": {...},
      "best_objective_bound": <number|null>}
 
+``status``, ``objective``, and ``solution`` are REQUIRED and type-checked:
+``status`` must be one of the script vocabulary below, ``objective`` a finite
+int/float or ``null`` (a pure feasibility model still emits the key), and
+``solution`` a JSON object (``{}`` is well-typed — emptiness is an acceptance
+question, not an envelope one). Extra keys (``stats``, a supplementary
+``result_file``, …) are allowed and ignored. A missing or ill-typed required
+key yields ``status="error"`` with no incumbent and a ``child_process_error``
+diagnostic naming the offending ``field``.
+
 ``best_objective_bound`` is optional (a script predating it is parsed as
 ``None``) and diagnostic only — it is OR-Tools' ``solver.best_objective_bound``,
 not a proven objective, and is never consulted for acceptance or winner
@@ -31,14 +40,18 @@ the script itself, which is why the canonical snippet and the
 ``cpsat_python_solution_workflow`` prompt both apply it.
 
 The executor parses the last JSON object it finds in stdout and maps the
-``status`` field to ``CpsatStatus``; any unrecognized value becomes ``"error"``.
+``status`` field to ``CpsatStatus``; any unrecognized value becomes ``"error"``
+and is reported as an envelope violation of ``status``. Like every other
+violation this yields NO incumbent: the block's ``solution``/``objective`` are
+dropped rather than attached to a status the executor could not classify.
 
 The child runs unbuffered (``python -u``), so a script MAY print intermediate
 result blocks of the same shape during search (e.g. one per improved solution
 from a ``CpSolverSolutionCallback``). On a clean exit the final block wins as
 usual; on a timeout the executor recovers the last intermediate block's
 ``solution``/``objective``/``best_objective_bound`` (status stays ``"timeout"``
-— a partial is unproven).
+— a partial is unproven), and only when that block satisfies the same required
+envelope shape — a malformed partial is not recovered as an incumbent.
 
 Canonical emit snippet (inlined in scripts, never imported from here):
 
@@ -80,7 +93,11 @@ from ..shared.childproc import ChildProcessTracker
 from ..shared.childrun import ChildExecutionResult, ChildSpawnError, execute_child
 from ..shared.save_target import text_sha256
 from .checker import checker_infrastructure_report, run_checker_file
-from .diagnostics import checked_result_diagnostic, cpsat_result_diagnostic
+from .diagnostics import (
+    checked_result_diagnostic,
+    cpsat_result_diagnostic,
+    output_contract_diagnostic,
+)
 from .eligibility import diagnostic_incumbent_eligibility
 from .env_vars import CPSAT_CONFIG_ENV_VAR, CPSAT_SEED_ENV_VAR
 from .script_path import validate_script_args, validate_script_path
@@ -274,18 +291,53 @@ def parse_last_json(text: str) -> dict | None:
     return found
 
 
+def _envelope_violation(parsed: dict) -> tuple[str, str] | None:
+    """Return the first ``(field, reason)`` stdout-envelope violation, or ``None``.
+
+    The required-key/type gate for a parsed result block: ``status`` in the
+    script vocabulary, ``objective`` a finite number or ``null``, ``solution`` a
+    JSON object. Extra keys are ignored, and an empty ``solution`` (``{}``) is
+    WELL-TYPED here — "solution-bearing status but nothing in it" is an
+    acceptance rule owned by ``cpsat_result_diagnostic`` and the save/experiment
+    gates, not an envelope type rule. One site for the rules so the clean-exit
+    and timeout (partial-recovery) paths can never drift.
+    """
+    if "status" not in parsed:
+        return "status", "required key is missing"
+    raw_status = parsed["status"]
+    if not isinstance(raw_status, str):
+        return "status", f"must be a string, got {type(raw_status).__name__}"
+    if raw_status not in _SCRIPT_STATUSES:
+        return "status", (
+            f"must be one of optimal, feasible, infeasible, unknown, error; got {raw_status!r}"
+        )
+    if "objective" not in parsed:
+        return "objective", "required key is missing"
+    objective = parsed["objective"]
+    if objective is not None and normalize_objective(objective) is None:
+        return "objective", "must be a finite number or null"
+    if "solution" not in parsed:
+        return "solution", "required key is missing"
+    if not isinstance(parsed["solution"], dict):
+        return "solution", f"must be a JSON object, got {type(parsed['solution']).__name__}"
+    return None
+
+
 def _extract_solution_objective(
     parsed: dict,
-) -> tuple[dict | None, float | int | None, float | int | None]:
+) -> tuple[dict, float | int | None, float | int | None]:
     """Pull the solution dict, objective, and best_objective_bound out of a result block.
 
-    One site for the shape rules so the clean-exit and timeout (partial-recovery)
-    paths can never drift: ``solution`` must be a dict, ``objective`` and
-    ``best_objective_bound`` each a real number (same normalization rule for both —
-    a diagnostic bound is just as invalid as a bad objective if it isn't finite/numeric).
+    Called only for a block that already cleared ``_envelope_violation`` — both
+    call sites (clean exit, timeout partial recovery) gate on it — so
+    ``solution`` is present and a dict, and ``objective`` is numeric-or-null;
+    both are read straight through with no re-check. The optional
+    ``best_objective_bound`` is diagnostic only and is NOT part of the envelope
+    gate, so it keeps its permissive normalization here: a non-numeric or
+    non-finite bound becomes ``None`` rather than failing the whole result.
     """
-    solution = parsed.get("solution") if isinstance(parsed.get("solution"), dict) else None
-    objective = normalize_objective(parsed.get("objective"))
+    solution: dict = parsed["solution"]
+    objective = normalize_objective(parsed["objective"])
     best_objective_bound = normalize_objective(parsed.get("best_objective_bound"))
     return solution, objective, best_objective_bound
 
@@ -296,10 +348,20 @@ def _result_from_child(child: ChildExecutionResult) -> CpsatPythonResult:
     This is the CP-SAT protocol layer: the generic ``execute_child`` knows nothing
     about ``status``/``objective``/``solution``; that parsing lives here so the
     clean-exit, timeout, and truncation shapes are decided in one place. The
-    structured diagnostic is derived from the finished result as the single tail.
+    structured diagnostic is derived from the finished result as the single tail:
+    a private envelope violation returned alongside the result selects the
+    field-specific ``child_process_error``, and everything else goes through
+    ``cpsat_result_diagnostic``. The violation never reaches the public result
+    model — the diagnostic is the whole client-visible surface for it.
     """
-    result = _classify_child_result(child)
-    result.diagnostic = cpsat_result_diagnostic(result)
+    result, violation = _classify_child_result(child)
+    if violation is not None:
+        field, reason = violation
+        result.diagnostic = output_contract_diagnostic(
+            field=field, reason=reason, return_code=result.return_code
+        )
+    else:
+        result.diagnostic = cpsat_result_diagnostic(result)
     return result
 
 
@@ -339,73 +401,118 @@ def _spawn_failure_result(exc: OSError) -> CpsatPythonResult:
     return result
 
 
-def _classify_child_result(child: ChildExecutionResult) -> CpsatPythonResult:
+def _classify_child_result(
+    child: ChildExecutionResult,
+) -> tuple[CpsatPythonResult, tuple[str, str] | None]:
+    """Classify a finished child into a result plus an optional envelope violation.
+
+    The ``(field, reason)`` second element is PRIVATE to this module and
+    ``_result_from_child``: it selects the field-specific diagnostic and is never
+    added to ``CpsatPythonResult``. It is set only on the clean-exit path — a
+    timeout keeps its executor-owned status and timeout diagnostic even when the
+    recovered partial block is malformed.
+    """
     if child.timed_out:
         # Recover the best-so-far if the script emitted intermediate result blocks
         # (e.g. one per improved solution from a CpSolverSolutionCallback). The
         # last block wins; the unbuffered child (-u) is what lets it survive the
         # kill. Status stays the executor-owned "timeout" — a partial is unproven,
-        # never "optimal".
+        # never "optimal". A partial that fails the envelope gate is dropped
+        # rather than recovered: an ill-typed block is not an incumbent.
         partial = parse_last_json(child.stdout)
-        solution, objective, best_objective_bound = (
-            _extract_solution_objective(partial) if partial is not None else (None, None, None)
+        recoverable = (
+            partial if partial is not None and _envelope_violation(partial) is None else None
         )
-        return CpsatPythonResult(
-            status="timeout",
-            solution=solution,
-            objective=objective,
-            best_objective_bound=best_objective_bound,
-            stdout=child.stdout,
-            stderr=child.stderr,
-            # The child was killed; its exit code (SIGTERM -> -15 on POSIX) is not a
-            # real return code. Report null by contract — matching the MiniZinc-path
-            # tools — so clients don't misread a timeout as a child error.
-            return_code=None,
-            timed_out=True,
-            truncated=child.truncated,
-            duration_ms=child.duration_ms,
+        solution, objective, best_objective_bound = (
+            _extract_solution_objective(recoverable)
+            if recoverable is not None
+            else (None, None, None)
+        )
+        return (
+            CpsatPythonResult(
+                status="timeout",
+                solution=solution,
+                objective=objective,
+                best_objective_bound=best_objective_bound,
+                stdout=child.stdout,
+                stderr=child.stderr,
+                # The child was killed; its exit code (SIGTERM -> -15 on POSIX) is not a
+                # real return code. Report null by contract — matching the MiniZinc-path
+                # tools — so clients don't misread a timeout as a child error.
+                return_code=None,
+                timed_out=True,
+                truncated=child.truncated,
+                duration_ms=child.duration_ms,
+            ),
+            None,
         )
 
     if child.truncated:
-        return CpsatPythonResult(
-            status="error",
-            solution=None,
-            objective=None,
-            stdout=child.stdout,
-            stderr=child.stderr,
-            return_code=child.return_code,
-            timed_out=False,
-            truncated=True,
-            duration_ms=child.duration_ms,
+        return (
+            CpsatPythonResult(
+                status="error",
+                solution=None,
+                objective=None,
+                stdout=child.stdout,
+                stderr=child.stderr,
+                return_code=child.return_code,
+                timed_out=False,
+                truncated=True,
+                duration_ms=child.duration_ms,
+            ),
+            None,
         )
 
     parsed = parse_last_json(child.stdout)
     if parsed is None or child.return_code != 0:
-        return CpsatPythonResult(
-            status="error",
-            solution=None,
-            objective=None,
+        return (
+            CpsatPythonResult(
+                status="error",
+                solution=None,
+                objective=None,
+                stdout=child.stdout,
+                stderr=child.stderr,
+                return_code=child.return_code,
+                timed_out=False,
+                truncated=False,
+                duration_ms=child.duration_ms,
+            ),
+            None,
+        )
+
+    violation = _envelope_violation(parsed)
+    if violation is not None:
+        return (
+            CpsatPythonResult(
+                status="error",
+                solution=None,
+                objective=None,
+                stdout=child.stdout,
+                stderr=child.stderr,
+                return_code=child.return_code,
+                timed_out=False,
+                truncated=False,
+                duration_ms=child.duration_ms,
+            ),
+            violation,
+        )
+
+    status = normalize_status(parsed.get("status"))
+    solution, objective, best_objective_bound = _extract_solution_objective(parsed)
+    return (
+        CpsatPythonResult(
+            status=status,
+            solution=solution,
+            objective=objective,
+            best_objective_bound=best_objective_bound,
             stdout=child.stdout,
             stderr=child.stderr,
             return_code=child.return_code,
             timed_out=False,
             truncated=False,
             duration_ms=child.duration_ms,
-        )
-
-    status = normalize_status(parsed.get("status"))
-    solution, objective, best_objective_bound = _extract_solution_objective(parsed)
-    return CpsatPythonResult(
-        status=status,
-        solution=solution,
-        objective=objective,
-        best_objective_bound=best_objective_bound,
-        stdout=child.stdout,
-        stderr=child.stderr,
-        return_code=child.return_code,
-        timed_out=False,
-        truncated=False,
-        duration_ms=child.duration_ms,
+        ),
+        None,
     )
 
 

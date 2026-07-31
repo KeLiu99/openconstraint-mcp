@@ -72,6 +72,47 @@ def cpsat_result_diagnostic(result: CpsatPythonResult) -> Diagnostic | None:
     )
 
 
+def output_contract_diagnostic(*, field: str, reason: str, return_code: int | None) -> Diagnostic:
+    """Diagnose a child whose final JSON object violates the stdout envelope.
+
+    Built from PRIMITIVES only — the offending ``field``, why it was rejected,
+    and the child's exit code. It never inspects or mutates a result model, so
+    the executor stays free to decide *which* failure a run had before choosing
+    between this and ``cpsat_result_diagnostic``. ``details`` carries exactly
+    ``field``/``reason``/``return_code``: the field name is the whole point (a
+    client repairs its emit block from it), and there is no public result field
+    transporting it.
+    """
+    return Diagnostic(
+        category="child_process_error",
+        message=(
+            f"the CP-SAT child's final JSON object violates the stdout contract: `{field}` {reason}"
+        ),
+        details={"field": field, "reason": reason, "return_code": return_code},
+    )
+
+
+def _run_diagnostic(result: CpsatPythonResult) -> Diagnostic | None:
+    """Return the result's OWN diagnostic, recomputing only when it carries none.
+
+    The executor already diagnosed the run in ``_result_from_child``, and for a
+    stdout-envelope violation that diagnostic is strictly richer than a
+    recompute: it names the offending ``field``/``reason``, which
+    ``cpsat_result_diagnostic`` structurally cannot see (the violation is a
+    private executor return value, deliberately never a public result field).
+    Recomputing would silently downgrade it to the generic child-error message
+    on the experiment/save routes — exactly the routes that tell a client to
+    repair the script.
+
+    Preferring the carried value changes nothing else: every other producer sets
+    exactly ``cpsat_result_diagnostic(result)`` (``_result_from_child`` without a
+    violation, ``_spawn_failure_result``) or leaves the field unset
+    (``experiment._script_invalidated_result``), which falls through to the
+    recompute.
+    """
+    return result.diagnostic or cpsat_result_diagnostic(result)
+
+
 def checker_report_diagnostic(report: CpsatCheckerReport) -> Diagnostic | None:
     """Diagnose a CP-SAT checker report (``accepted`` is clean).
 
@@ -122,14 +163,16 @@ def save_failure_diagnostic(
 
     Ordered most-specific-first: a failed checker gate is ``checker_failed``;
     otherwise the run result's own diagnostic (timeout, truncation, child error,
-    infeasible) is surfaced; otherwise — a clean ``optimal``/``feasible`` result
-    that a reported/expectation gate rejected (e.g. objective below threshold) —
-    a generic ``not_verified``.
+    envelope violation, infeasible) is surfaced — carried through by
+    ``_run_diagnostic`` so a field-specific contract error keeps its ``field``;
+    otherwise — a clean ``optimal``/``feasible`` result that a
+    reported/expectation gate rejected (e.g. objective below threshold) — a
+    generic ``not_verified``.
     """
     checker_diag = _optional_checker_diagnostic(checker)
     if checker_diag is not None:
         return checker_diag
-    base = cpsat_result_diagnostic(run_result)
+    base = _run_diagnostic(run_result)
     if base is not None:
         return base
     return Diagnostic(
@@ -149,16 +192,22 @@ def experiment_attempt_diagnostic(
 
     Clean accepted attempts stay diagnostic-free; accepted timeout incumbents
     keep their timeout diagnostic. A rejected attempt whose result matches no
-    more specific category (timeout, truncation, child error, infeasible) — e.g.
-    an ``optimal`` result rejected by the optimization-mode gate for a
-    missing/non-numeric objective — maps to ``not_verified`` with the attempt's
-    own ``message``.
+    more specific category (timeout, truncation, child error, envelope
+    violation, infeasible) — e.g. an ``optimal`` result rejected by the
+    optimization-mode gate for a missing/non-numeric objective — maps to
+    ``not_verified`` with the attempt's own ``message``.
+
+    The run-derived categories come from ``_run_diagnostic``, so an attempt that
+    violated the stdout envelope keeps the ``field`` naming the broken key. The
+    row carries no ``stdout``, and its ``stderr_tail`` is empty for a script
+    that ran fine and merely printed the wrong shape, so this is the only place
+    a client can learn what to repair.
     """
     if accepted:
-        return cpsat_result_diagnostic(result)
+        return _run_diagnostic(result)
     if checker_status is not None and checker_status_is_failure(checker_status):
         return checker_diagnostic(checker_status)
-    base = cpsat_result_diagnostic(result)
+    base = _run_diagnostic(result)
     if base is not None:
         return base
     return Diagnostic(
