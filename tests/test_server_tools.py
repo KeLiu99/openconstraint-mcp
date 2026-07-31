@@ -2657,6 +2657,31 @@ async def test_run_cpsat_python_routes_to_cpsat_result(
 
 
 @pytest.mark.asyncio
+async def test_run_cpsat_python_surfaces_the_violated_envelope_field(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # End-to-end through the real executor with only the child mocked: the
+    # field-specific contract error must survive tool serialization, since the
+    # diagnostic is its only client-visible transport.
+    monkeypatch.setattr(
+        "openconstraint_mcp.pyexec.core.execute_child",
+        lambda *a, **kw: ChildExecutionResult(
+            stdout='{"status": "optimal", "solution": {"x": 1}}',
+            stderr="",
+            return_code=0,
+            timed_out=False,
+            truncated=False,
+            duration_ms=5,
+        ),
+    )
+
+    mcp = create_mcp_server()
+    result = _structured(await mcp.call_tool("run_cpsat_python", {"source": "print('hi')"}))
+    assert result["status"] == "error"
+    assert result["diagnostic"]["details"]["field"] == "objective"
+
+
+@pytest.mark.asyncio
 async def test_run_cpsat_python_clears_both_cpsat_protocol_env_vars(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

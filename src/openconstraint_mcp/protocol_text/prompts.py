@@ -7,7 +7,72 @@ and it imports nothing internal.
 
 from __future__ import annotations
 
-SOLVE_CONSTRAINT_PROBLEM_PROMPT = """\
+# The single CP-SAT output-contract block, spliced verbatim into BOTH the
+# backend-neutral prompt and the detailed CP-SAT workflow so the two can never
+# drift. It deliberately contains NO braces: every prompt body is `str.format`ted
+# with the user's problem text, and a brace-free fragment needs no `{{`/`}}`
+# escaping and reaches the client byte-for-byte as written here. It also names no
+# full-only tool, because the backend-neutral prompt is served in the core
+# profile. Prompts are fetched on demand and carry no byte budget, so the fuller
+# wording lives here rather than in the metadata-budgeted tool descriptions.
+#
+# Everything up to the execution-role bullet is profile-independent; only that
+# bullet is composed per profile (see `_CPSAT_CONTRACT_ROLE_CORE`).
+_CPSAT_OUTPUT_CONTRACT_HEAD = """\
+CP-SAT OUTPUT CONTRACT — the transport the server parses and a checker grades:
+- Emit ONE JSON object as the LAST stdout line, carrying all three REQUIRED
+  keys: `status` (str), `objective` (a number or null — the key is present
+  even for a pure feasibility model), and `solution` (a JSON object; an empty
+  object when there is no incumbent). Extra keys are ignored. A missing or
+  invalid required key makes the whole run `status="error"` with no solution
+  and a `child_process_error` diagnostic naming the offending field.
+- `json.dumps` only serializes a Python object into a STRING that `print`
+  sends to stdout. It creates no file and saves nothing. Writing the script's
+  `.py` source file is a separate act, and persisting a verified artifact is
+  an explicit save step the user has to ask for.
+- `solution` must carry the COMPLETE, problem-specific answer: every decision
+  value a checker needs, keyed so the checker can grade it. Never prose, never
+  statistics alone, and never only a path to a result file the script wrote. A
+  supplementary `result_file` key is allowed, but it can never replace the
+  in-band answer.
+- Variants of the SAME problem must share ONE `solution` schema, so a single
+  checker grades every variant.
+"""
+
+# The one profile-dependent clause. CP-SAT checker EXECUTION is full-only —
+# `run_cpsat_python_file_checked`, the experiment, save, and job tools all live
+# in `_FULL_ONLY_TOOL_NAMES`; core exposes only `run_cpsat_python` and
+# `run_cpsat_python_file`, neither of which takes a checker. So the core variant
+# must not promise the server will run one, the same core/full split
+# `_RUN_CPSAT_PYTHON_FILE_SHAPE_CORE`/`_FULL` already make in the tool
+# descriptions. Naming no full-only TOOL is not enough on its own: the core
+# leak-guard test matches names, and a promised capability names nothing.
+_CPSAT_CONTRACT_ROLE_FULL = """\
+- You generate and repair the script; the server only executes it and runs the
+  checker you supply.
+"""
+
+_CPSAT_CONTRACT_ROLE_CORE = """\
+- You generate and repair the script; the server only executes it.
+"""
+
+# Shared tail of the execution-role bullet: true in both profiles, so it stays
+# one string rather than being duplicated into each variant.
+_CPSAT_CONTRACT_ADVISORY = """\
+  This guidance is advisory — the deterministic guarantee starts only when an
+  MCP execution tool actually runs the script, so a script you write and never
+  run carries no server guarantee at all.
+"""
+
+CPSAT_OUTPUT_CONTRACT_GUIDANCE = (
+    _CPSAT_OUTPUT_CONTRACT_HEAD + _CPSAT_CONTRACT_ROLE_FULL + _CPSAT_CONTRACT_ADVISORY
+)
+
+CPSAT_OUTPUT_CONTRACT_GUIDANCE_CORE = (
+    _CPSAT_OUTPUT_CONTRACT_HEAD + _CPSAT_CONTRACT_ROLE_CORE + _CPSAT_CONTRACT_ADVISORY
+)
+
+_SOLVE_CONSTRAINT_PROBLEM_HEAD = """\
 You are the MCP client's reasoning model, helping the user solve a constraint
 or discrete-optimization problem with openconstraint-mcp. The server calls no
 LLM and embeds no agent framework: you write the model or the script, and its
@@ -44,6 +109,9 @@ User problem:
    or deletes, no subprocess spawning — unless the user explicitly requested
    it. The server executes this code locally and does not sandbox it.
 
+"""
+
+_SOLVE_CONSTRAINT_PROBLEM_TAIL = """
 4. Verify and execute, using the file sibling instead of pasting contents
    whenever the user already has the artifact on disk:
    - MiniZinc: call `check_minizinc_model(model=<model text>, data=<dzn
@@ -67,6 +135,21 @@ User problem:
    complete model-visible `Statistics:` section verbatim whenever it is
    present — never condense it to selected fields.
 """
+
+# The one backend-neutral prompt, served by BOTH profiles, so it gets the same
+# core/full treatment `server.create_mcp_server` already applies to the
+# profile-varying tool descriptions. Only the spliced output-contract fragment
+# differs; full's wording is unchanged (the advisory sentence re-wrapped onto
+# its own line when it became a shared fragment, which is prose layout only).
+SOLVE_CONSTRAINT_PROBLEM_PROMPT = (
+    _SOLVE_CONSTRAINT_PROBLEM_HEAD + CPSAT_OUTPUT_CONTRACT_GUIDANCE + _SOLVE_CONSTRAINT_PROBLEM_TAIL
+)
+
+SOLVE_CONSTRAINT_PROBLEM_PROMPT_CORE = (
+    _SOLVE_CONSTRAINT_PROBLEM_HEAD
+    + CPSAT_OUTPUT_CONTRACT_GUIDANCE_CORE
+    + _SOLVE_CONSTRAINT_PROBLEM_TAIL
+)
 
 MINIZINC_SOLUTION_WORKFLOW_PROMPT = """\
 You are the MCP client's reasoning model, helping the user solve a
@@ -267,7 +350,8 @@ Boundaries:
   backends, no uploads, no hidden network calls.
 """
 
-SOLVE_CPSAT_PYTHON_PROMPT = """\
+SOLVE_CPSAT_PYTHON_PROMPT = (
+    """\
 You are the MCP client's reasoning model, helping the user solve a
 constraint-programming or optimization problem using OR-Tools CP-SAT Python
 through openconstraint-mcp.
@@ -401,6 +485,9 @@ User problem:
      explicitly requested it. The server executes this code locally in a
      child process and does not sandbox it.
 
+"""
+    + CPSAT_OUTPUT_CONTRACT_GUIDANCE
+    + """
 4. Call `run_cpsat_python(source=<complete script>,
    timeout_ms=<milliseconds>)`. The server runs it locally in a child
    process (not remote, not sandboxed) and returns a `CpsatPythonResult`
@@ -476,6 +563,39 @@ User problem:
    - If you set `max_parallel_attempts > 1`, keep each attempt's own
      `solver.parameters.num_workers` conservative: oversubscribing the
      machine's CPUs makes runs slower and less stable, not faster.
+   - Attach ONE independent `checker` (with the `problem` value it grades
+     against) whenever you are comparing candidates. Sharing one checker —
+     and ranking attempts at all — is valid ONLY when every attempt solves
+     the SAME problem, the SAME instance, and the SAME objective under the
+     SAME objective sense, emitting one shared `solution` schema. Split
+     mismatched scripts into separate calls: ranking different objectives or
+     different instances against each other is a meaningless comparison.
+   - That checker must be a standard-library PREDICATE over the reported
+     answer (step 7c's rules apply unchanged): validate that the instance is
+     present and well formed, that the solution COVERS every element the
+     instance requires, that every hard constraint holds, and that the
+     reported `objective` is consistent with the solution it came with.
+     Never `import ortools` and never re-solve. An `accepted` verdict proves
+     only the properties that checker evaluated — it is NOT an independent
+     proof that an `optimal` claim is globally optimal.
+   - Read the two failing verdicts differently before repairing anything, and
+     never "fix" one by blindly changing the emitted envelope: `error` means
+     the payload could not be graded at all (an unusable instance, or an
+     output block that is not a well-formed claim), while `rejected` means a
+     well-formed solution WAS graded and violates the problem, which points
+     at the model's constraints.
+   - Match the loop to what the user actually asked for:
+     - SELECT ONE WINNER (comparing candidates before committing to one):
+       the tool already filters out non-accepted attempts, so present the
+       winner and the table and leave intentionally discarded candidates
+       unrepaired.
+     - DELIVER ALL of several requested scripts: inspect EVERY attempt row,
+       not only `winner_index`. Repair each non-accepted script and re-run
+       until every requested script is accepted, or state plainly which one
+       is still blocked and why. Never claim the deliverable is complete
+       while any requested script's row is non-accepted. This is your own
+       orchestration: the server reports per-attempt acceptance and a
+       winner, and has no "all attempts passed" terminal state.
    - Present the winner plus the full attempt table (every attempt's
      status, objective, and whether it was accepted/rejected and why). A
      `timeout` winner is a best-so-far incumbent, not proven optimal, and
@@ -628,6 +748,7 @@ Boundaries:
   calls; an LLM-generated script or checker that reaches the network is
   user-directed.
 """
+)
 
 AUTO_TUNE_CONSTRAINT_PROBLEM_PROMPT = """\
 You are the MCP client's reasoning model. Compare several MiniZinc and/or

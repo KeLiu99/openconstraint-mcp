@@ -82,6 +82,7 @@ from .protocol_text.prompts import (
     AUTO_TUNE_CONSTRAINT_PROBLEM_PROMPT,
     MINIZINC_SOLUTION_WORKFLOW_PROMPT,
     SOLVE_CONSTRAINT_PROBLEM_PROMPT,
+    SOLVE_CONSTRAINT_PROBLEM_PROMPT_CORE,
     SOLVE_CPSAT_PYTHON_PROMPT,
 )
 from .protocol_text.results import (
@@ -582,6 +583,13 @@ def create_mcp_server(toolset: str = "full") -> FastMCP:
     )
     run_cpsat_python_file_desc = (
         RUN_CPSAT_PYTHON_FILE_DESCRIPTION_CORE if is_core else RUN_CPSAT_PYTHON_FILE_DESCRIPTION
+    )
+    # The backend-neutral prompt is served by both profiles, so its spliced
+    # CP-SAT output-contract fragment follows the same split: core exposes no
+    # checker-capable CP-SAT tool, so its variant does not say the server runs
+    # the checker you supply.
+    solve_constraint_problem_prompt = (
+        SOLVE_CONSTRAINT_PROBLEM_PROMPT_CORE if is_core else SOLVE_CONSTRAINT_PROBLEM_PROMPT
     )
 
     # The single server-owned job registry (D1.1): one instance per server,
@@ -1242,7 +1250,7 @@ def create_mcp_server(toolset: str = "full") -> FastMCP:
         description=SOLVE_CONSTRAINT_PROBLEM_PROMPT_DESCRIPTION,
     )
     def solve_constraint_problem(problem: str) -> str:
-        return SOLVE_CONSTRAINT_PROBLEM_PROMPT.format(problem=problem)
+        return solve_constraint_problem_prompt.format(problem=problem)
 
     if is_core:
         # Finalize the core profile before any client connects: drop every

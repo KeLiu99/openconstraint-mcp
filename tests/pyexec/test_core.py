@@ -27,6 +27,7 @@ from openconstraint_mcp.pyexec.diagnostics import (
     checker_report_diagnostic,
     cpsat_result_diagnostic,
 )
+from openconstraint_mcp.pyexec.eligibility import diagnostic_incumbent_eligibility
 from openconstraint_mcp.schemas.cpsat import CpsatCheckerReport, CpsatPythonResult
 from openconstraint_mcp.shared.childrun import MAX_OUTPUT_BYTES, ChildSpawnError
 
@@ -331,14 +332,21 @@ def test_run_cpsat_python_script_reported_timeout_normalized_to_error() -> None:
     assert result.timed_out is False
 
 
-# (h) non-numeric objective → coerced to None, status still parsed
-def test_run_cpsat_python_non_numeric_objective_becomes_none() -> None:
+# (h) a non-numeric objective is a CONTRACT ERROR, not a silent null: the field
+# has always been documented as number-or-null, and permissive normalization hid
+# a broken emit block behind a plausible-looking result.
+def test_run_cpsat_python_non_numeric_objective_yields_contract_error() -> None:
     payload = json.dumps({"status": "optimal", "objective": "lots", "solution": {"x": 1}})
     result = _run_with_mocked_proc(stdout_content=payload)
 
-    assert result.status == "optimal"
-    assert result.objective is None
-    assert result.solution == {"x": 1}
+    assert result.status == "error"
+    assert result.solution is None
+    assert result.diagnostic is not None
+    assert result.diagnostic.details == {
+        "field": "objective",
+        "reason": "must be a finite number or null",
+        "return_code": 0,
+    }
 
 
 # (h3) best_objective_bound is parsed even for status="unknown", where no
@@ -384,6 +392,210 @@ def test_run_cpsat_python_timeout_recovers_partial_best_objective_bound() -> Non
 
     assert result.status == "timeout"
     assert result.best_objective_bound == 1
+
+
+# --- required stdout envelope ----------------------------------------------
+#
+# `status`, `objective`, and `solution` are REQUIRED and type-checked on a clean
+# exit. A violation is status="error" with no incumbent and a child_process_error
+# diagnostic naming the offending field — the only client-visible transport for
+# it (there is deliberately no public result field).
+
+
+def _envelope_error_field(payload: dict) -> str:
+    """Run a payload through the executor and return the diagnosed field name."""
+    result = _run_with_mocked_proc(stdout_content=json.dumps(payload))
+    assert result.status == "error"
+    assert result.diagnostic is not None
+    details = result.diagnostic.details
+    assert details is not None
+    return str(details["field"])
+
+
+def test_run_cpsat_python_missing_status_is_a_contract_error() -> None:
+    assert _envelope_error_field({"objective": 1, "solution": {"x": 1}}) == "status"
+
+
+def test_run_cpsat_python_missing_objective_is_a_contract_error() -> None:
+    assert _envelope_error_field({"status": "optimal", "solution": {"x": 1}}) == "objective"
+
+
+def test_run_cpsat_python_missing_solution_is_a_contract_error() -> None:
+    assert _envelope_error_field({"status": "optimal", "objective": 1}) == "solution"
+
+
+def test_run_cpsat_python_non_string_status_is_a_contract_error() -> None:
+    assert _envelope_error_field({"status": 3, "objective": 1, "solution": {"x": 1}}) == "status"
+
+
+def test_run_cpsat_python_off_vocabulary_status_names_the_status_field() -> None:
+    # The status still normalizes to "error" (see the (f) case above); what is new
+    # is that the diagnostic says WHICH field was wrong.
+    payload = {"status": "MODEL_INVALID", "objective": None, "solution": {}}
+    assert _envelope_error_field(payload) == "status"
+
+
+def test_run_cpsat_python_off_vocabulary_status_drops_the_solution() -> None:
+    # A violation yields no incumbent, so an off-vocabulary status no longer
+    # carries its solution through the way the pre-envelope normalization did.
+    payload = json.dumps({"status": "MODEL_INVALID", "objective": 1, "solution": {"x": 1}})
+    result = _run_with_mocked_proc(stdout_content=payload)
+
+    assert result.solution is None
+
+
+def test_run_cpsat_python_oversized_status_is_truncated_in_the_diagnostic() -> None:
+    # The status arrives from stdout, which is capped only at MAX_OUTPUT_BYTES, and
+    # the reason is copied into BOTH the message and `details` — so echoing it whole
+    # would amplify one ~1 MiB string threefold. It is bounded and marked truncated.
+    huge_status = "X" * 100_000
+    payload = json.dumps({"status": huge_status, "objective": 1, "solution": {"x": 1}})
+    result = _run_with_mocked_proc(stdout_content=payload)
+
+    assert result.diagnostic is not None
+    details = result.diagnostic.details
+    assert details is not None
+    reason = str(details["reason"])
+    assert "(truncated)" in reason
+    assert len(reason) < 200
+    assert len(result.diagnostic.message) < 300
+
+
+def test_run_cpsat_python_short_off_vocabulary_status_is_echoed_whole() -> None:
+    # The bound must not cost the repair signal for a realistic mistake: a client
+    # fixing its emit block needs to see the exact status it printed.
+    payload = json.dumps({"status": "OPTIMAL", "objective": 1, "solution": {"x": 1}})
+    result = _run_with_mocked_proc(stdout_content=payload)
+
+    assert result.diagnostic is not None
+    details = result.diagnostic.details
+    assert details is not None
+    reason = str(details["reason"])
+    assert "'OPTIMAL'" in reason
+    assert "(truncated)" not in reason
+
+
+def test_run_cpsat_python_non_object_solution_is_a_contract_error() -> None:
+    payload = {"status": "optimal", "objective": 1, "solution": [{"x": 1}]}
+    assert _envelope_error_field(payload) == "solution"
+
+
+def test_run_cpsat_python_null_solution_is_a_contract_error() -> None:
+    # `null` is the shape seen in the wild: a run with no incumbent must still
+    # emit `{}`, or a legitimate infeasible/unknown result becomes an error.
+    payload = {"status": "infeasible", "objective": None, "solution": None}
+    assert _envelope_error_field(payload) == "solution"
+
+
+def test_run_cpsat_python_contract_error_diagnostic_details_are_field_reason_return_code() -> None:
+    result = _run_with_mocked_proc(stdout_content=json.dumps({"status": "optimal", "objective": 1}))
+
+    assert result.diagnostic is not None
+    assert result.diagnostic.details == {
+        "field": "solution",
+        "reason": "required key is missing",
+        "return_code": 0,
+    }
+
+
+def test_run_cpsat_python_contract_error_preserves_raw_streams() -> None:
+    payload = json.dumps({"status": "optimal", "objective": 1})
+    result = _run_with_mocked_proc(stdout_content=payload, stderr_content="a warning")
+
+    assert result.stdout == payload
+    assert result.stderr == "a warning"
+
+
+def test_run_cpsat_python_null_objective_is_valid_for_a_feasibility_model() -> None:
+    payload = json.dumps({"status": "feasible", "objective": None, "solution": {"x": 1}})
+    result = _run_with_mocked_proc(stdout_content=payload)
+
+    assert result.status == "feasible"
+    assert result.objective is None
+
+
+def test_run_cpsat_python_extra_envelope_keys_are_accepted() -> None:
+    payload = json.dumps(
+        {
+            "status": "optimal",
+            "objective": 10,
+            "solution": _VALID_SOLUTION,
+            "stats": {"conflicts": 3},
+            "result_file": "/tmp/out.json",
+        }
+    )
+    result = _run_with_mocked_proc(stdout_content=payload)
+
+    assert result.status == "optimal"
+    assert result.diagnostic is None
+
+
+def test_run_cpsat_python_empty_solution_keeps_the_specific_diagnostic() -> None:
+    # `{}` is a WELL-TYPED solution: emptiness is an acceptance rule, so this must
+    # stay the more specific "reported a status but emitted no solution" branch,
+    # not be reclassified as a malformed envelope.
+    payload = json.dumps({"status": "optimal", "objective": 10, "solution": {}})
+    result = _run_with_mocked_proc(stdout_content=payload)
+
+    assert result.status == "optimal"
+    assert result.diagnostic is not None
+    assert result.diagnostic.details == {"status": "optimal"}
+
+
+def test_run_cpsat_python_empty_solution_fails_the_incumbent_eligibility_gate() -> None:
+    payload = json.dumps({"status": "optimal", "objective": 10, "solution": {}})
+    result = _run_with_mocked_proc(stdout_content=payload)
+
+    assert diagnostic_incumbent_eligibility(result) == (False, "solution is missing or empty")
+
+
+def test_run_cpsat_python_malformed_timeout_partial_is_not_recovered() -> None:
+    partial = json.dumps({"status": "feasible", "solution": {"x": 1}})  # no `objective`
+    result = _run_with_mocked_proc(timeout=True, stdout_content=partial, timeout_ms=50)
+
+    assert result.solution is None
+
+
+def test_run_cpsat_python_off_vocabulary_timeout_partial_is_not_recovered() -> None:
+    # An intermediate block is where a script is most likely to invent a status;
+    # the envelope gate drops it rather than recovering an unclassifiable partial.
+    partial = json.dumps({"status": "in_progress", "objective": 3, "solution": {"x": 1}})
+    result = _run_with_mocked_proc(timeout=True, stdout_content=partial, timeout_ms=50)
+
+    assert result.solution is None
+
+
+def test_run_cpsat_python_malformed_timeout_partial_keeps_the_timeout_diagnostic() -> None:
+    # Timeout is executor-owned and its diagnostic keeps precedence: a malformed
+    # partial must never turn the run into a protocol error.
+    partial = json.dumps({"status": "feasible", "solution": {"x": 1}})
+    result = _run_with_mocked_proc(timeout=True, stdout_content=partial, timeout_ms=50)
+
+    assert result.status == "timeout"
+    assert result.diagnostic is not None
+    assert result.diagnostic.category == "timeout_no_incumbent"
+
+
+def test_run_cpsat_python_malformed_timeout_partial_reports_the_rejected_field() -> None:
+    # Dropping the partial must not drop the repair signal: an experiment attempt
+    # row carries no stdout, so the diagnostic is the only place a client can
+    # learn a partial existed and why it was rejected.
+    partial = json.dumps({"status": "feasible", "solution": {"x": 1}})
+    result = _run_with_mocked_proc(timeout=True, stdout_content=partial, timeout_ms=50)
+
+    assert result.diagnostic is not None
+    assert result.diagnostic.details is not None
+    assert result.diagnostic.details["rejected_partial_field"] == "objective"
+
+
+def test_run_cpsat_python_timeout_without_partial_reports_no_rejected_field() -> None:
+    # No JSON block at all is not a rejected partial; the key must be absent
+    # rather than null, so its presence always means "a block was dropped".
+    result = _run_with_mocked_proc(timeout=True, stdout_content="searching...", timeout_ms=50)
+
+    assert result.diagnostic is not None
+    assert result.diagnostic.details is not None
+    assert "rejected_partial_field" not in result.diagnostic.details
 
 
 # (h2) trailing output after the JSON block must not defeat parsing, and a nested
@@ -891,6 +1103,25 @@ def test_checked_run_accepted_leaves_the_top_level_diagnostic_clean(
     result = run_cpsat_python_file_checked(script, checker)
 
     assert result.diagnostic is None
+
+
+def test_checked_run_envelope_violation_keeps_the_offending_field(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # `checked_result_diagnostic` recomposes the top-level diagnostic from the
+    # run and the checker, so this route could silently downgrade the
+    # field-specific contract error to the generic child-process message. The
+    # violated run is never checker-eligible, so the run's own diagnostic is
+    # what must survive the recomposition.
+    script, checker = _checked_pair(tmp_path)
+    violated = _run_with_mocked_proc(stdout_content=json.dumps({"status": "optimal"}))
+    _patch_checked(monkeypatch, violated, _checker_report("accepted"))
+
+    result = run_cpsat_python_file_checked(script, checker)
+
+    assert result.diagnostic is not None
+    assert result.diagnostic.details is not None
+    assert result.diagnostic.details["field"] == "objective"
 
 
 def test_checked_run_rejected_carries_the_rejected_verdict(

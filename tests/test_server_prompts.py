@@ -14,6 +14,8 @@ from openconstraint_mcp.protocol_text.descriptions import (
     SOLVE_MINIZINC_MODEL_DESCRIPTION,
 )
 from openconstraint_mcp.protocol_text.prompts import (
+    CPSAT_OUTPUT_CONTRACT_GUIDANCE,
+    CPSAT_OUTPUT_CONTRACT_GUIDANCE_CORE,
     MINIZINC_SOLUTION_WORKFLOW_PROMPT,
     SOLVE_CPSAT_PYTHON_PROMPT,
 )
@@ -211,6 +213,121 @@ async def test_solve_constraint_problem_prompt_carries_the_cpsat_generation_rule
     assert "no network access, no file writes or deletes" in lower
     assert "no subprocess spawning" in lower
     assert "unless the user explicitly requested it" in lower
+
+
+# --- shared CP-SAT output-contract guidance ---------------------------------
+
+
+@pytest.mark.asyncio
+async def test_backend_neutral_prompt_carries_the_shared_output_contract_fragment() -> None:
+    text = await _get_core_prompt_text("solve_constraint_problem", {"problem": SAMPLE_PROBLEM})
+
+    assert CPSAT_OUTPUT_CONTRACT_GUIDANCE_CORE in text
+
+
+@pytest.mark.asyncio
+async def test_full_backend_neutral_prompt_carries_the_full_output_contract_fragment() -> None:
+    # Full exposes the checker-capable CP-SAT tools, so its copy of the same
+    # prompt keeps the wording core has to drop.
+    text = await _get_prompt_text("solve_constraint_problem", {"problem": SAMPLE_PROBLEM})
+
+    assert CPSAT_OUTPUT_CONTRACT_GUIDANCE in text
+
+
+def test_core_output_contract_fragment_promises_no_checker_execution() -> None:
+    # Core exposes only run_cpsat_python / run_cpsat_python_file, neither of
+    # which takes a checker — so the fragment must not say the server runs one.
+    normalized = " ".join(CPSAT_OUTPUT_CONTRACT_GUIDANCE_CORE.split())
+
+    assert "the server only executes it." in normalized
+    assert "runs the checker you supply" not in normalized
+
+
+def test_full_output_contract_fragment_keeps_the_checker_execution_clause() -> None:
+    normalized = " ".join(CPSAT_OUTPUT_CONTRACT_GUIDANCE.split())
+
+    assert "the server only executes it and runs the checker you supply" in normalized
+
+
+def test_output_contract_fragment_variants_differ_only_in_the_role_clause() -> None:
+    # The variants share one head and one advisory tail, so every contract RULE
+    # and the advisory framing stay byte-identical; only the execution-role
+    # clause between them may differ. This is the no-drift property the single
+    # constant used to give for free, now that there are two.
+    def _shared_halves(fragment: str) -> tuple[str, str]:
+        rules, _, rest = fragment.partition("- You generate and repair the script")
+        _, _, advisory = rest.partition("This guidance is advisory")
+        return rules, advisory
+
+    assert _shared_halves(CPSAT_OUTPUT_CONTRACT_GUIDANCE) == _shared_halves(
+        CPSAT_OUTPUT_CONTRACT_GUIDANCE_CORE
+    )
+
+
+def test_core_output_contract_fragment_is_brace_free_for_str_format() -> None:
+    assert "{" not in CPSAT_OUTPUT_CONTRACT_GUIDANCE_CORE
+    assert "}" not in CPSAT_OUTPUT_CONTRACT_GUIDANCE_CORE
+
+
+@pytest.mark.asyncio
+async def test_cpsat_prompt_carries_the_shared_output_contract_fragment() -> None:
+    text = await _get_prompt_text("cpsat_python_solution_workflow", {"problem": SAMPLE_PROBLEM})
+
+    assert CPSAT_OUTPUT_CONTRACT_GUIDANCE in text
+
+
+def test_output_contract_fragment_is_brace_free_for_str_format() -> None:
+    # Both host prompts are `str.format`ted with the user's problem text, so a brace
+    # in the spliced fragment would surface as an unrelated-looking KeyError.
+    assert "{" not in CPSAT_OUTPUT_CONTRACT_GUIDANCE
+    assert "}" not in CPSAT_OUTPUT_CONTRACT_GUIDANCE
+
+
+def test_output_contract_fragment_requires_a_complete_in_band_solution() -> None:
+    normalized = " ".join(CPSAT_OUTPUT_CONTRACT_GUIDANCE.split())
+
+    assert "`solution` must carry the COMPLETE, problem-specific answer" in normalized
+    assert "never only a path to a result file the script wrote" in normalized
+
+
+def test_output_contract_fragment_says_json_dumps_writes_no_file() -> None:
+    normalized = " ".join(CPSAT_OUTPUT_CONTRACT_GUIDANCE.split())
+
+    assert "`json.dumps` only serializes a Python object into a STRING" in normalized
+    assert "It creates no file and saves nothing." in normalized
+
+
+def test_output_contract_fragment_requires_one_shared_solution_schema() -> None:
+    normalized = " ".join(CPSAT_OUTPUT_CONTRACT_GUIDANCE.split())
+
+    assert "Variants of the SAME problem must share ONE `solution` schema" in normalized
+
+
+def test_output_contract_fragment_frames_prompt_text_as_advisory() -> None:
+    normalized = " ".join(CPSAT_OUTPUT_CONTRACT_GUIDANCE.split())
+
+    assert "You generate and repair the script; the server only executes it" in normalized
+    assert "the deterministic guarantee starts only when an MCP execution tool" in normalized
+
+
+def test_full_instructions_state_the_cpsat_output_contract_after_the_head() -> None:
+    # The invariant is the 512-byte truncation head, not a paragraph ordinal:
+    # everything preceding this paragraph must already fill the head, so the
+    # routing + POSTURE lead survives truncation intact. This also proves the
+    # requirement reached the instructions at all.
+    paragraphs = MCP_SERVER_INSTRUCTIONS.split("\n\n")
+    (index,) = [i for i, para in enumerate(paragraphs) if para.startswith("CP-SAT OUTPUT:")]
+
+    preceding_bytes = len("\n\n".join(paragraphs[:index]).encode("utf-8"))
+    assert preceding_bytes >= 512
+
+
+def test_full_instructions_require_a_complete_in_band_solution() -> None:
+    normalized = " ".join(MCP_SERVER_INSTRUCTIONS.split())
+
+    assert "`json.dumps` only builds a string" in normalized
+    assert "`solution` must carry the COMPLETE, problem-specific answer" in normalized
+    assert "This text is advisory" in normalized
 
 
 # --- minizinc_solution_workflow --------------------------------------------
@@ -706,6 +823,57 @@ async def test_cpsat_python_solution_workflow_prompt_warns_script_path_is_not_sa
 
     assert "cannot serve as `save_verified_cpsat_python` provenance" in normalized
     assert "accepted inline-`source` attempt matching this exact save" in normalized
+
+
+@pytest.mark.asyncio
+async def test_cpsat_python_solution_workflow_prompt_splits_deliver_all_from_select_one() -> None:
+    # Two different multi-script intents: "deliver all" must inspect EVERY
+    # attempt row and repair each failure, while "select one winner" keeps the
+    # existing behavior of discarding rejected candidates.
+    text = await _get_prompt_text("cpsat_python_solution_workflow", {"problem": SAMPLE_PROBLEM})
+    normalized = " ".join(text.split()).lower()
+
+    assert "select one winner" in normalized
+    assert "leave intentionally discarded candidates unrepaired" in normalized
+    assert "deliver all of several requested scripts" in normalized
+    assert "inspect every attempt row, not only `winner_index`" in normalized
+    assert "never claim the deliverable is complete while any requested script's row" in normalized
+    assert 'the server reports per-attempt acceptance and a winner, and has no "all attempts' in (
+        normalized
+    )
+
+
+@pytest.mark.asyncio
+async def test_cpsat_python_solution_workflow_prompt_shares_a_checker_only_across_matches() -> None:
+    text = await _get_prompt_text("cpsat_python_solution_workflow", {"problem": SAMPLE_PROBLEM})
+    normalized = " ".join(text.split()).lower()
+
+    assert "the same problem, the same instance, and the same objective" in normalized
+    assert "under the same objective sense, emitting one shared `solution` schema" in normalized
+    assert "split mismatched scripts into separate calls" in normalized
+
+
+@pytest.mark.asyncio
+async def test_cpsat_python_solution_workflow_prompt_experiment_checker_is_a_predicate() -> None:
+    text = await _get_prompt_text("cpsat_python_solution_workflow", {"problem": SAMPLE_PROBLEM})
+    normalized = " ".join(text.split()).lower()
+
+    assert "standard-library predicate over the reported answer" in normalized
+    assert "covers every element the instance requires" in normalized
+    assert "the reported `objective` is consistent with the solution" in normalized
+    assert "never `import ortools` and never re-solve" in normalized
+    assert "not an independent proof that an `optimal` claim is globally optimal" in normalized
+
+
+@pytest.mark.asyncio
+async def test_auto_tune_prompt_still_selects_a_finalist_rather_than_passing_all() -> None:
+    # The all-must-pass loop belongs to the CP-SAT workflow's "deliver all"
+    # branch; auto_tune keeps selecting one finalist.
+    text = await _get_prompt_text("auto_tune_constraint_problem", {"problem": SAMPLE_PROBLEM})
+    normalized = " ".join(text.split()).lower()
+
+    assert "deliver all of several requested scripts" not in normalized
+    assert "then present one full-instance result" in normalized
 
 
 @pytest.mark.asyncio

@@ -6,6 +6,7 @@ from openconstraint_mcp.pyexec.diagnostics import (
     cpsat_result_diagnostic,
     experiment_attempt_diagnostic,
     experiment_diagnostic,
+    output_contract_diagnostic,
     save_failure_diagnostic,
 )
 from openconstraint_mcp.pyexec.jobs import (
@@ -83,6 +84,20 @@ def test_timeout_without_incumbent() -> None:
     assert diag.category == "timeout_no_incumbent"
 
 
+def test_rejected_partial_enriches_details_without_changing_the_category() -> None:
+    diag = cpsat_result_diagnostic(
+        _result("timeout", timed_out=True),
+        rejected_partial=("objective", "required key is missing"),
+    )
+    assert diag is not None
+    assert diag.category == "timeout_no_incumbent"
+    assert diag.details == {
+        "truncated": False,
+        "rejected_partial_field": "objective",
+        "rejected_partial_reason": "required key is missing",
+    }
+
+
 def test_truncation_maps_to_output_truncated() -> None:
     diag = cpsat_result_diagnostic(_result("error", truncated=True, return_code=0))
     assert diag is not None
@@ -133,6 +148,66 @@ def test_result_from_child_clean_solution_has_no_diagnostic() -> None:
     result = _result_from_child(child)
     assert result.status == "optimal"
     assert result.diagnostic is None
+
+
+# --- output_contract_diagnostic ---------------------------------------------
+
+
+def test_output_contract_diagnostic_is_a_child_process_error() -> None:
+    diag = output_contract_diagnostic(
+        field="solution", reason="required key is missing", return_code=0
+    )
+    assert diag.category == "child_process_error"
+
+
+def test_output_contract_diagnostic_details_are_exactly_field_reason_return_code() -> None:
+    diag = output_contract_diagnostic(field="objective", reason="must be a number", return_code=0)
+    assert diag.details == {
+        "field": "objective",
+        "reason": "must be a number",
+        "return_code": 0,
+    }
+
+
+def test_output_contract_diagnostic_message_names_the_field() -> None:
+    diag = output_contract_diagnostic(
+        field="status", reason="required key is missing", return_code=0
+    )
+    assert "`status`" in diag.message
+
+
+def test_result_from_child_routes_an_envelope_violation_to_the_field_diagnostic() -> None:
+    # The single diagnostic tail picks the field-specific builder over
+    # cpsat_result_diagnostic's generic "failed or emitted malformed output".
+    child = ChildExecutionResult(
+        stdout='{"status": "optimal", "objective": 1}',
+        stderr="",
+        return_code=0,
+        timed_out=False,
+        truncated=False,
+        duration_ms=7,
+    )
+    result = _result_from_child(child)
+    assert result.diagnostic is not None
+    assert result.diagnostic.details == {
+        "field": "solution",
+        "reason": "required key is missing",
+        "return_code": 0,
+    }
+
+
+def _envelope_violation_result() -> CpsatPythonResult:
+    """A real executor result for a child whose final block omits `objective`."""
+    return _result_from_child(
+        ChildExecutionResult(
+            stdout='{"status": "optimal", "solution": {"x": 1}}',
+            stderr="",
+            return_code=0,
+            timed_out=False,
+            truncated=False,
+            duration_ms=7,
+        )
+    )
 
 
 # --- checker report diagnostic (via run path result contract) ---------------
@@ -205,6 +280,14 @@ def test_save_failure_timeout_result_surfaces_timeout() -> None:
     assert diag.category == "timeout_no_incumbent"
 
 
+def test_save_failure_envelope_violation_keeps_the_offending_field() -> None:
+    # The save route must not recompute the diagnostic from the result model:
+    # the field/reason lives only on the diagnostic the executor already built.
+    diag = save_failure_diagnostic(_envelope_violation_result(), None)
+    assert diag.details is not None
+    assert diag.details["field"] == "objective"
+
+
 def test_save_failure_clean_result_rejected_by_gate_is_not_verified() -> None:
     # A clean optimal result that failed a reported/expectation gate: no more
     # specific category, so a generic not_verified.
@@ -246,6 +329,21 @@ def test_rejected_missing_objective_attempt_is_not_verified() -> None:
     assert diag is not None
     assert diag.category == "not_verified"
     assert diag.message == "objective is missing or non-numeric"
+
+
+def test_rejected_envelope_violation_attempt_keeps_the_offending_field() -> None:
+    # The attempt row carries no stdout and (for a script that ran fine but
+    # printed the wrong shape) no stderr_tail, so this diagnostic is the only
+    # place the client learns which key to repair.
+    diag = experiment_attempt_diagnostic(
+        _envelope_violation_result(),
+        accepted=False,
+        checker_status=None,
+        message="solution is missing or empty",
+    )
+    assert diag is not None
+    assert diag.details is not None
+    assert diag.details["field"] == "objective"
 
 
 def test_rejected_by_checker_attempt_is_checker_failed() -> None:
@@ -324,6 +422,23 @@ def test_cpsat_succeeded_job_derives_from_result() -> None:
     result = _result("optimal", solution={"x": 1})
     diag = CpsatJobRegistry._job_diagnostic(_cpsat_record("succeeded", result=result))
     assert diag is None
+
+
+def test_cpsat_job_envelope_violation_keeps_the_offending_field() -> None:
+    # The background-job route reaches the client as a CpsatPythonJobStatus with
+    # no stdout of its own, so `_job_diagnostic` must carry the field through
+    # rather than recomputing the generic child-process message. The violated
+    # run is never checker-eligible, hence checker=None + a skipped reason.
+    diag = CpsatJobRegistry._job_diagnostic(
+        _cpsat_record(
+            "succeeded",
+            result=_envelope_violation_result(),
+            checker_skipped_reason="status is 'error'",
+        )
+    )
+    assert diag is not None
+    assert diag.details is not None
+    assert diag.details["field"] == "objective"
 
 
 def test_cpsat_job_checker_rejection_overrides_result_diagnostic() -> None:

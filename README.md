@@ -1037,20 +1037,87 @@ In addition to the MiniZinc declarative path, `openconstraint-mcp` exposes a
 second solving path: the client's LLM writes OR-Tools CP-SAT Python, and the
 server runs it in a **local child process**.
 
+### Four separate steps
+
+These are commonly conflated; keeping them apart is what makes a generated
+script verifiable:
+
+1. **Source-file creation.** The MCP client writes (and repairs) the `.py`
+   script. The server never generates, rewrites, or patches source.
+2. **Result transport.** The running script prints one JSON object as its last
+   stdout line. `json.dumps` only serializes a Python object into a string that
+   `print` sends to stdout — it creates no file and saves nothing.
+3. **Checker verification.** A separate checker script grades that reported
+   answer against the original instance.
+4. **Optional managed saving.** Only when the user asks: `save_verified_cpsat_python`
+   re-verifies and writes a manifest-tracked artifact directory.
+
+**The `solution` must be complete and in-band.** It carries every decision value
+the checker needs, keyed so the checker can grade it — never prose, never
+statistics alone, and never only a path to a result file the script wrote. A
+supplementary `result_file` key is allowed as an extra (extra keys are ignored by
+the executor), but it can never replace the in-band answer: the checker receives
+the parsed `solution`, not your filesystem.
+
+**Who guarantees what.** The client proposes; the server verifies. Prompt and
+tool-description wording is advisory — the deterministic guarantee begins only
+once the script is executed through an MCP tool. A client that writes a script
+and never invokes an execution tool has no server guarantee at all. And an
+`accepted` checker verdict proves only the properties that checker encodes: it
+validates feasibility and consistency, and does **not** by itself prove a
+`status="optimal"` claim is globally optimal.
+
+### Delivering several script variants
+
+When the user asks for several working scripts (rather than "give me the best
+one"), run them as one experiment and treat **every** attempt row as a
+deliverable:
+
+1. Generate each variant as its own file.
+2. Execute them in a single `run_cpsat_python_experiment` call — inline `source`
+   attempts, or `script_path` attempts for files already on disk — with one
+   independent `checker`. Sharing one checker (and ranking attempts at all) is
+   valid only when every attempt solves the same problem, the same instance, and
+   the same objective under the same objective sense, emitting one shared
+   `solution` schema.
+3. Inspect **all** of `result["attempts"]`, not only `winner_index`. Repair each
+   non-accepted script and re-run until every requested variant is accepted, or
+   report plainly which one is still blocked.
+4. Optionally save the finalist with `save_verified_cpsat_python`. A
+   `script_path` attempt is marked `used_script_path` and can never be save
+   provenance (that save re-runs inline source in a fresh temp directory), so
+   re-run the finalist as an inline `source` attempt if you want to attach its
+   `experiment_result`.
+
+Selecting a single winner is the other, unchanged mode: rejected attempts may be
+discarded without repair.
+
+Checker-backed multi-script verification needs the full toolset —
+`run_cpsat_python_experiment` and `save_verified_cpsat_python` are not in the
+core profile, so start the server with `openconstraint-mcp stdio --toolset full`.
+
 ### Tools
 
 - **`run_cpsat_python(source: str, timeout_ms: int = 30000)`** — execute
   LLM-generated OR-Tools CP-SAT Python source in a bounded child process and
   return a `CpsatPythonResult`. The script must emit a single JSON object as
-  its last stdout line with `status`, `objective`, and `solution`; it may also
-  include an optional `best_objective_bound` for diagnostics:
+  its last stdout line with all three **required** keys `status`, `objective`,
+  and `solution`; it may also include an optional `best_objective_bound` for
+  diagnostics:
 
   ```json
   {"status": "optimal", "objective": 42.0, "solution": {"x": 3, "y": 7}, "best_objective_bound": 42.0}
   ```
 
   Valid `status` values: `optimal`, `feasible`, `infeasible`, `unknown`,
-  `error`. Use the `cpsat_python_solution_workflow` prompt to generate conforming scripts.
+  `error`. `objective` must be a finite number or `null` — a pure feasibility
+  model still emits the key with `null`. `solution` must be a JSON object; `{}`
+  is a well-typed envelope for "no incumbent" (it fails the *acceptance* gates,
+  not the envelope check). Extra keys are ignored. A missing or invalid required
+  key is rejected as `status="error"` with no solution and a
+  `child_process_error` diagnostic whose `details.field` names the offending
+  key, so the client knows exactly what to repair.
+  Use the `cpsat_python_solution_workflow` prompt to generate conforming scripts.
 
   The child process runs under the server's own Python interpreter (the
   project venv, which already ships `ortools`), launched unbuffered (`-u`).
@@ -1072,8 +1139,14 @@ server runs it in a **local child process**.
   last such block survives the timeout kill: on `status="timeout"` the
   server recovers it into `solution`/`objective`/`best_objective_bound` as the
   best-so-far (unproven — treat as feasible, not optimal), or leaves them null
-  if none was printed in time. On a clean run the final block (printed after
-  `Solve` returns) is the authoritative result.
+  if none was printed in time. The same required-key check applies to that
+  block: a malformed partial is not recovered as an incumbent, and the run keeps
+  its `timeout` status and timeout diagnostic rather than becoming a contract
+  error. The rejection is still reported — the timeout diagnostic's `details`
+  carry `rejected_partial_field` and `rejected_partial_reason` naming the
+  offending key, so a client can repair its progress block; both keys are absent
+  when no JSON block was printed at all. On a clean run the final block (printed
+  after `Solve` returns) is the authoritative result.
 
 - **`run_cpsat_python_file(script_path: str, timeout_ms: int = 30000, args:
   list[str] | None = None, seed: int | None = None, config: dict | None =
