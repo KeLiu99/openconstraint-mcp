@@ -273,6 +273,15 @@ async def _report_status(
     that request's ``_meta`` opted in at ``info`` level — see
     ``mcp.server.session.send_log_message``. Progress notifications are
     unaffected either way.
+
+    Keeping it means accepting one stderr line per call site per process:
+    ``MCPDeprecationWarning`` subclasses ``UserWarning``, so it warns at
+    runtime, not just under a type checker. Suppression was considered and
+    rejected — every rung (``info`` → ``log`` → ``send_log_message``) is
+    ``@deprecated``, so there is no quieter API to drop to, and two of the
+    three warnings fire inside the coroutine, so a ``catch_warnings`` block
+    would have to mutate the process-global filter across an ``await`` that
+    concurrent tool calls share.
     """
     if ctx is None:
         return
