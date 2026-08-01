@@ -299,12 +299,15 @@ def _serialize_tools(tools: list[Any]) -> str:
     """Deterministic compact serialization of a complete advertised tool list.
 
     One ``json.dumps`` over the whole list — ``model_dump(mode="json",
-    exclude_none=True)`` per tool, sorted keys, compact separators — so the
-    measured bytes include the list framing a client actually receives. Reused
-    by the budget and reference-safety tests so they scan the same payload.
+    by_alias=True, exclude_none=True)`` per tool, sorted keys, compact
+    separators — so the measured bytes include the list framing a client
+    actually receives. ``by_alias=True`` is required: the mcp SDK's protocol
+    models use snake_case Python field names with camelCase wire aliases, and
+    the wire bytes (what a client actually receives) are camelCase. Reused by
+    the budget and reference-safety tests so they scan the same payload.
     """
     return json.dumps(
-        [tool.model_dump(mode="json", exclude_none=True) for tool in tools],
+        [tool.model_dump(mode="json", by_alias=True, exclude_none=True) for tool in tools],
         sort_keys=True,
         separators=(",", ":"),
     )
@@ -377,7 +380,7 @@ async def test_cpsat_file_tools_advertise_an_args_parameter() -> None:
     # cannot pass a script its data file without editing the script's source.
     tools = await _tools_by_name("full")
     for name in ("run_cpsat_python_file", "submit_cpsat_python_file_job"):
-        assert "args" in tools[name].inputSchema.get("properties", {}), (
+        assert "args" in tools[name].input_schema.get("properties", {}), (
             f"{name} does not advertise `args`"
         )
 
@@ -527,7 +530,7 @@ async def test_save_verified_cpsat_python_output_schema_does_not_read_saved_as_v
     # The SaveVerifiedPythonResult docstring is published verbatim as this tool's
     # outputSchema.description, so the corrected two-field rule must reach clients.
     tools = await _tools_by_name("full")
-    output_schema = tools["save_verified_cpsat_python"].outputSchema
+    output_schema = tools["save_verified_cpsat_python"].output_schema
     assert output_schema is not None
     description = output_schema["description"]
     assert "combine with ``saved``" not in description
@@ -578,7 +581,7 @@ async def test_run_cpsat_python_file_checked_is_full_only() -> None:
 @pytest.mark.asyncio
 async def test_run_cpsat_python_file_checked_advertises_the_checker_fields() -> None:
     tools = await _tools_by_name("full")
-    output_schema = tools["run_cpsat_python_file_checked"].outputSchema
+    output_schema = tools["run_cpsat_python_file_checked"].output_schema
     assert output_schema is not None
     properties = output_schema["properties"]
     for field in ("status", "solution", "checker", "checker_skipped_reason", "checker_timeout_ms"):
@@ -587,10 +590,10 @@ async def test_run_cpsat_python_file_checked_advertises_the_checker_fields() -> 
 
 @pytest.mark.asyncio
 async def test_run_cpsat_python_file_checked_output_schema_has_no_result_envelope() -> None:
-    # The annotation is the concrete return type, so FastMCP publishes the model
+    # The annotation is the concrete return type, so MCPServer publishes the model
     # itself — not a `{"result": ...}` wrapper it would add for a non-model return.
     tools = await _tools_by_name("full")
-    output_schema = tools["run_cpsat_python_file_checked"].outputSchema
+    output_schema = tools["run_cpsat_python_file_checked"].output_schema
     assert output_schema is not None
     assert "result" not in output_schema["properties"]
 
@@ -598,7 +601,7 @@ async def test_run_cpsat_python_file_checked_output_schema_has_no_result_envelop
 @pytest.mark.asyncio
 async def test_run_cpsat_python_file_checked_requires_both_paths() -> None:
     tools = await _tools_by_name("full")
-    required = tools["run_cpsat_python_file_checked"].inputSchema.get("required", [])
+    required = tools["run_cpsat_python_file_checked"].input_schema.get("required", [])
     assert set(required) == {"script_path", "checker_path"}
 
 

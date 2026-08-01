@@ -741,10 +741,28 @@ def test_save_verified_model_writes_project_end_to_end(tmp_path: Path) -> None:
 # status object is a failure, never a skip, so a spelling regression in a
 # future runtime bump cannot pass silently.
 #
-# Statuses the pinned runtime cannot produce deterministically (SATISFIED,
-# UNBOUNDED, UNSAT_OR_UNBOUNDED) are intentionally unprobed; the attempted
-# models and observed outcomes are recorded in
-# docs/plans/2026-06-04-solve-deferred-and-not-done.md.
+# Three statuses the pinned runtime (MiniZinc 2.9.7; cp-sat/gecode/chuffed)
+# cannot produce deterministically are intentionally unprobed. Observed during
+# implementation-time probing:
+#
+# - SATISFIED: never emitted on any attempted path. An incomplete-but-fruitful
+#   run ends with *no status object at all*, and the normalized `satisfied`
+#   comes from the no-status fallback in `_resolve_status`. Attempted: plain
+#   satisfy; gecode holding an incumbent at a 1 s limit on a number-partition
+#   minimize; cp-sat Golomb-ruler m=11 and hard partitions at 100 ms–3 s limits
+#   (each either closes to OPTIMAL_SOLUTION or finds nothing → UNKNOWN, and
+#   without `-a` the cp-sat driver prints no intermediate incumbents); `-a` on
+#   Golomb at 2 s on cp-sat and gecode (incumbents printed, still no status
+#   object); gecode/chuffed `-n 2` on a 3-solution satisfy. Its `_STATUS_MAP`
+#   entry stays as defensive coverage — it maps to the verdict the fallback
+#   already produces.
+# - UNBOUNDED / UNSAT_OR_UNBOUNDED: unreachable. `var int: x; solve maximize x;`
+#   returns OPTIMAL_SOLUTION on all three solvers because the flattener imposes
+#   default finite int bounds, and UNSAT_OR_UNBOUNDED is a MIP-relaxation
+#   verdict with no MIP solver bundled.
+#
+# Re-open on a runtime/solver bump that starts emitting SATISFIED at limits, or
+# on bundling a solver with a genuine unbounded verdict — then add the probe.
 
 
 def _probe_raw_statuses(

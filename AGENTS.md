@@ -36,7 +36,7 @@ For multistep tasks, state a brief plan with a verification check per step.
 
 ### 5. Planning Documents Are Not Code Dumps
 
-Plans under `docs/plans/` must be concise, behavior-first execution guides. Do **not** embed full implementation code blocks for whole files, functions, or tests. They waste context, go stale quickly, and encourage agents to copy bugs mechanically.
+Plans live under `docs/plans/` (gitignored — local to your working copy, never committed). They must be concise, behavior-first execution guides. Do **not** embed full implementation code blocks for whole files, functions, or tests. They waste context, go stale quickly, and encourage agents to copy bugs mechanically.
 
 A good plan includes:
 
@@ -99,7 +99,7 @@ The v0 introspection-only restriction is lifted. Solving features — `solve`, `
 
 - **Local-first.** All solving runs on the user's machine. No remote solving backends, no upload of models or data, no telemetry on solver runs.
 - **Managed runtime (MiniZinc path).** MiniZinc solver execution must use the managed/local runtime resolved through the runtime layer (`OPENCONSTRAINT_MCP_RUNTIME_DIR` or the install config), never an arbitrary `$PATH` lookup. A second backend — OR-Tools CP-SAT Python execution — runs user/LLM-provided OR-Tools CP-SAT Python in a child process (`sys.executable`, the server's own venv which ships `ortools`), with a timeout, a stdout/stderr byte cap, and process-tree kill. **This is a local-only, robustness boundary, not a security sandbox.** v0 performs no sandboxing, no network blocking, and no AST/import filtering; a cloud or multi-tenant deployment would require a real sandbox and is out of scope. **Honest network posture:** the server *wrapper* makes no network calls on any code path; the executed child is arbitrary code that the server does not police, so "offline" is a property of the wrapper, not a guarantee about the child. The child must not generate network or file-mutating code unless the user explicitly requested it (enforced via the client-facing prompt, not by the server).
-- **No server-side LLM calls.** The MCP server must never own LLM credentials or invoke a generative model. This includes MCP sampling — the server may not request the client's LLM either.
+- **No server-owned LLM calls.** The MCP server must never own LLM credentials or call an LLM directly. MCP sampling through a connected client's advertised capability is allowed to help answer an explicit user request; it must not run autonomously or create a server-side agent loop.
 - **No LangChain / LangGraph in the core server.** Do not pull these dependencies into the server package. They imply agent loops and LLM coupling that conflict with the deterministic, local-first posture.
 - **No hidden network calls.** Solving, validation, model lookup, and result inspection must all be offline. The only sanctioned network call remains the user-invoked `install-runtime` download.
 

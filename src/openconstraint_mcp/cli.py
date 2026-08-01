@@ -56,7 +56,7 @@ def stdio(
     ),
 ) -> None:
     """Run the MCP server over stdio."""
-    # Lazy-imported so metadata/runtime commands do not load the FastMCP server
+    # Lazy-imported so metadata/runtime commands do not load the MCPServer
     # layer (and its httpx dependency) on the CLI's cold import path.
     from .server import run_stdio
 
