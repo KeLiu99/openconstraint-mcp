@@ -73,6 +73,23 @@ push-all msg:
     git commit -m {{quote(msg)}}
     git push -u origin HEAD
 
+# Squash the latest commits, retain the newest message, then safely force-push.
+# Usage: just squash 3
+squash commits:
+    @test "{{commits}}" -ge 2
+    @git diff --quiet
+    @git diff --cached --quiet
+    @test "$$(git branch --show-current)" != master
+    @test "$$(git branch --show-current)" != main
+    # Never reach past this branch's own commits: without this, `just squash 10`
+    # on a 3-commit branch would rewrite shared master history behind the
+    # force-push, which --force-with-lease cannot catch because the lease is on
+    # the branch ref, not on master's.
+    @test "{{commits}}" -le "$$(git rev-list --count origin/master..HEAD)"
+    git reset --soft HEAD~{{commits}}
+    git commit --reuse-message=ORIG_HEAD
+    git push --force-with-lease
+
 # Remove caches and build artefacts.
 clean:
     rm -rf .pytest_cache .ruff_cache .mypy_cache build dist .coverage

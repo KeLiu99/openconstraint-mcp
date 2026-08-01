@@ -2677,6 +2677,31 @@ async def test_run_cpsat_python_surfaces_the_violated_envelope_field(
 
 
 @pytest.mark.asyncio
+async def test_run_cpsat_python_surfaces_a_nested_non_finite_key_path(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # The nested-finiteness gate has to survive tool serialization too, and the
+    # key path is the whole repair signal — naming `solution` alone would leave a
+    # client hunting through its own payload for the offending value.
+    monkeypatch.setattr(
+        "openconstraint_mcp.pyexec.core.execute_child",
+        lambda *a, **kw: ChildExecutionResult(
+            stdout='{"status": "optimal", "objective": 1, "solution": {"t": [{"s": NaN}]}}',
+            stderr="",
+            return_code=0,
+            timed_out=False,
+            truncated=False,
+            duration_ms=5,
+        ),
+    )
+
+    mcp = create_mcp_server()
+    result = _structured(await mcp.call_tool("run_cpsat_python", {"source": "print('hi')"}))
+    assert result["status"] == "error"
+    assert result["diagnostic"]["details"]["field"] == 'solution["t"][0]["s"]'
+
+
+@pytest.mark.asyncio
 async def test_run_cpsat_python_clears_both_cpsat_protocol_env_vars(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

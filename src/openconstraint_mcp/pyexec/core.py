@@ -9,7 +9,8 @@ syscall restriction is applied. This is a local-only tool; a cloud deployment
 would require a real sandbox.
 
 Output contract (executor ↔ script): the script must print, as its **last**
-stdout block, one JSON object:
+stdout block, a final JSON object (same-shaped intermediate blocks are allowed
+during search — see the timeout note below):
     {"status": "<CpsatStatus value>", "objective": <number|null>, "solution": {...},
      "best_objective_bound": <number|null>}
 
@@ -17,10 +18,14 @@ stdout block, one JSON object:
 ``status`` must be one of the script vocabulary below, ``objective`` a finite
 int/float or ``null`` (a pure feasibility model still emits the key), and
 ``solution`` a JSON object (``{}`` is well-typed — emptiness is an acceptance
-question, not an envelope one). Extra keys (``stats``, a supplementary
-``result_file``, …) are allowed and ignored. A missing or ill-typed required
-key yields ``status="error"`` with no incumbent and a ``child_process_error``
-diagnostic naming the offending ``field``.
+question, not an envelope one) whose every number is finite at ANY depth —
+``NaN``/``Infinity`` nested inside a solution is rejected exactly like a
+non-finite ``objective``. Extra keys (``stats``, a supplementary
+``result_file``, …) are allowed and ignored. On a clean exit, a missing or
+ill-typed required key yields ``status="error"`` with no incumbent and a
+``child_process_error`` diagnostic naming the offending ``field``; on a timeout
+the status stays ``"timeout"`` and the drop is reported through
+``rejected_partial_field``/``rejected_partial_reason`` instead.
 
 ``best_objective_bound`` is optional (a script predating it is parsed as
 ``None``) and diagnostic only — it is OR-Tools' ``solver.best_objective_bound``,
@@ -84,7 +89,7 @@ from collections.abc import Callable, Generator
 from contextlib import contextmanager
 from pathlib import Path
 from subprocess import Popen
-from typing import Any
+from typing import Any, cast
 
 from ..schemas.cpsat import (
     CpsatCheckerReport,
@@ -129,6 +134,15 @@ _SCRIPT_STATUSES: frozenset[str] = frozenset(_SCRIPT_STATUS_ORDER)
 # status (the longest legal one is "infeasible") plus the case/typo mistakes a
 # client needs to see to repair its emit block.
 _STATUS_ECHO_MAX_CHARS: int = 40
+
+# Bounds the offending key path echoed back with a nested-finiteness violation
+# (see `_nonfinite_violation`). Same threefold-amplification argument as the
+# status echo above, but a path is assembled from the child's OWN key names, so
+# it grows with the payload instead of with a fixed vocabulary: a 412 KB
+# solution nested under 200-char keys yields a 408 KB path. Elided in the
+# MIDDLE, because the two ends are what locate the value — the root, and the
+# offending leaf key.
+_KEY_PATH_MAX_CHARS: int = 120
 
 
 def validate_checker_timeout_ms(checker_timeout_ms: int | None) -> None:
@@ -176,22 +190,10 @@ def _canonical_json_dumps(value: dict[str, Any]) -> str:
     """Serialize value with sorted keys and no extra whitespace.
 
     The single definition of "canonical" for CP-SAT config hashing, so
-    ``canonical_json_sha256`` and ``canonical_json_byte_length`` can never
-    disagree about what they are hashing/measuring.
+    ``config_sha256`` and ``canonical_json_byte_length`` can never disagree
+    about what they are hashing/measuring.
     """
     return json.dumps(value, sort_keys=True, separators=(",", ":"))
-
-
-def canonical_json_sha256(value: dict[str, Any]) -> str:
-    """Return the sha256 hex digest of value's canonical JSON serialization.
-
-    Sorted keys mean two dicts with the same keys in different insertion order
-    hash identically. Shared by the experiment executor (execution-time config
-    hash) and the save gate (save-time mismatch check) so the two can never
-    drift apart — see ``config_sha256`` for the "no config" normalization atop
-    this.
-    """
-    return text_sha256(_canonical_json_dumps(value))
 
 
 def canonical_json_byte_length(value: dict[str, Any]) -> int:
@@ -202,13 +204,18 @@ def canonical_json_byte_length(value: dict[str, Any]) -> int:
 def config_sha256(config: dict[str, Any] | None) -> str | None:
     """Return config's canonical hash, or ``None`` for the "no config" state.
 
+    Sorted keys mean two dicts with the same keys in different insertion order
+    hash identically. Shared by the experiment executor (execution-time config
+    hash) and the save gate (save-time mismatch check) so the two can never
+    drift apart.
+
     An empty dict (``{}``) and an omitted config (``None``) both mean "no
     config" — no temp file, no env var, and this returns ``None`` for both, so
     hashes and the save replay gate never have to distinguish ``{}`` from absent.
     """
     if not config:
         return None
-    return canonical_json_sha256(config)
+    return text_sha256(_canonical_json_dumps(config))
 
 
 def write_config_file(directory: Path, config: dict[str, Any]) -> Path:
@@ -261,12 +268,6 @@ def replay_env_scope(
         yield seed_config_env(seed=seed, config_path=None)
 
 
-def normalize_status(raw: object) -> CpsatStatus:
-    if isinstance(raw, str) and raw in _SCRIPT_STATUSES:
-        return raw  # type: ignore[return-value]
-    return "error"
-
-
 def normalize_objective(raw: object) -> float | int | None:
     """Accept only a finite real number; bool, non-numeric, and non-finite become None.
 
@@ -304,16 +305,67 @@ def parse_last_json(text: str) -> dict | None:
     return found
 
 
+def _elide_key_path(path: str) -> str:
+    """Middle-elide a key path over ``_KEY_PATH_MAX_CHARS``, keeping both ends."""
+    if len(path) <= _KEY_PATH_MAX_CHARS:
+        return path
+    keep = (_KEY_PATH_MAX_CHARS - 1) // 2
+    return f"{path[:keep]}…{path[-keep:]}"
+
+
+def _nonfinite_violation(solution: dict) -> tuple[str, str] | None:
+    """Return the FIRST ``(key path, reason)`` non-finite float in ``solution``.
+
+    Walks every ``dict`` value and ``list`` element at any depth: a
+    nested ``NaN``/``Infinity`` is worse than a top-level one, because the
+    consumers disagree about it. ``json.dumps`` writes a bare ``NaN`` into the
+    checker payload and the saved artifact, while a strict MCP client's decoder
+    rejects the response or silently nulls the value.
+
+    Only ``float`` is checked — ``int`` is finite at any magnitude, and
+    ``str``/``bool``/``None`` are legal decision values — so this deliberately
+    does NOT reuse ``normalize_objective``, whose broader rejection of bool and
+    non-numeric types would throw out valid solutions.
+
+    The traversal is an explicit stack, not recursion: CPython's JSON decoder is
+    bounded by its C stack rather than ``sys.getrecursionlimit()``, so every
+    supported version accepts input that decodes fine and then blows a recursive
+    Python walk with ``RecursionError`` (see
+    ``test_envelope_violation_walks_nesting_deeper_than_the_recursion_limit``).
+
+    Path steps are bracketed and JSON-quoted (``solution["tasks"][3]["start"]``)
+    so a literal key containing ``.`` or ``[`` stays distinguishable from real
+    nesting, and the finished path is length-capped by ``_elide_key_path``.
+    """
+    stack: list[tuple[str, object]] = [("solution", solution)]
+    while stack:
+        path, value = stack.pop()
+        if isinstance(value, float) and not math.isfinite(value):
+            return _elide_key_path(path), f"must be a finite number; got {value}"
+        if isinstance(value, dict):
+            children = [(f"{path}[{json.dumps(key)}]", item) for key, item in value.items()]
+        elif isinstance(value, list):
+            children = [(f"{path}[{index}]", item) for index, item in enumerate(value)]
+        else:
+            continue
+        # Reversed, so `pop()` takes children left to right and the reported path
+        # is the first offender in the client's OWN payload order — the one its
+        # eye lands on when scanning for the value to repair.
+        stack.extend(reversed(children))
+    return None
+
+
 def _envelope_violation(parsed: dict) -> tuple[str, str] | None:
     """Return the first ``(field, reason)`` stdout-envelope violation, or ``None``.
 
     The required-key/type gate for a parsed result block: ``status`` in the
     script vocabulary, ``objective`` a finite number or ``null``, ``solution`` a
-    JSON object. Extra keys are ignored, and an empty ``solution`` (``{}``) is
-    WELL-TYPED here — "solution-bearing status but nothing in it" is an
-    acceptance rule owned by ``cpsat_result_diagnostic`` and the save/experiment
-    gates, not an envelope type rule. One site for the rules so the clean-exit
-    and timeout (partial-recovery) paths can never drift.
+    JSON object carrying no non-finite float at any depth (see
+    ``_nonfinite_violation``). Extra keys are ignored, and an empty ``solution``
+    (``{}``) is WELL-TYPED here — "solution-bearing status but nothing in it" is
+    an acceptance rule owned by ``cpsat_result_diagnostic`` and the
+    save/experiment gates, not an envelope type rule. One site for the rules so
+    the clean-exit and timeout (partial-recovery) paths can never drift.
     """
     if "status" not in parsed:
         return "status", "required key is missing"
@@ -333,7 +385,7 @@ def _envelope_violation(parsed: dict) -> tuple[str, str] | None:
         return "solution", "required key is missing"
     if not isinstance(parsed["solution"], dict):
         return "solution", f"must be a JSON object, got {type(parsed['solution']).__name__}"
-    return None
+    return _nonfinite_violation(parsed["solution"])
 
 
 def _extract_solution_objective(
@@ -350,7 +402,7 @@ def _extract_solution_objective(
     non-finite bound becomes ``None`` rather than failing the whole result.
     """
     solution: dict = parsed["solution"]
-    objective = normalize_objective(parsed["objective"])
+    objective: float | int | None = parsed["objective"]
     best_objective_bound = normalize_objective(parsed.get("best_objective_bound"))
     return solution, objective, best_objective_bound
 
@@ -358,20 +410,17 @@ def _extract_solution_objective(
 def _result_from_child(child: ChildExecutionResult) -> CpsatPythonResult:
     """Parse a raw ``ChildExecutionResult`` into the CP-SAT result contract.
 
-    This is the CP-SAT protocol layer: the generic ``execute_child`` knows nothing
-    about ``status``/``objective``/``solution``; that parsing lives here so the
-    clean-exit, timeout, and truncation shapes are decided in one place. The
-    structured diagnostic is derived from the finished result as the single tail:
-    a private envelope violation returned alongside the result selects the
-    field-specific ``child_process_error``, and everything else goes through
-    ``cpsat_result_diagnostic``. The violation never reaches the public result
-    model — the diagnostic is the whole client-visible surface for it.
+    This is the CP-SAT protocol layer: the generic ``execute_child`` knows
+    nothing about ``status``/``objective``/``solution``, so the clean-exit,
+    timeout, and truncation shapes are decided here in one place.
 
-    A violation is routed by whether the run TIMED OUT. On a clean exit it
-    selects ``output_contract_diagnostic`` (the result is a contract error). On
-    a timeout the status is executor-owned, so the violation is passed as
-    ``rejected_partial`` into the timeout diagnostic's ``details`` instead —
-    same category, but the dropped partial's field is no longer invisible.
+    An envelope violation is routed by whether the run TIMED OUT. On a clean
+    exit it selects ``output_contract_diagnostic`` (the result is a contract
+    error); on a timeout the status is executor-owned, so the violation is
+    passed as ``rejected_partial`` into the timeout diagnostic's ``details``
+    instead — same category, but the dropped partial's field stays visible. The
+    violation never reaches the public result model; the diagnostic is its whole
+    client-visible surface.
     """
     result, violation = _classify_child_result(child)
     if violation is not None and not result.timed_out:
@@ -391,19 +440,14 @@ def _spawn_failure_result(exc: OSError) -> CpsatPythonResult:
     reasons no preflight can rule out: fd exhaustion (``EMFILE``), memory
     pressure (``ENOMEM``), or an argv that clears ``validate_script_args``'
     conservative bound but not the kernel's real one (``E2BIG``). Left
-    unhandled, that escapes from synchronous calls and aborts an experiment
-    whose earlier attempts already ran. Background jobs deliberately preserve
-    the exception so their registry reports the infrastructure failure as
-    ``state="failed"``.
+    unhandled, that aborts an experiment whose earlier attempts already ran.
+    Background jobs deliberately preserve the exception so their registry
+    reports the infrastructure failure as ``state="failed"``.
 
-    The MiniZinc runner already wraps its own launch this way
-    (``MiniZincExecutionError``); this is the CP-SAT protocol's equivalent, kept
-    at the protocol layer rather than inside the shared executor so MiniZinc's
-    handler keeps firing.
-
-    ``return_code`` is ``None`` because no child ever existed to exit — the same
-    "no meaningful exit status" contract the timeout branch uses, never a
-    synthesized code. ``duration_ms`` is 0: nothing ran.
+    Lives at the protocol layer rather than inside the shared executor so the
+    MiniZinc runner's own launch wrapper (``MiniZincExecutionError``) keeps
+    firing. ``return_code`` is ``None`` because no child ever existed to exit —
+    the same contract the timeout branch uses, never a synthesized code.
     """
     result = CpsatPythonResult(
         status="error",
@@ -420,6 +464,27 @@ def _spawn_failure_result(exc: OSError) -> CpsatPythonResult:
     return result
 
 
+def _error_result(child: ChildExecutionResult) -> CpsatPythonResult:
+    """Build the no-incumbent error result shared by every clean-exit failure.
+
+    Truncated output, an absent or unparseable result block, a nonzero exit, and
+    an envelope violation all produce the same shape — ``status="error"`` with no
+    solution or objective — and differ only in the diagnostic
+    ``_result_from_child`` derives from them.
+    """
+    return CpsatPythonResult(
+        status="error",
+        solution=None,
+        objective=None,
+        stdout=child.stdout,
+        stderr=child.stderr,
+        return_code=child.return_code,
+        timed_out=False,
+        truncated=child.truncated,
+        duration_ms=child.duration_ms,
+    )
+
+
 def _classify_child_result(
     child: ChildExecutionResult,
 ) -> tuple[CpsatPythonResult, tuple[str, str] | None]:
@@ -429,18 +494,15 @@ def _classify_child_result(
     ``_result_from_child``: it feeds the diagnostic and is never added to
     ``CpsatPythonResult``. It is NOT a "this run is a contract error" flag — on
     the timeout path it reports a dropped partial while the status stays the
-    executor-owned ``"timeout"``; only ``_result_from_child`` decides which
-    diagnostic a violation selects, keyed on ``timed_out``.
+    executor-owned ``"timeout"``.
     """
     if child.timed_out:
-        # Recover the best-so-far if the script emitted intermediate result blocks
-        # (e.g. one per improved solution from a CpSolverSolutionCallback). The
-        # last block wins; the unbuffered child (-u) is what lets it survive the
-        # kill. Status stays the executor-owned "timeout" — a partial is unproven,
-        # never "optimal". A partial that fails the envelope gate is dropped
-        # rather than recovered: an ill-typed block is not an incumbent. The
-        # violation is still returned so the drop shows up in the timeout
-        # diagnostic's details instead of vanishing.
+        # Recover the best-so-far from any intermediate result blocks (e.g. one per
+        # improved solution from a CpSolverSolutionCallback); the last wins, and the
+        # unbuffered child (-u) is what lets it survive the kill. Status stays the
+        # executor-owned "timeout" — a partial is unproven, never "optimal". A
+        # partial failing the envelope gate is dropped rather than recovered, but
+        # its violation is still returned so the drop reaches the diagnostic.
         partial = parse_last_json(child.stdout)
         partial_violation = _envelope_violation(partial) if partial is not None else None
         recoverable = partial if partial is not None and partial_violation is None else None
@@ -469,60 +531,21 @@ def _classify_child_result(
         )
 
     if child.truncated:
-        return (
-            CpsatPythonResult(
-                status="error",
-                solution=None,
-                objective=None,
-                stdout=child.stdout,
-                stderr=child.stderr,
-                return_code=child.return_code,
-                timed_out=False,
-                truncated=True,
-                duration_ms=child.duration_ms,
-            ),
-            None,
-        )
+        return _error_result(child), None
 
     parsed = parse_last_json(child.stdout)
     if parsed is None or child.return_code != 0:
-        return (
-            CpsatPythonResult(
-                status="error",
-                solution=None,
-                objective=None,
-                stdout=child.stdout,
-                stderr=child.stderr,
-                return_code=child.return_code,
-                timed_out=False,
-                truncated=False,
-                duration_ms=child.duration_ms,
-            ),
-            None,
-        )
+        return _error_result(child), None
 
     violation = _envelope_violation(parsed)
     if violation is not None:
-        return (
-            CpsatPythonResult(
-                status="error",
-                solution=None,
-                objective=None,
-                stdout=child.stdout,
-                stderr=child.stderr,
-                return_code=child.return_code,
-                timed_out=False,
-                truncated=False,
-                duration_ms=child.duration_ms,
-            ),
-            violation,
-        )
+        return _error_result(child), violation
 
-    status = normalize_status(parsed["status"])
     solution, objective, best_objective_bound = _extract_solution_objective(parsed)
     return (
         CpsatPythonResult(
-            status=status,
+            # The envelope gate above already proved membership in _SCRIPT_STATUSES.
+            status=cast(CpsatStatus, parsed["status"]),
             solution=solution,
             objective=objective,
             best_objective_bound=best_objective_bound,

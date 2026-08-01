@@ -12,6 +12,8 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from openconstraint_mcp.pyexec.core import (
+    _KEY_PATH_MAX_CHARS,
+    _envelope_violation,
     effective_checker_timeout_ms,
     run_cpsat_python,
     run_cpsat_python_file,
@@ -485,6 +487,154 @@ def test_run_cpsat_python_null_solution_is_a_contract_error() -> None:
     # emit `{}`, or a legitimate infeasible/unknown result becomes an error.
     payload = {"status": "infeasible", "objective": None, "solution": None}
     assert _envelope_error_field(payload) == "solution"
+
+
+# --- non-finite numbers nested inside `solution` ---------------------------
+#
+# `objective` has always been finiteness-checked. `solution` was not, so a NaN
+# buried in it reached three consumers that disagree: json.dumps writes a bare
+# `NaN` into the checker payload and the saved artifact, while a strict client's
+# decoder rejects or nulls it. The gate rejects at any depth.
+
+
+@pytest.mark.parametrize("literal", ["NaN", "Infinity", "-Infinity"])
+def test_run_cpsat_python_non_finite_solution_value_is_a_contract_error(literal: str) -> None:
+    # All three non-finite literals Python's decoder accepts, so an implementation
+    # reaching for math.isnan instead of math.isfinite fails two of these cases.
+    payload = f'{{"status": "optimal", "objective": 1, "solution": {{"x": {literal}}}}}'
+    result = _run_with_mocked_proc(stdout_content=payload)
+
+    assert result.status == "error"
+    assert result.diagnostic is not None
+    assert result.diagnostic.details is not None
+    assert result.diagnostic.details["field"] == 'solution["x"]'
+
+
+def test_run_cpsat_python_non_finite_inside_a_list_names_the_indexed_path() -> None:
+    # Proves the walk enters sequences, not just nested objects.
+    payload = '{"status": "optimal", "objective": 1, "solution": {"t": [1, {"start": NaN}]}}'
+    result = _run_with_mocked_proc(stdout_content=payload)
+
+    assert result.diagnostic is not None
+    assert result.diagnostic.details is not None
+    assert result.diagnostic.details["field"] == 'solution["t"][1]["start"]'
+
+
+def test_run_cpsat_python_non_finite_solution_drops_the_incumbent() -> None:
+    payload = '{"status": "optimal", "objective": 1, "solution": {"x": NaN}}'
+    result = _run_with_mocked_proc(stdout_content=payload)
+
+    assert result.solution is None
+
+
+def test_run_cpsat_python_non_finite_timeout_partial_is_not_recovered() -> None:
+    # Timeout stays executor-owned: the partial is dropped, not promoted to an error.
+    partial = '{"status": "feasible", "objective": 3, "solution": {"t": [{"s": NaN}]}}'
+    result = _run_with_mocked_proc(timeout=True, stdout_content=partial, timeout_ms=50)
+
+    assert result.status == "timeout"
+    assert result.solution is None
+    assert result.diagnostic is not None
+    assert result.diagnostic.details is not None
+    assert result.diagnostic.details["rejected_partial_field"] == 'solution["t"][0]["s"]'
+
+
+def test_envelope_gate_accepts_every_legal_leaf_type_around_finite_floats() -> None:
+    # Over-rejection guard. This is the test that fails if the walk reuses
+    # normalize_objective, which also rejects bool and non-numeric leaves — all of
+    # which are valid decision values (a machine name, a boolean assignment).
+    solution = {
+        "finite_float": 1.5,
+        "huge_int": 2**200,
+        "label": "machine-3",
+        "flag": True,
+        "unset": None,
+        "nested": {"deep": [0.0, -1, "x", False, None, {"deeper": 2.25}]},
+    }
+    payload = json.dumps({"status": "optimal", "objective": 1, "solution": solution})
+    result = _run_with_mocked_proc(stdout_content=payload)
+
+    assert result.status == "optimal"
+    assert result.solution == solution
+
+
+def test_envelope_violation_walks_nesting_deeper_than_the_recursion_limit() -> None:
+    # Calls the gate directly with a dict built in Python, NOT through stdout: the
+    # decoder's own ceiling is a C-stack artifact that differs by interpreter
+    # (~9,997 levels on 3.12, ~40,091 on 3.14 at a limit of 1000), so routing this
+    # through JSON would pin the test to a number that can drift out from under it —
+    # and the drift would be silent, since a decoder RecursionError looks exactly
+    # like the bug being guarded against. Every other case here covers integration.
+    depth = 5_000
+    assert depth > sys.getrecursionlimit()
+    solution: dict[str, Any] = {"leaf": math.nan}
+    for _ in range(depth):
+        solution = {"a": solution}
+
+    violation = _envelope_violation({"status": "optimal", "objective": 1, "solution": solution})
+
+    assert violation is not None
+    field, reason = violation
+    assert field.endswith('["leaf"]')
+    assert "finite" in reason
+
+
+def test_envelope_violation_key_path_distinguishes_punctuation_from_nesting() -> None:
+    # A literal key containing the path syntax must not read as real nesting: under
+    # a dotted encoding this solution and {"tasks": [_, _, _, {"start": nan}]} would
+    # both render as `solution.tasks[3].start`.
+    violation = _envelope_violation(
+        {"status": "optimal", "objective": 1, "solution": {"tasks[3].start": math.nan}}
+    )
+
+    assert violation is not None
+    assert violation[0] == 'solution["tasks[3].start"]'
+
+
+def test_envelope_violation_reports_the_first_non_finite_in_payload_order() -> None:
+    # A stack walk that pushes children without reversing them pops the LAST
+    # sibling first, so it would name `solution["b"]` here — not the offender a
+    # client's eye reaches first when scanning its own payload.
+    violation = _envelope_violation(
+        {
+            "status": "optimal",
+            "objective": 1,
+            "solution": {"a": [0.0, math.inf], "b": math.nan},
+        }
+    )
+
+    assert violation is not None
+    assert violation[0] == 'solution["a"][1]'
+
+
+def test_envelope_violation_elides_an_over_long_key_path() -> None:
+    # The path is built from the CHILD'S OWN key names, so it grows with the
+    # payload rather than with a fixed vocabulary: uncapped, a ~412 KB solution
+    # nested under 200-char keys yields a ~408 KB `field` that the diagnostic
+    # then repeats in its message. Same amplification guard as the status echo.
+    solution: dict[str, Any] = {"leaf": math.nan}
+    for _ in range(50):
+        solution = {"k" * 500: solution}
+
+    violation = _envelope_violation({"status": "optimal", "objective": 1, "solution": solution})
+
+    assert violation is not None
+    assert len(violation[0]) <= _KEY_PATH_MAX_CHARS
+
+
+def test_envelope_violation_elided_path_keeps_the_offending_leaf_key() -> None:
+    # Middle elision, not a head cut: the leaf key is the whole repair signal, so
+    # a truncation that dropped the tail would leave a client no better off than
+    # naming `solution` alone.
+    solution: dict[str, Any] = {"start": math.nan}
+    for _ in range(50):
+        solution = {"k" * 500: solution}
+
+    violation = _envelope_violation({"status": "optimal", "objective": 1, "solution": solution})
+
+    assert violation is not None
+    assert violation[0].startswith("solution[")
+    assert violation[0].endswith('["start"]')
 
 
 def test_run_cpsat_python_contract_error_diagnostic_details_are_field_reason_return_code() -> None:

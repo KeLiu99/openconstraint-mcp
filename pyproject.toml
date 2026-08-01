@@ -61,6 +61,15 @@ addopts = "-ra -m 'not integration'"
 markers = [
     "integration: exercises real subprocesses, platform-specific behavior, or a managed MiniZinc runtime (excluded from `just check`; run with `just integration`)",
 ]
+filterwarnings = [
+    # SEP-2577 deprecated the logging capability with no replacement for
+    # server-initiated status push. `_report_status` keeps `ctx.info` on purpose
+    # (see its docstring); the SDK warns from three rungs of that one call, which
+    # is 27 identical entries in the `just check` summary. Silenced for the gate
+    # ONLY — the runtime warning an operator sees on stderr is untouched, and the
+    # filter is pinned to this exact message so a new deprecation still surfaces.
+    "ignore:The logging capability is deprecated:mcp.shared.exceptions.MCPDeprecationWarning",
+]
 
 [tool.ruff]
 line-length = 100
