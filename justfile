@@ -81,6 +81,11 @@ squash commits:
     @git diff --cached --quiet
     @test "$$(git branch --show-current)" != master
     @test "$$(git branch --show-current)" != main
+    # Never reach past this branch's own commits: without this, `just squash 10`
+    # on a 3-commit branch would rewrite shared master history behind the
+    # force-push, which --force-with-lease cannot catch because the lease is on
+    # the branch ref, not on master's.
+    @test "{{commits}}" -le "$$(git rev-list --count origin/master..HEAD)"
     git reset --soft HEAD~{{commits}}
     git commit --reuse-message=ORIG_HEAD
     git push --force-with-lease

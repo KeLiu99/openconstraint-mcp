@@ -12,6 +12,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from openconstraint_mcp.pyexec.core import (
+    _KEY_PATH_MAX_CHARS,
     _envelope_violation,
     effective_checker_timeout_ms,
     run_cpsat_python,
@@ -588,6 +589,52 @@ def test_envelope_violation_key_path_distinguishes_punctuation_from_nesting() ->
 
     assert violation is not None
     assert violation[0] == 'solution["tasks[3].start"]'
+
+
+def test_envelope_violation_reports_the_first_non_finite_in_payload_order() -> None:
+    # A stack walk that pushes children without reversing them pops the LAST
+    # sibling first, so it would name `solution["b"]` here — not the offender a
+    # client's eye reaches first when scanning its own payload.
+    violation = _envelope_violation(
+        {
+            "status": "optimal",
+            "objective": 1,
+            "solution": {"a": [0.0, math.inf], "b": math.nan},
+        }
+    )
+
+    assert violation is not None
+    assert violation[0] == 'solution["a"][1]'
+
+
+def test_envelope_violation_elides_an_over_long_key_path() -> None:
+    # The path is built from the CHILD'S OWN key names, so it grows with the
+    # payload rather than with a fixed vocabulary: uncapped, a ~412 KB solution
+    # nested under 200-char keys yields a ~408 KB `field` that the diagnostic
+    # then repeats in its message. Same amplification guard as the status echo.
+    solution: dict[str, Any] = {"leaf": math.nan}
+    for _ in range(50):
+        solution = {"k" * 500: solution}
+
+    violation = _envelope_violation({"status": "optimal", "objective": 1, "solution": solution})
+
+    assert violation is not None
+    assert len(violation[0]) <= _KEY_PATH_MAX_CHARS
+
+
+def test_envelope_violation_elided_path_keeps_the_offending_leaf_key() -> None:
+    # Middle elision, not a head cut: the leaf key is the whole repair signal, so
+    # a truncation that dropped the tail would leave a client no better off than
+    # naming `solution` alone.
+    solution: dict[str, Any] = {"start": math.nan}
+    for _ in range(50):
+        solution = {"k" * 500: solution}
+
+    violation = _envelope_violation({"status": "optimal", "objective": 1, "solution": solution})
+
+    assert violation is not None
+    assert violation[0].startswith("solution[")
+    assert violation[0].endswith('["start"]')
 
 
 def test_run_cpsat_python_contract_error_diagnostic_details_are_field_reason_return_code() -> None:

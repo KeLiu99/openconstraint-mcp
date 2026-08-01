@@ -135,6 +135,15 @@ _SCRIPT_STATUSES: frozenset[str] = frozenset(_SCRIPT_STATUS_ORDER)
 # client needs to see to repair its emit block.
 _STATUS_ECHO_MAX_CHARS: int = 40
 
+# Bounds the offending key path echoed back with a nested-finiteness violation
+# (see `_nonfinite_violation`). Same threefold-amplification argument as the
+# status echo above, but a path is assembled from the child's OWN key names, so
+# it grows with the payload instead of with a fixed vocabulary: a 412 KB
+# solution nested under 200-char keys yields a 408 KB path. Elided in the
+# MIDDLE, because the two ends are what locate the value — the root, and the
+# offending leaf key.
+_KEY_PATH_MAX_CHARS: int = 120
+
 
 def validate_checker_timeout_ms(checker_timeout_ms: int | None) -> None:
     """Reject a non-positive explicit checker timeout.
@@ -296,8 +305,16 @@ def parse_last_json(text: str) -> dict | None:
     return found
 
 
+def _elide_key_path(path: str) -> str:
+    """Middle-elide a key path over ``_KEY_PATH_MAX_CHARS``, keeping both ends."""
+    if len(path) <= _KEY_PATH_MAX_CHARS:
+        return path
+    keep = (_KEY_PATH_MAX_CHARS - 1) // 2
+    return f"{path[:keep]}…{path[-keep:]}"
+
+
 def _nonfinite_violation(solution: dict) -> tuple[str, str] | None:
-    """Return a ``(key path, reason)`` for a non-finite float in ``solution``.
+    """Return the FIRST ``(key path, reason)`` non-finite float in ``solution``.
 
     Walks every ``dict`` value and ``list`` element at any depth: a
     nested ``NaN``/``Infinity`` is worse than a top-level one, because the
@@ -318,17 +335,23 @@ def _nonfinite_violation(solution: dict) -> tuple[str, str] | None:
 
     Path steps are bracketed and JSON-quoted (``solution["tasks"][3]["start"]``)
     so a literal key containing ``.`` or ``[`` stays distinguishable from real
-    nesting.
+    nesting, and the finished path is length-capped by ``_elide_key_path``.
     """
     stack: list[tuple[str, object]] = [("solution", solution)]
     while stack:
         path, value = stack.pop()
+        if isinstance(value, float) and not math.isfinite(value):
+            return _elide_key_path(path), f"must be a finite number; got {value}"
         if isinstance(value, dict):
-            stack.extend((f"{path}[{json.dumps(key)}]", item) for key, item in value.items())
+            children = [(f"{path}[{json.dumps(key)}]", item) for key, item in value.items()]
         elif isinstance(value, list):
-            stack.extend((f"{path}[{index}]", item) for index, item in enumerate(value))
-        elif isinstance(value, float) and not math.isfinite(value):
-            return path, f"must be a finite number; got {value}"
+            children = [(f"{path}[{index}]", item) for index, item in enumerate(value)]
+        else:
+            continue
+        # Reversed, so `pop()` takes children left to right and the reported path
+        # is the first offender in the client's OWN payload order — the one its
+        # eye lands on when scanning for the value to repair.
+        stack.extend(reversed(children))
     return None
 
 
