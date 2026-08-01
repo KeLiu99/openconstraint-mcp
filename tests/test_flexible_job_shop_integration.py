@@ -53,7 +53,7 @@ async def test_mk01_model_and_checker_reach_an_accepted_verdict_through_the_mcp_
     # resolved next to their own script, which is exactly what the path-based
     # tool's cwd contract makes work. The results-dir argument is deliberately
     # omitted so the run writes nothing into the checkout.
-    _content, result = await mcp.call_tool(
+    call_result = await mcp.call_tool(
         "run_cpsat_python_file_checked",
         {
             "script_path": str(_EXAMPLE_DIR / "model.py"),
@@ -63,6 +63,8 @@ async def test_mk01_model_and_checker_reach_an_accepted_verdict_through_the_mcp_
             "timeout_ms": 60_000,
         },
     )
+    assert call_result.structured_content is not None
+    result: dict[str, Any] = call_result.structured_content
     checker: dict[str, Any] = result["checker"]
 
     assert result["status"] == "optimal"

@@ -195,8 +195,7 @@ def check_payload(payload: dict[str, Any]) -> dict[str, Any]:
             )
         if duration != expected_duration:
             errors.append(
-                f"job {job_id} task {task_id} has duration {duration}, "
-                f"expected {expected_duration}"
+                f"job {job_id} task {task_id} has duration {duration}, expected {expected_duration}"
             )
         if start < 0 or end != start + duration:
             errors.append(f"job {job_id} task {task_id} has inconsistent start/duration/end")

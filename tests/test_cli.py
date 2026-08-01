@@ -575,7 +575,7 @@ def test_configure_runtime_config_write_failure_surfaces_cleanly(
 # Cold-import and entry-point subprocess tests
 #
 # These run in a fresh interpreter rather than evicting sys.modules in-process:
-# cached third-party intermediaries (e.g. mcp.server.fastmcp, already imported
+# cached third-party intermediaries (e.g. mcp.server.mcpserver, already imported
 # by another test in this session) would otherwise satisfy a re-import without
 # re-importing httpx, making an in-process eviction check pass falsely.
 

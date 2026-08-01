@@ -1021,8 +1021,15 @@ status feedback while MiniZinc is running, on two MCP channels:
   signal, so render them as a spinner, stepper, or status text, never as a
   determinate percent bar.
 - **Log notifications** (`notifications/message`, level `info`) carry the same
-  milestone messages and are sent for every request, no token required — so
-  clients that surface MCP server logs always show activity state.
+  milestone messages, but delivery depends on the protocol version the client
+  negotiates. On a handshake-era session (`2025-11-25` and earlier) they are
+  sent for every request, no token required — so clients that surface MCP
+  server logs always show activity state. On `2026-07-28` and later the
+  logging capability became a per-request opt-in (SEP-2577): the server still
+  emits every milestone, but the SDK drops it unless that request's `_meta`
+  asked for `info`-level logs. **Treat this channel as best-effort** — a client
+  that wants guaranteed activity feedback should send a `progressToken` and
+  read the progress channel, which is unaffected on both.
 
 The MiniZinc subprocess runs in a worker thread, so both channels are
 delivered while the solve is still in flight and the server stays responsive
@@ -1676,10 +1683,13 @@ echoes the effective `checker_timeout_ms` (the supplied value, else
 ```python
 # Submit returns immediately with a job_id; poll until a terminal state,
 # then read the diagnostic checker verdict off the job status.
-job = await mcp.call_tool("submit_cpsat_python_job", {
-    "source": open("examples/cpsat_python/graph_coloring.py").read(),
-    "checker": open("examples/cpsat_python/graph_coloring_checker.py").read(),
-})
+job = await mcp.call_tool(
+    "submit_cpsat_python_job",
+    {
+        "source": open("examples/cpsat_python/graph_coloring.py").read(),
+        "checker": open("examples/cpsat_python/graph_coloring_checker.py").read(),
+    },
+)
 status = await mcp.call_tool("get_cpsat_python_job", {"job_id": job["job_id"]})
 # Poll get_cpsat_python_job until status["state"] is a terminal state, then:
 # status["checker"]["status"] == "accepted" iff the checker accepted the solution
@@ -1797,13 +1807,16 @@ deterministic.
 # The client supplies every attempt's complete script; the server never
 # generates, diffs, or merges them — it only executes, verifies, and picks
 # the winner.
-result = await mcp.call_tool("run_cpsat_python_experiment", {
-    "attempts": [
-        {"name": "baseline", "source": open("model_v1.py").read()},
-        {"name": "redundant_constraint", "source": open("model_v2.py").read()},
-    ],
-    "objective_sense": "minimize",
-})
+result = await mcp.call_tool(
+    "run_cpsat_python_experiment",
+    {
+        "attempts": [
+            {"name": "baseline", "source": open("model_v1.py").read()},
+            {"name": "redundant_constraint", "source": open("model_v2.py").read()},
+        ],
+        "objective_sense": "minimize",
+    },
+)
 # result["status"] == "winner" and result["winner_name"] name the best accepted
 # attempt; result["attempts"] carries every attempt's status/objective/verdict.
 ```
@@ -1814,15 +1827,24 @@ so a shared sibling data file is read once per child rather than inlined once
 per attempt:
 
 ```python
-result = await mcp.call_tool("run_cpsat_python_experiment", {
-    "attempts": [
-        {"name": "baseline", "script_path": "/abs/path/model_v1.py",
-         "args": ["data_ft10.json"]},
-        {"name": "pairwise", "script_path": "/abs/path/model_v2.py",
-         "args": ["data_ft10.json"]},
-    ],
-    "objective_sense": "minimize",
-})
+result = await mcp.call_tool(
+    "run_cpsat_python_experiment",
+    {
+        "attempts": [
+            {
+                "name": "baseline",
+                "script_path": "/abs/path/model_v1.py",
+                "args": ["data_ft10.json"],
+            },
+            {
+                "name": "pairwise",
+                "script_path": "/abs/path/model_v2.py",
+                "args": ["data_ft10.json"],
+            },
+        ],
+        "objective_sense": "minimize",
+    },
+)
 # These rows carry used_script_path=True, so neither can be attached as
 # save_verified_cpsat_python provenance — see "Persisting an attempt from an
 # experiment".
@@ -1834,12 +1856,15 @@ result = await mcp.call_tool("run_cpsat_python_experiment", {
 # Pass the checker source directly; the server runs it in a child process
 # and only commits when it returns accepted with an empty errors list.
 checker_source = open("examples/cpsat_python/graph_coloring_checker.py").read()
-result = await mcp.call_tool("save_verified_cpsat_python", {
-    "source": open("examples/cpsat_python/graph_coloring.py").read(),
-    "target_dir": "/absolute/path/to/save-dir",
-    "problem": "3-color a 5-vertex pentagon graph",
-    "checker": checker_source,
-})
+result = await mcp.call_tool(
+    "save_verified_cpsat_python",
+    {
+        "source": open("examples/cpsat_python/graph_coloring.py").read(),
+        "target_dir": "/absolute/path/to/save-dir",
+        "problem": "3-color a 5-vertex pentagon graph",
+        "checker": checker_source,
+    },
+)
 # result.verification_level == "checked" iff the checker accepted
 ```
 
@@ -1849,11 +1874,14 @@ result = await mcp.call_tool("save_verified_cpsat_python", {
 # Expectation gate: quality check, NOT a proof of global optimality.
 # A script may pass this threshold and still not be the theoretically
 # best solution — the server only verifies what the script reported.
-result = await mcp.call_tool("save_verified_cpsat_python", {
-    "source": open("examples/cpsat_python/assignment.py").read(),
-    "target_dir": "/absolute/path/to/save-dir",
-    "expectation": {"objective_sense": "minimize", "objective_threshold": 5},
-})
+result = await mcp.call_tool(
+    "save_verified_cpsat_python",
+    {
+        "source": open("examples/cpsat_python/assignment.py").read(),
+        "target_dir": "/absolute/path/to/save-dir",
+        "expectation": {"objective_sense": "minimize", "objective_threshold": 5},
+    },
+)
 # result.verification_level == "expectation" iff both reported and threshold gates passed
 # result.expectation_passed == True means objective <= 5 (not that no lower cost exists)
 ```

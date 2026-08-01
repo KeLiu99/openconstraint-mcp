@@ -9,8 +9,8 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-from mcp.server.fastmcp.exceptions import ToolError
-from mcp.types import CallToolResult
+from mcp.server.mcpserver.exceptions import ToolError
+from mcp_types import CallToolResult
 
 from openconstraint_mcp.jobs.registry import JobRegistry
 from openconstraint_mcp.schemas.cpsat import (
@@ -104,24 +104,19 @@ async def test_list_available_solvers_surfaces_actionable_error_on_binary_failur
 
 
 def _structured(result: Any) -> dict[str, Any]:
-    """Extract the structured-content dict from a FastMCP call_tool result.
+    """Extract the structured-content dict from an MCPServer call_tool result.
 
-    FastMCP returns direct ``CallToolResult`` objects for tools that control
-    their own model-visible content, and a tuple of
-    ``(content_blocks, structured_content)`` for ordinary structured returns.
+    ``MCPServer.call_tool()`` returns a direct ``CallToolResult`` for every
+    tool call.
     """
-    if isinstance(result, CallToolResult):
-        assert result.structuredContent is not None
-        return result.structuredContent
-    return result[1]
+    assert isinstance(result, CallToolResult)
+    assert result.structured_content is not None
+    return result.structured_content
 
 
 def _content_text(result: Any) -> str:
-    if isinstance(result, CallToolResult):
-        content = result.content
-    else:
-        content = result[0]
-    return "\n".join(block.text for block in content if hasattr(block, "text"))
+    assert isinstance(result, CallToolResult)
+    return "\n".join(block.text for block in result.content if hasattr(block, "text"))
 
 
 def _record_data_run(
@@ -332,7 +327,7 @@ async def test_solve_minizinc_model_tool_is_listed() -> None:
     assert "solve_minizinc_model" in names
 
     tool = next(t for t in tools if t.name == "solve_minizinc_model")
-    properties = tool.inputSchema.get("properties", {})
+    properties = tool.input_schema.get("properties", {})
     assert {
         "model",
         "data",
@@ -383,7 +378,7 @@ async def test_solve_minizinc_model_happy_path(
     assert structured["solutions"] == [{"x": 3}]
     assert structured["objective"] is None
     assert structured["checker"] is None
-    # Parsed statistics objects flow through FastMCP structured content.
+    # Parsed statistics objects flow through MCPServer structured content.
     assert structured["statistics"] == {"solveTime": "0.01"}
 
     # The model-visible default content also highlights non-empty statistics,
@@ -782,7 +777,7 @@ async def test_check_minizinc_model_tool_is_listed() -> None:
     assert "check_minizinc_model" in names
 
     tool = next(t for t in tools if t.name == "check_minizinc_model")
-    properties = tool.inputSchema.get("properties", {})
+    properties = tool.input_schema.get("properties", {})
     assert {"model", "data", "solver", "timeout_ms"} <= set(properties.keys())
 
 
@@ -869,7 +864,7 @@ async def test_inspect_minizinc_model_tool_is_listed() -> None:
     assert "inspect_minizinc_model" in names
 
     tool = next(t for t in tools if t.name == "inspect_minizinc_model")
-    properties = tool.inputSchema.get("properties", {})
+    properties = tool.input_schema.get("properties", {})
     assert {"model", "data", "solver", "timeout_ms"} <= set(properties.keys())
     # Decision 8: inspection exposes no solve-only search controls.
     assert not (_SOLVE_ONLY_CONTROLS & set(properties.keys()))
@@ -884,7 +879,7 @@ async def test_inspect_minizinc_files_tool_is_listed() -> None:
     assert "inspect_minizinc_files" in names
 
     tool = next(t for t in tools if t.name == "inspect_minizinc_files")
-    properties = tool.inputSchema.get("properties", {})
+    properties = tool.input_schema.get("properties", {})
     assert {"model_path", "data_path", "solver", "timeout_ms"} <= set(properties.keys())
     assert not (_SOLVE_ONLY_CONTROLS & set(properties.keys()))
 
@@ -900,8 +895,8 @@ async def test_inspect_tools_output_schema_advertises_field_names(tool_name: str
     tools = await mcp.list_tools()
 
     tool = next(t for t in tools if t.name == tool_name)
-    assert tool.outputSchema is not None
-    type_props = tool.outputSchema["$defs"]["InterfaceType"]["properties"]
+    assert tool.output_schema is not None
+    type_props = tool.output_schema["$defs"]["InterfaceType"]["properties"]
     assert set(type_props) == {"base_type", "dim", "is_set", "is_optional"}
     assert "type" not in type_props
     assert "set" not in type_props
@@ -946,7 +941,7 @@ async def test_find_unsat_core_tool_is_listed() -> None:
     assert "find_unsat_core" in names
 
     tool = next(t for t in tools if t.name == "find_unsat_core")
-    properties = tool.inputSchema.get("properties", {})
+    properties = tool.input_schema.get("properties", {})
     assert {"model", "data", "timeout_ms"} <= set(properties.keys())
     assert "solver" not in properties
 
@@ -1022,7 +1017,7 @@ async def test_file_tools_are_listed_with_expected_properties() -> None:
     assert "solve_and_check_minizinc_files" not in by_name
 
     for name in ("solve_minizinc_files", "check_minizinc_files"):
-        properties = by_name[name].inputSchema.get("properties", {})
+        properties = by_name[name].input_schema.get("properties", {})
         assert {"model_path", "data_path", "solver", "timeout_ms"} <= set(properties.keys())
         # The two-mode flag was removed: file tools always run CLI-style.
         assert "allow_local_includes" not in properties
@@ -1030,14 +1025,14 @@ async def test_file_tools_are_listed_with_expected_properties() -> None:
     # Search-control flags are solve-only at the MCP surface: present on the
     # solve file tool, absent from the compile-check file tool.
     _search_flags = {"free_search", "parallel", "random_seed", "all_solutions", "num_solutions"}
-    solve_files_props = by_name["solve_minizinc_files"].inputSchema.get("properties", {})
+    solve_files_props = by_name["solve_minizinc_files"].input_schema.get("properties", {})
     assert _search_flags <= set(solve_files_props.keys())
     assert "checker_path" in solve_files_props
-    check_files_props = by_name["check_minizinc_files"].inputSchema.get("properties", {})
+    check_files_props = by_name["check_minizinc_files"].input_schema.get("properties", {})
     assert not (_search_flags & set(check_files_props.keys()))
     assert "checker_path" not in check_files_props
 
-    findmus_props = by_name["find_unsat_core_files"].inputSchema.get("properties", {})
+    findmus_props = by_name["find_unsat_core_files"].input_schema.get("properties", {})
     assert {"model_path", "data_path", "timeout_ms"} <= set(findmus_props.keys())
     assert "solver" not in findmus_props
     assert "allow_local_includes" not in findmus_props
@@ -1326,7 +1321,7 @@ async def test_solution_checker_is_folded_into_solve_minizinc_files() -> None:
     assert "solve_and_check_minizinc_files" not in names
 
     tool = next(t for t in tools if t.name == "solve_minizinc_files")
-    properties = tool.inputSchema.get("properties", {})
+    properties = tool.input_schema.get("properties", {})
     assert {"model_path", "checker_path", "data_path", "solver", "timeout_ms"} <= set(properties)
     assert _SOLVE_ONLY_CONTROLS <= set(properties)
 
@@ -1625,7 +1620,7 @@ async def test_report_status_sends_info_log_with_same_message() -> None:
 
 @pytest.mark.asyncio
 async def test_report_status_noops_when_request_context_unavailable() -> None:
-    # FastMCP raises this exact ValueError for direct calls outside a real
+    # MCPServer raises this exact ValueError for direct calls outside a real
     # JSON-RPC request (the mode every mcp.call_tool test in this file uses).
     ctx = _FakeStatusContext(fail_with=ValueError(_CONTEXT_UNAVAILABLE_MESSAGE))
 
@@ -1661,13 +1656,13 @@ def _assert_dual_channel_schedule(ctx: _FakeStatusContext, final_message: str) -
 
 @pytest.mark.asyncio
 async def test_tool_schemas_do_not_expose_context_or_progress_arguments() -> None:
-    # The ctx parameter is protocol plumbing: FastMCP must keep it (and any
+    # The ctx parameter is protocol plumbing: MCPServer must keep it (and any
     # progress-token argument) out of every advertised tool input schema.
     mcp = create_mcp_server()
     tools = await mcp.list_tools()
 
     for tool in tools:
-        properties = set(tool.inputSchema.get("properties", {}).keys())
+        properties = set(tool.input_schema.get("properties", {}).keys())
         assert not ({"ctx", "context", "progress_token", "progressToken"} & properties), tool.name
 
 
@@ -1859,7 +1854,7 @@ async def test_save_verified_minizinc_model_is_listed_with_expected_schema() -> 
     tools = await mcp.list_tools()
 
     tool = next(t for t in tools if t.name == "save_verified_minizinc_model")
-    properties = set(tool.inputSchema["properties"])
+    properties = set(tool.input_schema["properties"])
     assert {
         "model",
         "target_dir",
@@ -1878,7 +1873,7 @@ async def test_save_verified_minizinc_model_is_listed_with_expected_schema() -> 
     } <= properties
     # The trailing Context parameter is server plumbing, never client schema.
     assert "ctx" not in properties
-    assert set(tool.inputSchema.get("required", [])) == {"model", "target_dir"}
+    assert set(tool.input_schema.get("required", [])) == {"model", "target_dir"}
 
 
 @pytest.mark.asyncio
@@ -2076,7 +2071,7 @@ async def test_job_tools_are_listed_with_expected_properties() -> None:
         assert name in by_name
 
     # submit mirrors solve_minizinc_model's inline surface and search controls.
-    submit_props = by_name["submit_solve_job"].inputSchema.get("properties", {})
+    submit_props = by_name["submit_solve_job"].input_schema.get("properties", {})
     assert {
         "model",
         "data",
@@ -2091,8 +2086,8 @@ async def test_job_tools_are_listed_with_expected_properties() -> None:
     } <= set(submit_props)
 
     for name in ("get_solve_job", "cancel_solve_job"):
-        assert "job_id" in by_name[name].inputSchema.get("properties", {})
-    assert by_name["list_solve_jobs"].inputSchema.get("properties", {}) == {}
+        assert "job_id" in by_name[name].input_schema.get("properties", {})
+    assert by_name["list_solve_jobs"].input_schema.get("properties", {}) == {}
 
 
 @pytest.mark.asyncio
@@ -2369,7 +2364,7 @@ async def test_portfolio_job_tools_are_listed_with_expected_properties() -> None
     ):
         assert name in by_name
 
-    submit_props = by_name["submit_portfolio_job"].inputSchema.get("properties", {})
+    submit_props = by_name["submit_portfolio_job"].input_schema.get("properties", {})
     assert {
         "models",
         "solvers",
@@ -2385,8 +2380,8 @@ async def test_portfolio_job_tools_are_listed_with_expected_properties() -> None
     } <= set(submit_props)
 
     for name in ("get_portfolio_job", "cancel_portfolio_job"):
-        assert "job_id" in by_name[name].inputSchema.get("properties", {})
-    assert by_name["list_portfolio_jobs"].inputSchema.get("properties", {}) == {}
+        assert "job_id" in by_name[name].input_schema.get("properties", {})
+    assert by_name["list_portfolio_jobs"].input_schema.get("properties", {}) == {}
 
 
 @pytest.mark.asyncio
@@ -3079,7 +3074,7 @@ async def test_run_cpsat_python_file_tool_schema_includes_seed_and_config() -> N
     mcp = create_mcp_server()
     tools = await mcp.list_tools()
     tool = next(t for t in tools if t.name == "run_cpsat_python_file")
-    props = set(tool.inputSchema["properties"])
+    props = set(tool.input_schema["properties"])
     assert {"seed", "config"} <= props
 
 
@@ -3657,7 +3652,7 @@ async def test_save_verified_cpsat_python_tool_schema_includes_new_params() -> N
     mcp = create_mcp_server()
     tools = await mcp.list_tools()
     tool = next(t for t in tools if t.name == "save_verified_cpsat_python")
-    props = set(tool.inputSchema["properties"])
+    props = set(tool.input_schema["properties"])
     assert {
         "source",
         "target_dir",
@@ -3669,7 +3664,7 @@ async def test_save_verified_cpsat_python_tool_schema_includes_new_params() -> N
     assert "ctx" not in props
     # `target_dir` is required only for a real save; verify_only=true omits it,
     # a condition the generated JSON schema cannot express (enforced at runtime).
-    assert set(tool.inputSchema.get("required", [])) == {"source"}
+    assert set(tool.input_schema.get("required", [])) == {"source"}
 
 
 @pytest.mark.asyncio
@@ -3750,7 +3745,7 @@ async def test_save_verified_cpsat_python_tool_accepts_nested_expectation(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    """FastMCP coerces nested `expectation` dict to CpsatExpectation."""
+    """MCPServer coerces nested `expectation` dict to CpsatExpectation."""
     received: dict[str, Any] = {}
     monkeypatch.setattr(
         "openconstraint_mcp.pyexec.save.run_cpsat_python",
@@ -3791,7 +3786,8 @@ async def test_save_verified_cpsat_python_tool_accepts_nested_expectation(
 async def test_save_verified_cpsat_python_tool_rejects_invalid_nested_threshold(
     tmp_path: Path,
 ) -> None:
-    """An invalid nested expectation (NaN threshold) is rejected by FastMCP at the tool boundary."""
+    """An invalid nested expectation (NaN threshold) is rejected by MCPServer at the tool
+    boundary."""
     mcp = create_mcp_server()
     import math
 
@@ -3862,7 +3858,7 @@ async def test_save_verified_cpsat_python_tool_schema_includes_seed() -> None:
     mcp = create_mcp_server()
     tools = await mcp.list_tools()
     tool = next(t for t in tools if t.name == "save_verified_cpsat_python")
-    assert "seed" in set(tool.inputSchema["properties"])
+    assert "seed" in set(tool.input_schema["properties"])
 
 
 @pytest.mark.asyncio
@@ -3890,7 +3886,7 @@ async def test_save_verified_cpsat_python_tool_rejects_bool_seed(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    # `seed: StrictInt | None` makes FastMCP/pydantic reject a JSON boolean at the
+    # `seed: StrictInt | None` makes MCPServer/pydantic reject a JSON boolean at the
     # tool boundary instead of silently coercing `true` to int 1, so the MCP surface
     # enforces the documented "non-bool integer" contract rather than relying on the
     # function-level guard in save.py (which only protects a direct Python call; see
@@ -3921,7 +3917,7 @@ async def test_load_tabular_data_tool_is_listed_with_its_pagination_inputs() -> 
     tools = await mcp.list_tools()
 
     tool = next(t for t in tools if t.name == "load_tabular_data")
-    properties = tool.inputSchema.get("properties", {})
+    properties = tool.input_schema.get("properties", {})
     assert {"path", "sheet", "has_header", "row_offset", "max_rows"} <= set(properties.keys())
 
 
@@ -3931,7 +3927,7 @@ async def test_write_tabular_result_tool_is_listed_with_its_inputs() -> None:
     tools = await mcp.list_tools()
 
     tool = next(t for t in tools if t.name == "write_tabular_result")
-    properties = tool.inputSchema.get("properties", {})
+    properties = tool.input_schema.get("properties", {})
     assert {"headers", "rows", "target_path", "overwrite"} <= set(properties.keys())
 
 
@@ -4031,7 +4027,7 @@ async def test_write_tabular_result_rejects_a_nested_cell_before_touching_the_di
     target = tmp_path / "out.csv"
 
     mcp = create_mcp_server()
-    with pytest.raises(Exception):  # noqa: B017 - FastMCP wraps schema failures in its own type
+    with pytest.raises(Exception):  # noqa: B017 - MCPServer wraps schema failures in its own type
         await mcp.call_tool(
             "write_tabular_result",
             {"headers": ["a"], "rows": [[["nested"]]], "target_path": str(target)},

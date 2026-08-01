@@ -67,9 +67,8 @@ jobs:
 
   macos-acceptance:
     # Apple Silicon (arm64) managed-runtime acceptance. Heavy — it downloads the
-    # real ~170MB MiniZinc .dmg and is the release gate from
-    # docs/plans/2026-06-10-install-runtime-macos-arm64.md, so it runs only on
-    # manual dispatch, never on every push/PR.
+    # real ~170MB MiniZinc .dmg and is the managed-runtime release gate, so it
+    # runs only on manual dispatch, never on every push/PR.
     if: github.event_name == 'workflow_dispatch'
     runs-on: macos-14
     env:

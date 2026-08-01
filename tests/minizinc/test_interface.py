@@ -49,7 +49,7 @@ def _ok_result() -> ModelInspectionResult:
 
 
 def test_inspection_result_dump_uses_field_names_not_minizinc_keys() -> None:
-    # FastMCP serializes structured output via model_dump(mode="json", by_alias=True).
+    # MCPServer serializes structured output via model_dump(mode="json", by_alias=True).
     # With no aliases that path must emit the public field names
     # base_type/is_set/is_optional — never MiniZinc's raw "type"/"set"/"optional" —
     # so outputSchema and structuredContent agree.

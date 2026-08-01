@@ -184,9 +184,9 @@ MCP_SERVER_INSTRUCTIONS = (
     "\n"
     "PROGRESS: the MiniZinc check/inspect/solve/unsat-core tools emit status "
     "feedback while running — MCP progress notifications when the request "
-    "carries `_meta.progressToken`, plus info-level log notifications. These "
-    "are stage markers, not a completion percentage, so never render a "
-    "percent bar."
+    "carries `_meta.progressToken`, plus best-effort info-level log "
+    "notifications where the client accepts them. These are stage markers, "
+    "not a completion percentage, so never render a percent bar."
 )
 
 # Core-profile server instructions: the default `stdio` toolset advertises only

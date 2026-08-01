@@ -11,8 +11,8 @@ from pathlib import Path
 from typing import Annotated, Any, Literal, ParamSpec, TypeVar, cast
 
 from anyio import to_thread
-from mcp.server.fastmcp import Context, FastMCP
-from mcp.types import CallToolResult, TextContent
+from mcp.server.mcpserver import Context, MCPServer
+from mcp_types import CallToolResult, TextContent
 from pydantic import BaseModel, JsonValue, StrictInt
 
 from .jobs.portfolio_registry import PortfolioJobRegistry
@@ -233,7 +233,7 @@ def _wrap_result[ResultT: BaseModel](
     """Wrap a result model as formatter-rendered text content plus full structured output."""
     return CallToolResult(
         content=[TextContent(type="text", text=formatter(result))],
-        structuredContent=result.model_dump(mode="json"),
+        structured_content=result.model_dump(mode="json"),
     )
 
 
@@ -255,20 +255,30 @@ async def _report_status(
     Emits ``notifications/progress`` (delivered only when the request carried
     ``_meta.progressToken`` — i.e. only reaches a client that registered a
     progress callback for the call; the SDK no-ops otherwise) and an
-    ``info``-level ``notifications/message`` log (delivered regardless of
-    token), so clients that never registered a progress callback still see
-    activity state. ``total`` is omitted by default on purpose: these are
-    indeterminate stage counters, not a solver completion percentage, and
-    reporting a total would invite a misleading percent-complete UI. Outside a
-    real request the SDK raises ``ValueError(_CONTEXT_UNAVAILABLE_MESSAGE)``;
-    only that exact case is swallowed — any other error from tool code still
-    propagates.
+    ``info``-level ``notifications/message`` log. The log is BEST-EFFORT, not a
+    guaranteed fallback: it reaches a client that never registered a progress
+    callback only on a handshake-era session (see the SEP-2577 note below).
+    ``total`` is omitted by default on purpose: these are indeterminate stage
+    counters, not a solver completion percentage, and reporting a total would
+    invite a misleading percent-complete UI. Outside a real request the SDK
+    raises ``ValueError(_CONTEXT_UNAVAILABLE_MESSAGE)``; only that exact case
+    is swallowed — any other error from tool code still propagates.
+
+    ``Context.info`` is deprecated (SEP-2577: the logging capability is
+    deprecated as of protocol 2026-07-28) with no non-deprecated replacement for
+    server-initiated status push. Kept rather than dropped: on a handshake-era
+    session (<= 2025-11-25) the notification is still delivered unconditionally,
+    so removing it would cost those clients their only activity feedback when
+    they did not request progress. On a 2026-07-28 session it is DROPPED unless
+    that request's ``_meta`` opted in at ``info`` level — see
+    ``mcp.server.session.send_log_message``. Progress notifications are
+    unaffected either way.
     """
     if ctx is None:
         return
     try:
         await ctx.report_progress(progress=progress, total=total, message=message)
-        await ctx.info(message)
+        await ctx.info(message)  # type: ignore[deprecated]
     except ValueError as exc:
         if str(exc) != _CONTEXT_UNAVAILABLE_MESSAGE:
             raise
@@ -411,7 +421,7 @@ def _as_mcp_error(
     real bug, not an actionable user message).
 
     ``functools.wraps`` preserves the wrapped tool's signature and annotations so
-    FastMCP derives an unchanged schema from the decorated tool.
+    MCPServer derives an unchanged schema from the decorated tool.
     """
     caught = exc_types or _DEFAULT_MCP_ERROR_TYPES
 
@@ -448,7 +458,7 @@ def _make_lifespan(
     registry: JobRegistry,
     cpsat_registry: CpsatJobRegistry,
     child_tracker: ChildProcessTracker,
-) -> Callable[[FastMCP[Any]], AbstractAsyncContextManager[None]]:
+) -> Callable[[MCPServer[Any]], AbstractAsyncContextManager[None]]:
     """Build the server lifespan bound to the registries and ``child_tracker``.
 
     Teardown terminates every in-flight child so none is orphaned:
@@ -459,7 +469,7 @@ def _make_lifespan(
     """
 
     @asynccontextmanager
-    async def _lifespan(server: FastMCP[Any]) -> AsyncGenerator[None]:
+    async def _lifespan(server: MCPServer[Any]) -> AsyncGenerator[None]:
         _log_boot_diagnostic()
         try:
             yield
@@ -553,8 +563,8 @@ def _run_cpsat_python_file_checked_with_replay(
         )
 
 
-def create_mcp_server(toolset: str = "full") -> FastMCP:
-    """Build a fresh FastMCP server for the given ``toolset``.
+def create_mcp_server(toolset: str = "full") -> MCPServer:
+    """Build a fresh MCPServer for the given ``toolset``.
 
     ``full`` (the default, for internal callers and existing tests) registers
     every tool and all four prompts. ``core`` registers the same surface, then
@@ -624,7 +634,7 @@ def create_mcp_server(toolset: str = "full") -> FastMCP:
     # terminate it on teardown instead of orphaning it. Background-job children
     # are handled by `registry.shutdown()` / `cpsat_registry.shutdown()`.
     child_tracker = ChildProcessTracker()
-    mcp: FastMCP[Any] = FastMCP(
+    mcp: MCPServer[Any] = MCPServer(
         "openconstraint-mcp",
         instructions=instructions,
         website_url=_homepage_url(),

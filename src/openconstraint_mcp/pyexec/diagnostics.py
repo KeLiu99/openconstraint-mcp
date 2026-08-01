@@ -49,9 +49,7 @@ def cpsat_result_diagnostic(
     if result.timed_out or result.status == "timeout":
         details: dict[str, JsonValue] = {"truncated": result.truncated}
         if rejected_partial is not None:
-            details["rejected_partial_field"], details["rejected_partial_reason"] = (
-                rejected_partial
-            )
+            details["rejected_partial_field"], details["rejected_partial_reason"] = rejected_partial
         return timeout_diagnostic(has_incumbent=bool(result.solution), details=details)
     if result.truncated:
         return Diagnostic(

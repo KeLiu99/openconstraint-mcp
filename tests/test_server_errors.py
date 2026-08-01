@@ -153,8 +153,8 @@ async def test_as_mcp_error_does_not_translate_unlisted_exception_from_async_too
     assert exc_info.value is boom
 
 
-def test_as_mcp_error_preserves_signature_for_fastmcp() -> None:
-    # FastMCP derives each tool's schema from the wrapped function's signature;
+def test_as_mcp_error_preserves_signature_for_mcpserver() -> None:
+    # MCPServer derives each tool's schema from the wrapped function's signature;
     # functools.wraps must keep it visible through the decorator.
     def tool(model: str, timeout_ms: int = 5) -> bool:
         return True
