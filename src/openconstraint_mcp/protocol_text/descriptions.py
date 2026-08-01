@@ -53,14 +53,14 @@ _SOLVE_CONTROLS_LIST = (
 # core metadata budget. Keep it to the TERSE TYPE CONTRACT: what `solution` must
 # semantically carry lives in the prompts and the server `instructions`.
 _CPSAT_JSON_CONTRACT = (
-    "The script MUST emit a single JSON object to stdout as its last line "
+    "The script MUST emit a final JSON object as its last stdout line "
     "with all three REQUIRED keys `status` (str), `objective` (number|null), "
     "and `solution` (object; `{}` with no incumbent), and MAY include an "
     "optional `best_objective_bound` (number|null) for diagnostics, e.g. "
     '`{"status": "<status>", "objective": <number|null>, "solution": '
     '{<str: val>}, "best_objective_bound": <number|null>}`. Extra keys are '
-    "ignored; a missing or invalid required key is rejected as "
-    '`status="error"` with no solution and a `child_process_error` diagnostic '
+    'ignored; a missing or invalid required key is rejected (`status="error"` '
+    "on a clean exit) with no solution and a `child_process_error` diagnostic "
     "naming the field."
 )
 

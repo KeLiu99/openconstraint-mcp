@@ -1051,9 +1051,9 @@ script verifiable:
 
 1. **Source-file creation.** The MCP client writes (and repairs) the `.py`
    script. The server never generates, rewrites, or patches source.
-2. **Result transport.** The running script prints one JSON object as its last
-   stdout line. `json.dumps` only serializes a Python object into a string that
-   `print` sends to stdout — it creates no file and saves nothing.
+2. **Result transport.** The running script prints a final JSON object as its
+   last stdout line. `json.dumps` only serializes a Python object into a string
+   that `print` sends to stdout — it creates no file and saves nothing.
 3. **Checker verification.** A separate checker script grades that reported
    answer against the original instance.
 4. **Optional managed saving.** Only when the user asks: `save_verified_cpsat_python`
@@ -1107,7 +1107,7 @@ core profile, so start the server with `openconstraint-mcp stdio --toolset full`
 
 - **`run_cpsat_python(source: str, timeout_ms: int = 30000)`** — execute
   LLM-generated OR-Tools CP-SAT Python source in a bounded child process and
-  return a `CpsatPythonResult`. The script must emit a single JSON object as
+  return a `CpsatPythonResult`. The script must emit a final JSON object as
   its last stdout line with all three **required** keys `status`, `objective`,
   and `solution`; it may also include an optional `best_objective_bound` for
   diagnostics:
@@ -1120,10 +1120,24 @@ core profile, so start the server with `openconstraint-mcp stdio --toolset full`
   `error`. `objective` must be a finite number or `null` — a pure feasibility
   model still emits the key with `null`. `solution` must be a JSON object; `{}`
   is a well-typed envelope for "no incumbent" (it fails the *acceptance* gates,
-  not the envelope check). Extra keys are ignored. A missing or invalid required
-  key is rejected as `status="error"` with no solution and a
-  `child_process_error` diagnostic whose `details.field` names the offending
-  key, so the client knows exactly what to repair.
+  not the envelope check). The same finiteness rule holds one level down: every
+  number **at any depth inside `solution`** must be finite, because `json.dumps`
+  writes `NaN`/`Infinity` as bare tokens that are not valid JSON for a strict
+  client. Extra keys are ignored.
+
+  Same-shaped **intermediate** JSON objects are allowed and are what makes a
+  timed-out run recoverable — printing one per improved solution lets the
+  server report the last partial answer; only the final object is read as the
+  result.
+
+  On a **clean exit**, a missing or invalid required key is rejected as
+  `status="error"` with no solution and a `child_process_error` diagnostic whose
+  `details.field` names the offending key — a key path such as
+  `solution["tasks"][3]["start"]` when the offender is nested — so the client
+  knows exactly what to repair. On a **timeout** the status stays `"timeout"`
+  instead: the malformed partial is discarded rather than recovered, and the
+  drop is reported through `rejected_partial_field` / `rejected_partial_reason`
+  in the timeout diagnostic's `details`.
   Use the `cpsat_python_solution_workflow` prompt to generate conforming scripts.
 
   The child process runs under the server's own Python interpreter (the

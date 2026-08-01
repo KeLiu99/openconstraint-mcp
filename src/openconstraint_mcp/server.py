@@ -276,12 +276,15 @@ async def _report_status(
 
     Keeping it means accepting one stderr line per call site per process:
     ``MCPDeprecationWarning`` subclasses ``UserWarning``, so it warns at
-    runtime, not just under a type checker. Suppression was considered and
-    rejected — every rung (``info`` → ``log`` → ``send_log_message``) is
-    ``@deprecated``, so there is no quieter API to drop to, and two of the
-    three warnings fire inside the coroutine, so a ``catch_warnings`` block
-    would have to mutate the process-global filter across an ``await`` that
-    concurrent tool calls share.
+    runtime, not just under a type checker. That runtime warning STAYS — every
+    rung (``info`` → ``log`` → ``send_log_message``) is ``@deprecated``, so
+    there is no quieter API to drop to, and suppressing it in-process is unsafe:
+    two of the three warnings fire inside the coroutine, so a ``catch_warnings``
+    block would have to mutate the process-global filter across an ``await``
+    that concurrent tool calls share. Only the test gate is quieted, by a
+    message-pinned ``filterwarnings`` entry in ``pyproject.toml`` — a static
+    ini filter in a test-only process, not a mutation mid-flight — because the
+    three rungs otherwise repeat one accepted decision 27 times per run.
     """
     if ctx is None:
         return

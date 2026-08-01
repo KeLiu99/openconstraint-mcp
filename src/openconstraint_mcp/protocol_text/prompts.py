@@ -19,24 +19,36 @@ from __future__ import annotations
 # Everything up to the execution-role bullet is profile-independent; only that
 # bullet is composed per profile (see `_CPSAT_CONTRACT_ROLE_CORE`).
 _CPSAT_OUTPUT_CONTRACT_HEAD = """\
-CP-SAT OUTPUT CONTRACT — the transport the server parses and a checker grades:
-- Emit ONE JSON object as the LAST stdout line, carrying all three REQUIRED
+CP-SAT OUTPUT CONTRACT — the transport the server parses, and the form any
+checker must be able to grade:
+- Emit a FINAL JSON object as the LAST stdout line, carrying all three REQUIRED
   keys: `status` (str), `objective` (a number or null — the key is present
   even for a pure feasibility model), and `solution` (a JSON object; an empty
-  object when there is no incumbent). Extra keys are ignored. A missing or
-  invalid required key makes the whole run `status="error"` with no solution
-  and a `child_process_error` diagnostic naming the offending field.
+  object when there is no incumbent). Extra keys are ignored. Same-shaped
+  intermediate objects ARE allowed and encouraged — printing one per improved
+  solution is what lets the server recover a partial answer when the run hits
+  its timeout; only the last one is read as the final result.
+- On a CLEAN EXIT, a missing or invalid required key makes the whole run
+  `status="error"` with no solution and a `child_process_error` diagnostic
+  naming the offending field. On a TIMEOUT the status stays `"timeout"`: the
+  malformed partial is discarded rather than recovered, and the drop is
+  reported through `rejected_partial_field` / `rejected_partial_reason` in the
+  timeout diagnostic's details — look there, not for `child_process_error`.
+- Every number anywhere in the payload must be FINITE. `NaN`, `Infinity`, and
+  `-Infinity` are rejected in `objective` and at any depth inside `solution`,
+  because `json.dumps` emits them as bare `NaN`/`Infinity` tokens that are not
+  valid JSON for a strict client. Emit null, or a real number.
 - `json.dumps` only serializes a Python object into a STRING that `print`
   sends to stdout. It creates no file and saves nothing. Writing the script's
   `.py` source file is a separate act, and persisting a verified artifact is
   an explicit save step the user has to ask for.
 - `solution` must carry the COMPLETE, problem-specific answer: every decision
-  value a checker needs, keyed so the checker can grade it. Never prose, never
-  statistics alone, and never only a path to a result file the script wrote. A
-  supplementary `result_file` key is allowed, but it can never replace the
-  in-band answer.
-- Variants of the SAME problem must share ONE `solution` schema, so a single
-  checker grades every variant.
+  value needed to grade it against the problem, keyed so it can be graded
+  independently. Never prose, never statistics alone, and never only a path to
+  a result file the script wrote. A supplementary `result_file` key is allowed,
+  but it can never replace the in-band answer.
+- Variants of the SAME problem must share ONE `solution` schema, so one grading
+  standard applies to every variant.
 """
 
 # The one profile-dependent clause. CP-SAT checker EXECUTION is full-only —
@@ -47,6 +59,13 @@ CP-SAT OUTPUT CONTRACT — the transport the server parses and a checker grades:
 # `_RUN_CPSAT_PYTHON_FILE_SHAPE_CORE`/`_FULL` already make in the tool
 # descriptions. Naming no full-only TOOL is not enough on its own: the core
 # leak-guard test matches names, and a promised capability names nothing.
+#
+# The SHARED HEAD above is bound by the same rule, and that is easy to forget
+# because it reads as profile-neutral prose. It may describe a checker as the
+# STANDARD a `solution` has to satisfy ("the form any checker must be able to
+# grade", "one grading standard applies to every variant") but must never say
+# the server runs, supplies, or invokes one — that claim is only true in the
+# full profile, and the head reaches core verbatim.
 _CPSAT_CONTRACT_ROLE_FULL = """\
 - You generate and repair the script; the server only executes it and runs the
   checker you supply.
@@ -102,7 +121,7 @@ User problem:
 
 3. Draft a COMPLETE artifact, never prose: a MiniZinc model with every
    declaration, every constraint, exactly one `solve` statement, and an
-   `output` block; or a full OR-Tools CP-SAT Python script that prints one
+   `output` block; or a full OR-Tools CP-SAT Python script that prints a final
    JSON object as its last stdout line, with `status`, `objective`, and
    `solution`.
    SAFETY: generate only modeling code — no network access, no file writes
@@ -387,9 +406,14 @@ User problem:
      for the replay re-run; a script that hardcodes the seed instead
      silently ignores the replay — the server cannot force a seed into
      arbitrary Python.
-   - Emit exactly ONE JSON object as the LAST line of stdout. Complete
-     runnable example — replace the toy model with the real one and keep
-     the emitted JSON contract exactly:
+   - Emit a FINAL JSON object as the LAST line of stdout (same-shaped
+     intermediate objects during search are allowed — see the improved-
+     solution callback below — and only the last one is read as the
+     result). Every
+     number in it must be finite at any depth: `NaN`/`Infinity` in `objective`
+     or anywhere inside `solution` is rejected. Complete runnable example —
+     replace the toy model with the real one and keep the emitted JSON
+     contract exactly:
      ```
      import json
      import os
@@ -578,12 +602,36 @@ User problem:
      Never `import ortools` and never re-solve. An `accepted` verdict proves
      only the properties that checker evaluated — it is NOT an independent
      proof that an `optimal` claim is globally optimal.
-   - Read the two failing verdicts differently before repairing anything, and
-     never "fix" one by blindly changing the emitted envelope: `error` means
-     the payload could not be graded at all (an unusable instance, or an
-     output block that is not a well-formed claim), while `rejected` means a
-     well-formed solution WAS graded and violates the problem, which points
-     at the model's constraints.
+   - Read the three non-accepted verdicts differently before repairing
+     anything, and never "fix" one by blindly changing the emitted envelope:
+     `rejected` means a well-formed solution WAS graded and violates the
+     problem, which points at the model's constraints. `error` means NO VALID
+     VERDICT was produced — the payload could not be graded (an unusable
+     instance, an output block that is not a well-formed claim) OR the checker
+     itself failed to run, exited non-zero, was truncated, or printed
+     malformed or self-contradictory output. So `error` does not by itself
+     accuse the model. `timeout` means the checker ran out of time, which
+     points at the checker's cost or its `checker_timeout_ms`, not at the
+     answer.
+   - An attempt row does NOT carry the checker's own output: it has
+     `checker_status`, a short `message`, and a `diagnostic`, but no `errors`,
+     `stdout`, or `stderr`. Before repairing anything on an `error` or
+     `timeout` verdict, RE-RUN that one attempt to get the full checker
+     report, replaying its EXACT inputs — the same `problem`, `seed`, `config`,
+     `timeout_ms`, and `checker_timeout_ms` — because a CP-SAT run is seed- and
+     config-dependent and a rerun under different ones diagnoses a different solve:
+     - Attempt used inline `source`: call `save_verified_cpsat_python(source=…,
+       problem=…, checker=…, checker_timeout_ms=…, seed=…, config=…,
+       timeout_ms=…, verify_only=true)`. Despite the name this SAVES NOTHING and
+       needs no `target_dir` — it re-runs and re-grades, returning the full report
+       in `checker`.
+     - Attempt used `script_path`: call `run_cpsat_python_file_checked(
+       script_path=…, checker_path=…, problem=…, checker_timeout_ms=…,
+       args=…, seed=…, config=…, timeout_ms=…)`, writing the checker source to a
+       file first since that tool takes a path.
+     Do NOT use `submit_cpsat_python_job` / `submit_cpsat_python_file_job` for
+     this: they accept no `seed` or `config`, so for a seeded or configured
+     attempt they would silently grade a different run.
    - Match the loop to what the user actually asked for:
      - SELECT ONE WINNER (comparing candidates before committing to one):
        the tool already filters out non-accepted attempts, so present the
@@ -648,16 +696,27 @@ User problem:
       - Print exactly ONE JSON object as its FINAL stdout line:
         `{{"status": "accepted"|"rejected"|"error", "errors": [...], "details": {{...}}}}`
         `accepted` with an empty `errors` list is the only passing verdict.
-      - Split the two FAILING verdicts by what failed, because the client
-        fixes a different artifact for each. `error` means the payload could
-        not be graded at all — an unusable instance, or a `solution`/
-        `solver_status` that is not a well-formed claim — and points at the
-        `problem` value or the script's output code. `rejected` means a
-        well-formed solution WAS graded against the instance and violates
-        it, and points at the model's constraints. Both fail the gate either
-        way, so the split costs nothing and is what stops a client from
+      - Split the two FAILING verdicts your checker emits by what failed,
+        because the client fixes a different artifact for each. `error` means
+        the payload could not be graded at all — an unusable instance, or a
+        `solution`/`solver_status` that is not a well-formed claim — and
+        points at the `problem` value or the script's output code. `rejected`
+        means a well-formed solution WAS graded against the instance and
+        violates it, and points at the model's constraints. Both fail the gate
+        either way, so the split costs nothing and is what stops a client from
         "fixing" correct constraints when the real bug is a missing output
         key.
+      - Reading the verdict BACK: the server reports `error` for more than
+        your checker's own `error` — it also normalizes to `error` when the
+        checker could not be started, exited non-zero, was truncated, or
+        printed malformed or self-contradictory output (`accepted` with a
+        non-empty `errors` list). It adds a third non-accepted verdict,
+        `timeout`, when the checker exceeded `checker_timeout_ms`, which
+        points at the checker's own cost rather than at the answer. So
+        `error` means NO VALID VERDICT, not "the model is wrong": read the
+        report's `errors`, `stdout`, and `stderr` — all three are returned on
+        these tools — to see whether the model, the emitted envelope, or the
+        checker script is the artifact to repair.
       - Be a PREDICATE, not a solver: grade the solution you were handed
         with plain arithmetic over the payload, standard library only. Never
         `import ortools` and never re-solve. The checker runs in the SAME

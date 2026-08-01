@@ -73,6 +73,18 @@ push-all msg:
     git commit -m {{quote(msg)}}
     git push -u origin HEAD
 
+# Squash the latest commits, retain the newest message, then safely force-push.
+# Usage: just squash 3
+squash commits:
+    @test "{{commits}}" -ge 2
+    @git diff --quiet
+    @git diff --cached --quiet
+    @test "$$(git branch --show-current)" != master
+    @test "$$(git branch --show-current)" != main
+    git reset --soft HEAD~{{commits}}
+    git commit --reuse-message=ORIG_HEAD
+    git push --force-with-lease
+
 # Remove caches and build artefacts.
 clean:
     rm -rf .pytest_cache .ruff_cache .mypy_cache build dist .coverage

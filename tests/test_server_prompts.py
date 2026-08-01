@@ -303,6 +303,71 @@ def test_output_contract_fragment_requires_one_shared_solution_schema() -> None:
     assert "Variants of the SAME problem must share ONE `solution` schema" in normalized
 
 
+def test_output_contract_fragment_permits_intermediate_objects() -> None:
+    # The fragment used to demand "ONE JSON object" without exception, which
+    # contradicts the improved-solution callback the detailed prompt asks for and
+    # that the executor's timeout recovery reads. A core client never sees that
+    # detailed prompt, so it needs the positive permission here.
+    normalized = " ".join(CPSAT_OUTPUT_CONTRACT_GUIDANCE_CORE.split())
+
+    assert "Emit a FINAL JSON object as the LAST stdout line" in normalized
+    assert "Same-shaped intermediate objects ARE allowed" in normalized
+
+
+def test_output_contract_fragment_ties_intermediate_objects_to_timeout_recovery() -> None:
+    # Permission alone reads as trivia. The reason to spend the callback is that
+    # it is the only way a timed-out run reports any answer at all.
+    normalized = " ".join(CPSAT_OUTPUT_CONTRACT_GUIDANCE_CORE.split())
+
+    assert "recover a partial answer when the run hits its timeout" in normalized
+
+
+def test_output_contract_fragment_scopes_the_error_status_to_a_clean_exit() -> None:
+    # Unqualified, this promised an outcome the timeout path does not produce.
+    normalized = " ".join(CPSAT_OUTPUT_CONTRACT_GUIDANCE_CORE.split())
+
+    assert "On a CLEAN EXIT, a missing or invalid required key makes the whole run" in normalized
+    assert '`status="error"`' in normalized
+
+
+def test_output_contract_fragment_names_the_rejected_partial_keys_for_timeouts() -> None:
+    # A client that cannot find `child_process_error` after a timeout otherwise has
+    # no way to learn its partial was dropped on purpose, or why.
+    normalized = " ".join(CPSAT_OUTPUT_CONTRACT_GUIDANCE_CORE.split())
+
+    assert 'On a TIMEOUT the status stays `"timeout"`' in normalized
+    assert "`rejected_partial_field` / `rejected_partial_reason`" in normalized
+
+
+def test_output_contract_fragment_requires_finite_numbers_at_any_depth() -> None:
+    # The gate rejects non-finite floats anywhere in `solution`, which is a
+    # breaking change for a script that emits them. It cannot ship undocumented.
+    normalized = " ".join(CPSAT_OUTPUT_CONTRACT_GUIDANCE_CORE.split())
+
+    assert "Every number anywhere in the payload must be FINITE" in normalized
+    assert "at any depth inside `solution`" in normalized
+
+
+def test_core_output_contract_fragment_promises_no_checker_the_core_toolset_lacks() -> None:
+    # Core exposes only `run_cpsat_python` and `run_cpsat_python_file`, neither of
+    # which takes a checker. The shared head reaches core verbatim, so it may
+    # describe a checker as the STANDARD a solution must satisfy but must never
+    # say the server runs or supplies one.
+    normalized = " ".join(CPSAT_OUTPUT_CONTRACT_GUIDANCE_CORE.split())
+
+    assert "the form any checker must be able to grade" in normalized
+    for promise in ("a checker grades", "the checker can grade", "so a single checker grades"):
+        assert promise not in normalized
+
+
+def test_full_output_contract_fragment_still_describes_the_checker_backed_path() -> None:
+    # Rewording the head must not cost the full profile its checker story; the
+    # capability difference lives in the role clause, which full alone carries.
+    normalized = " ".join(CPSAT_OUTPUT_CONTRACT_GUIDANCE.split())
+
+    assert "runs the checker you supply" in normalized
+
+
 def test_output_contract_fragment_frames_prompt_text_as_advisory() -> None:
     normalized = " ".join(CPSAT_OUTPUT_CONTRACT_GUIDANCE.split())
 
@@ -966,6 +1031,40 @@ async def test_cpsat_python_solution_workflow_prompt_checker_gate_output_contrac
 
 
 @pytest.mark.asyncio
+async def test_cpsat_workflow_step_three_permits_intermediate_objects() -> None:
+    """The shared contract head is not the only place this rule is stated. Step 3 said
+    "exactly ONE JSON object" while step 3's OWN callback snippet asks for
+    intermediates — a contradiction inside one prompt, invisible to any assertion
+    made against the head alone."""
+    lower = await _cpsat_workflow_lower()
+
+    assert "emit a final json object as the last line of stdout" in lower
+    assert "same-shaped intermediate objects during search are allowed" in lower
+
+
+@pytest.mark.asyncio
+async def test_cpsat_workflow_step_three_requires_finite_numbers_at_any_depth() -> None:
+    """The script-writing step is where the rule has to land to change what gets
+    written; the contract head states it, but this is the step being followed."""
+    lower = await _cpsat_workflow_lower()
+
+    assert "every number in it must be finite at any depth" in lower
+    assert "anywhere inside `solution` is rejected" in lower
+
+
+@pytest.mark.asyncio
+async def test_backend_neutral_prompt_does_not_forbid_intermediate_objects() -> None:
+    """The backend-choosing prompt is served in the CORE profile and summarizes the
+    CP-SAT artifact in one line. It said "prints one JSON object", contradicting the
+    contract head spliced into the same prompt."""
+    text = await _get_core_prompt_text("solve_constraint_problem", {"problem": SAMPLE_PROBLEM})
+    lower = " ".join(text.split()).lower()
+
+    assert "prints a final json object as its last stdout line" in lower
+    assert "prints one json object" not in lower
+
+
+@pytest.mark.asyncio
 async def test_cpsat_python_solution_workflow_prompt_checker_splits_error_from_rejected() -> None:
     """`error` and `rejected` both fail the gate, so a client that reads them as one
     verdict is pointed at the wrong artifact: told "rejected" for a missing
@@ -973,12 +1072,139 @@ async def test_cpsat_python_solution_workflow_prompt_checker_splits_error_from_r
     text = await _get_prompt_text("cpsat_python_solution_workflow", {"problem": SAMPLE_PROBLEM})
     lower = " ".join(text.split()).lower()
 
-    assert "split the two failing verdicts by what failed" in lower
+    assert "split the two failing verdicts your checker emits by what failed" in lower
     assert "`error` means the payload could not be graded at all" in lower
     assert (
         "`rejected` means a well-formed solution was graded against the "
         "instance and violates it" in lower
     )
+
+
+# --- checker verdicts: two sections, asserted separately ---------------------
+#
+# The verdict explanation appears TWICE in this prompt — once in the experiment
+# loop (step 6) and once in the checker-authoring rules (step 7c) — and both
+# used to open with the same "`error` means the payload could not be graded at
+# all" sentence. A whole-prompt substring assertion therefore passes on either
+# one, which is how a stale copy survives an update. Each test below anchors on
+# text unique to its section.
+
+
+_EXPERIMENT_VERDICTS_ANCHOR = "read the three non-accepted verdicts differently"
+_EXPERIMENT_RERUN_ANCHOR = "an attempt row does not carry the checker's own output"
+_EXPERIMENT_SECTION_END = "persist only if the user asks"
+_CHECKER_AUTHORING_ANCHOR = "reading the verdict back"
+
+
+async def _cpsat_workflow_lower() -> str:
+    text = await _get_prompt_text("cpsat_python_solution_workflow", {"problem": SAMPLE_PROBLEM})
+    return " ".join(text.split()).lower()
+
+
+def _section(lower: str, start_anchor: str, end_anchor: str) -> str:
+    """Slice the text between two anchors, so a later duplicate cannot satisfy a test.
+
+    Slicing only from `start_anchor` to the end of the prompt would let step 7c's
+    wording satisfy a step 6 assertion — the very collision these tests exist to
+    prevent, since 7c comes after. Both anchors are asserted present, so this
+    fails loudly rather than silently returning an empty section if either moves.
+    """
+    assert start_anchor in lower, f"missing section anchor: {start_anchor}"
+    assert end_anchor in lower, f"missing section anchor: {end_anchor}"
+    start = lower.index(start_anchor)
+    end = lower.index(end_anchor, start)
+    assert end > start, f"{end_anchor!r} must follow {start_anchor!r}"
+    return lower[start:end]
+
+
+@pytest.mark.asyncio
+async def test_experiment_guidance_defines_error_as_no_valid_verdict() -> None:
+    """`error` is also what the server reports when the checker itself failed to run,
+    exited non-zero, or printed malformed output. Defining it as "the payload could
+    not be graded" sends a client to repair a model that may be correct."""
+    lower = await _cpsat_workflow_lower()
+
+    section = _section(lower, _EXPERIMENT_VERDICTS_ANCHOR, _EXPERIMENT_RERUN_ANCHOR)
+
+    assert "`error` means no valid verdict was produced" in section
+    assert "the checker itself failed to run" in section
+    assert "does not by itself accuse the model" in section
+
+
+@pytest.mark.asyncio
+async def test_experiment_guidance_keeps_rejected_pointing_at_the_model() -> None:
+    """The `error` rewrite must not blur `rejected`, which is the one verdict that
+    genuinely does indict the model's constraints."""
+    lower = await _cpsat_workflow_lower()
+
+    section = _section(lower, _EXPERIMENT_VERDICTS_ANCHOR, _EXPERIMENT_RERUN_ANCHOR)
+
+    assert "`rejected` means a well-formed solution was graded" in section
+    assert "points at the model's constraints" in section
+
+
+@pytest.mark.asyncio
+async def test_experiment_guidance_names_timeout_as_a_third_non_accepted_verdict() -> None:
+    """`checker_status_is_failure` treats `timeout` as a failure too, so an attempt row
+    can carry it today with no guidance at all."""
+    lower = await _cpsat_workflow_lower()
+
+    section = _section(lower, _EXPERIMENT_VERDICTS_ANCHOR, _EXPERIMENT_RERUN_ANCHOR)
+
+    assert "`timeout` means the checker ran out of time" in section
+    assert "not at the answer" in section
+
+
+@pytest.mark.asyncio
+async def test_experiment_guidance_admits_the_attempt_row_lacks_the_checker_report() -> None:
+    """An attempt row carries `checker_status`, a short `message`, and a `diagnostic` —
+    never the checker's own `errors`/`stdout`/`stderr`. Telling a client to read a
+    report it cannot reach is worse than saying nothing."""
+    lower = await _cpsat_workflow_lower()
+
+    section = _section(lower, _EXPERIMENT_RERUN_ANCHOR, _EXPERIMENT_SECTION_END)
+
+    assert "no `errors`, `stdout`, or `stderr`" in section
+
+
+@pytest.mark.asyncio
+async def test_experiment_guidance_escalates_to_a_seed_preserving_rerun() -> None:
+    """A replay preserves every solve and checker input from the failed attempt."""
+    lower = await _cpsat_workflow_lower()
+
+    section = _section(lower, _EXPERIMENT_RERUN_ANCHOR, _EXPERIMENT_SECTION_END)
+
+    assert "replaying its exact inputs" in section
+    assert "the same `problem`, `seed`, `config`, `timeout_ms`, and `checker_timeout_ms`" in section
+    assert "save_verified_cpsat_python" in section
+    assert "run_cpsat_python_file_checked" in section
+
+
+@pytest.mark.asyncio
+async def test_experiment_guidance_rules_out_the_checked_job_tools_for_the_rerun() -> None:
+    """Neither `submit_cpsat_python_job` nor `submit_cpsat_python_file_job` accepts a
+    `seed` or `config`, so for a configured attempt they silently grade a different
+    run than the one being diagnosed."""
+    lower = await _cpsat_workflow_lower()
+
+    section = _section(lower, _EXPERIMENT_RERUN_ANCHOR, _EXPERIMENT_SECTION_END)
+
+    assert "do not use `submit_cpsat_python_job`" in section
+    assert "they accept no `seed` or `config`" in section
+
+
+@pytest.mark.asyncio
+async def test_checker_authoring_guidance_reads_error_back_as_no_valid_verdict() -> None:
+    """Step 7c tells the checker author which verdict to EMIT; reading one BACK is a
+    different question, because the server normalizes infrastructure failures to
+    `error` and adds `timeout` on its own. These tools DO return the full report."""
+    lower = await _cpsat_workflow_lower()
+
+    section = _section(lower, _CHECKER_AUTHORING_ANCHOR, "be a predicate, not a solver")
+
+    assert "`error` means no valid verdict" in section
+    assert "read the report's `errors`, `stdout`, and `stderr`" in section
+    assert "`timeout`" in section
 
 
 @pytest.mark.asyncio
@@ -1091,6 +1317,15 @@ async def test_cpsat_python_solution_workflow_prompt_replays_via_verify_only() -
     assert "scratch" not in normalized
     assert "ignores one if you pass it" in normalized
     assert "`verify_only=false`" in normalized
+
+
+@pytest.mark.asyncio
+async def test_cpsat_python_solution_workflow_prompt_replays_checker_inputs() -> None:
+    text = await _get_prompt_text("cpsat_python_solution_workflow", {"problem": SAMPLE_PROBLEM})
+    normalized = " ".join(text.split())
+
+    assert "problem=…, checker=…, checker_timeout_ms=…, seed=…, config=…" in normalized
+    assert "checker_path=…, problem=…, checker_timeout_ms=…, args=…" in normalized
 
 
 @pytest.mark.asyncio
