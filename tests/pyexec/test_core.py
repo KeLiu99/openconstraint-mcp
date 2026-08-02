@@ -1412,6 +1412,22 @@ def test_checked_run_defaults_the_checker_timeout_to_the_run_timeout(
     assert result.checker_timeout_ms == 12_345
 
 
+def test_checked_run_self_test_caps_the_implicit_checker_timeout_to_fit(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    script, checker = _checked_pair(tmp_path)
+    calls = _patch_checked(
+        monkeypatch,
+        _checked_result("optimal", solution={"tasks": [{"start": 0}, {"start": 5}]}),
+        _checker_report("accepted"),
+    )
+
+    result = run_cpsat_python_file_checked(script, checker, test_checker=True)
+
+    assert [call["timeout_ms"] for call in calls] == [8_100] * 5
+    assert result.checker_timeout_ms == 8_100
+
+
 def test_checked_run_explicit_checker_timeout_wins(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -1451,10 +1467,10 @@ def test_checked_run_rejects_a_non_positive_checker_timeout(tmp_path: Path) -> N
 @pytest.mark.parametrize(
     "kwargs",
     [
-        {"test_checker": True},
+        {"test_checker": True, "checker_timeout_ms": 30_000},
         {"test_checker": True, "timeout_ms": 600_000},
     ],
-    ids=["default-mutation-fanout", "long-self-tested-run"],
+    ids=["explicit-checker-timeout", "model-leaves-no-checker-budget"],
 )
 def test_checked_run_rejects_an_over_budget_self_test_before_the_model_runs(
     tmp_path: Path, kwargs: dict[str, Any]

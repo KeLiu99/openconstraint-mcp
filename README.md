@@ -1248,9 +1248,11 @@ core profile, so start the server with `openconstraint-mcp stdio --toolset full`
   relative to the script's directory, not the instance itself.
   `examples/job_shop/checker.py`, for instance, returns `rejected` without it.
 
-  **`checker_timeout_ms`** defaults to `timeout_ms`. `args`, `seed`, and
-  `config` behave exactly as on `run_cpsat_python_file` and apply to the model
-  child only — the checker is a verification step, never a replayed solve.
+  **`checker_timeout_ms`** defaults to `timeout_ms`. When `test_checker` is on,
+  an omitted value is capped at the largest checker timeout that fits the
+  synchronous wall-clock budget. `args`, `seed`, and `config` behave exactly as
+  on `run_cpsat_python_file` and apply to the model child only — the checker is
+  a verification step, never a replayed solve.
 
   Returns a **`CpsatPythonCheckedResult`**: every `CpsatPythonResult` field,
   plus `checker` (the checker report, whose `status` is the verdict),
@@ -1327,18 +1329,23 @@ core profile, so start the server with `openconstraint-mcp stdio --toolset full`
   each plus the process-tree termination grace — plus one further checker child
   per applied mutation, `(applied mutations) × (checker_timeout_ms + ~8 s)`,
   whenever `test_checker` is on. At the 30 s defaults that is about **76.5 s**
-  with it off and about **229.5 s** with all four mutations applied.
+  with it off. An explicitly requested 30 s checker timeout with all four
+  mutations would project to about **229.5 s** and is rejected.
 
-  **Only `test_checker` is gated.** With it on, the call rejects a projected
-  worst case over **120 s** before any child runs, charging each child its
-  timeout plus a conservative process-tree termination/poll overhead and
-  assuming all four mutations apply. The 30 s defaults therefore do *not* fit,
-  and `test_checker: true` needs a smaller checker budget — a 30 s model timeout
-  with `checker_timeout_ms: 8000` projects to 119.5 s. The rejection message
-  reports the model/checker budgets, child count, overhead, and total. The
-  ceiling exists because the self-test is the only thing that turns one checker
-  child into five *and* has no background-job equivalent, so an over-budget
-  probe would have nowhere to go.
+  **Only `test_checker` is gated.** With it on, the call limits the projected
+  worst case to **120 s**, charging each child its timeout plus a conservative
+  process-tree termination/poll overhead and assuming all four mutations apply.
+  When `checker_timeout_ms` is omitted, the server uses the smaller of
+  `timeout_ms` and the largest checker budget that fits. The 30 s model default
+  therefore derives an **8100 ms** checker timeout and projects to exactly 120 s,
+  so `test_checker: true` works without changing another argument. An explicit
+  over-budget checker timeout is rejected before any child runs; an omitted one
+  is also rejected when the model timeout and fixed child overhead leave no
+  positive checker budget. The rejection message reports the model/checker
+  budgets, child count, overhead, and total. The ceiling exists because the
+  self-test is the only thing that turns one checker child into five *and* has
+  no background-job equivalent, so an over-budget probe would have nowhere to
+  go.
 
   Without `test_checker`, `timeout_ms` has **no upper bound** by design, because
   a caller must be able to ask for the solve time the problem needs; every child

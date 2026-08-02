@@ -520,7 +520,12 @@ async def test_tool_checked_run_budget_exposes_invalid_request(tmp_path: Path) -
     fn = _tool_fn("run_cpsat_python_file_checked")
 
     with pytest.raises(RuntimeError) as exc_info:
-        await fn(script_path=str(script), checker_path=str(checker), test_checker=True)
+        await fn(
+            script_path=str(script),
+            checker_path=str(checker),
+            checker_timeout_ms=30_000,
+            test_checker=True,
+        )
 
     assert str(exc_info.value).startswith("Diagnostic: invalid_request — ")
     assert "projected checked-run budget" in str(exc_info.value)

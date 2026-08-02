@@ -186,8 +186,10 @@ def cpsat_child_timeout_overhead_ms() -> int:
     return process_tree_terminate_worst_case_ms() + _CPSAT_EXECUTOR_POLL_SLACK_MS
 
 
-def _check_checked_wall_clock_budget(*, timeout_ms: int, checker_timeout_ms: int) -> None:
-    """Reject a projected SELF-TESTING checked run over the synchronous ceiling.
+def _resolve_checked_checker_timeout_ms(
+    *, timeout_ms: int, checker_timeout_ms: int | None
+) -> int:
+    """Resolve a SELF-TESTING checker timeout within the synchronous ceiling.
 
     Enforced only for ``test_checker=True``, which is what turns one checker
     child into ``1 + len(MUTATION_NAMES)`` sequential ones. A plain
@@ -202,10 +204,25 @@ def _check_checked_wall_clock_budget(*, timeout_ms: int, checker_timeout_ms: int
     overhead_ms = cpsat_child_timeout_overhead_ms()
     checker_runs = 1 + len(MUTATION_NAMES)
     model_budget_ms = timeout_ms + overhead_ms
+    fixed_budget_ms = model_budget_ms + checker_runs * overhead_ms
+    if checker_timeout_ms is None:
+        max_checker_timeout_ms = (
+            MAX_CPSAT_SYNC_WALL_CLOCK_MS - fixed_budget_ms
+        ) // checker_runs
+        if max_checker_timeout_ms <= 0:
+            raise ValueError(
+                f"projected checked-run fixed budget {fixed_budget_ms} ms leaves no "
+                "positive checker_timeout_ms under "
+                f"MAX_CPSAT_SYNC_WALL_CLOCK_MS={MAX_CPSAT_SYNC_WALL_CLOCK_MS} ms: "
+                f"timeout_ms={timeout_ms}, checker_runs={checker_runs}, "
+                f"overhead_ms={overhead_ms} (reduce timeout_ms or drop test_checker — "
+                "checker self-testing has no background-job equivalent)"
+            )
+        checker_timeout_ms = min(timeout_ms, max_checker_timeout_ms)
     checker_budget_ms = checker_timeout_ms + overhead_ms
     projected_ms = model_budget_ms + checker_runs * checker_budget_ms
     if projected_ms <= MAX_CPSAT_SYNC_WALL_CLOCK_MS:
-        return
+        return checker_timeout_ms
     raise ValueError(
         f"projected checked-run budget {projected_ms} ms exceeds "
         f"MAX_CPSAT_SYNC_WALL_CLOCK_MS={MAX_CPSAT_SYNC_WALL_CLOCK_MS} ms: "
@@ -855,7 +872,9 @@ def run_cpsat_python_file_checked(
     synchronous call. Both paths are resolved and validated (exists / regular
     file / non-empty / UTF-8) BEFORE any child is spawned, with a ``ValueError``
     naming the offending parameter; ``checker_timeout_ms`` must be positive when
-    given and otherwise defaults to ``timeout_ms``.
+    given and otherwise defaults to ``timeout_ms``. With ``test_checker`` on, an
+    omitted checker timeout is capped at the largest value that fits the
+    synchronous wall-clock budget.
 
     The model runs first, in its own directory (see ``run_cpsat_python_file``).
     The checker runs only against a checkable incumbent — the shared
@@ -886,20 +905,23 @@ def run_cpsat_python_file_checked(
     plus ``(applied mutations) × (checker_timeout_ms + tree-kill grace)`` when
     ``test_checker`` is on. Only the ``test_checker`` projection is GATED: with
     the self-test on, the call conservatively assumes all four mutations apply
-    and rejects a projection over ``MAX_CPSAT_SYNC_WALL_CLOCK_MS`` before any
-    child runs. A plain checked run stays ungated — ``timeout_ms`` has no upper
-    bound, since a caller must be able to ask for the solve time the problem
-    needs. Background jobs have no checker self-test.
+    and rejects an explicit projection over ``MAX_CPSAT_SYNC_WALL_CLOCK_MS``
+    before any child runs. An omitted ``checker_timeout_ms`` is reduced to fit;
+    the call still rejects when ``timeout_ms`` leaves no positive checker budget.
+    A plain checked run stays ungated — ``timeout_ms`` has no upper bound, since
+    a caller must be able to ask for the solve time the problem needs. Background
+    jobs have no checker self-test.
     """
     resolved_script = validate_script_path(script_path)
     resolved_checker = validate_script_path(checker_path, parameter="checker_path")
     validate_checker_timeout_ms(checker_timeout_ms)
-    effective_timeout_ms = effective_checker_timeout_ms(
-        checker_timeout_ms=checker_timeout_ms, default_timeout_ms=timeout_ms
-    )
     if test_checker:
-        _check_checked_wall_clock_budget(
-            timeout_ms=timeout_ms, checker_timeout_ms=effective_timeout_ms
+        effective_timeout_ms = _resolve_checked_checker_timeout_ms(
+            timeout_ms=timeout_ms, checker_timeout_ms=checker_timeout_ms
+        )
+    else:
+        effective_timeout_ms = effective_checker_timeout_ms(
+            checker_timeout_ms=checker_timeout_ms, default_timeout_ms=timeout_ms
         )
 
     run_result = run_cpsat_python_file(
