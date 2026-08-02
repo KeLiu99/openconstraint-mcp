@@ -512,6 +512,26 @@ async def test_tool_experiment_budget_exposes_invalid_request() -> None:
 
 
 @pytest.mark.asyncio
+async def test_tool_checked_run_budget_exposes_invalid_request(tmp_path: Path) -> None:
+    script = tmp_path / "model.py"
+    checker = tmp_path / "checker.py"
+    script.write_text("print('model')", encoding="utf-8")
+    checker.write_text("print('checker')", encoding="utf-8")
+    fn = _tool_fn("run_cpsat_python_file_checked")
+
+    with pytest.raises(RuntimeError) as exc_info:
+        await fn(
+            script_path=str(script),
+            checker_path=str(checker),
+            checker_timeout_ms=30_000,
+            test_checker=True,
+        )
+
+    assert str(exc_info.value).startswith("Diagnostic: invalid_request — ")
+    assert "projected budget" in str(exc_info.value)
+
+
+@pytest.mark.asyncio
 async def test_tool_experiment_hash_race_exposes_indexed_invalid_request(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

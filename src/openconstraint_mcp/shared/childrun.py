@@ -115,6 +115,12 @@ class ChildExecutionResult:
     truncation_killed: bool = False
 
 
+def validate_timeout_ms(timeout_ms: int) -> None:
+    """Reject a non-positive child timeout."""
+    if timeout_ms <= 0:
+        raise ValueError("timeout_ms must be positive")
+
+
 def _read_capped(path: Path, limit: int = MAX_OUTPUT_BYTES) -> tuple[str, int]:
     """Return capped text plus the file's byte length (from ``stat``, pre-cap).
 
@@ -165,8 +171,7 @@ def execute_child(
     values) leaves the inherited environment completely untouched (the default
     subprocess behaviour).
     """
-    if timeout_ms <= 0:
-        raise ValueError("timeout_ms must be positive")
+    validate_timeout_ms(timeout_ms)
     child_env: dict[str, str] | None = None
     if env is not None:
         merged_env = dict(os.environ)

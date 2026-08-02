@@ -75,17 +75,20 @@ push-all msg:
 
 # Squash the latest commits, retain the newest message, then safely force-push.
 # Usage: just squash 3
-squash commits:
+# On a stacked branch, pass the branch it sits on: just squash 3 origin/feat-a
+squash commits base="origin/master":
     @test "{{commits}}" -ge 2
     @git diff --quiet
     @git diff --cached --quiet
-    @test "$$(git branch --show-current)" != master
-    @test "$$(git branch --show-current)" != main
+    @test -n "$(git branch --show-current)"
+    @test "$(git branch --show-current)" != master
+    @test "$(git branch --show-current)" != main
     # Never reach past this branch's own commits: without this, `just squash 10`
-    # on a 3-commit branch would rewrite shared master history behind the
-    # force-push, which --force-with-lease cannot catch because the lease is on
-    # the branch ref, not on master's.
-    @test "{{commits}}" -le "$$(git rev-list --count origin/master..HEAD)"
+    # on a 3-commit branch would rewrite shared history behind the force-push,
+    # which --force-with-lease cannot catch because the lease is on the branch
+    # ref, not on the base's. Counting must be --first-parent to match how
+    # `reset --soft HEAD~N` walks; a plain count over-counts across merges.
+    @test "{{commits}}" -le "$(git rev-list --first-parent --count {{base}}..HEAD)"
     git reset --soft HEAD~{{commits}}
     git commit --reuse-message=ORIG_HEAD
     git push --force-with-lease

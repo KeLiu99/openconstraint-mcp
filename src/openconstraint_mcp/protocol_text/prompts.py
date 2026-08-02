@@ -16,8 +16,9 @@ from __future__ import annotations
 # profile. Prompts are fetched on demand and carry no byte budget, so the fuller
 # wording lives here rather than in the metadata-budgeted tool descriptions.
 #
-# Everything up to the execution-role bullet is profile-independent; only that
-# bullet is composed per profile (see `_CPSAT_CONTRACT_ROLE_CORE`).
+# Everything up to the execution-role bullet is profile-independent. That bullet
+# is composed per profile (see `_CPSAT_CONTRACT_ROLE_CORE`), and the full profile
+# alone appends the checker mandates after the shared advisory tail.
 _CPSAT_OUTPUT_CONTRACT_HEAD = """\
 CP-SAT OUTPUT CONTRACT — the transport the server parses, and the form any
 checker must be able to grade:
@@ -66,6 +67,12 @@ checker must be able to grade:
 # grade", "one grading standard applies to every variant") but must never say
 # the server runs, supplies, or invokes one — that claim is only true in the
 # full profile, and the head reaches core verbatim.
+#
+# For the same reason the checker MANDATES live in the CP-SAT workflow prompt's
+# checker-gate step (7c), which the full profile alone registers — not here. This
+# fragment is spliced into `solve_constraint_problem`, which BOTH profiles serve
+# and which routes to no checker-taking tool, so a checker mandate here would be
+# dead weight in one prompt and a false promise in the other.
 _CPSAT_CONTRACT_ROLE_FULL = """\
 - You generate and repair the script; the server only executes it and runs the
   checker you supply.
@@ -76,7 +83,10 @@ _CPSAT_CONTRACT_ROLE_CORE = """\
 """
 
 # Shared tail of the execution-role bullet: true in both profiles, so it stays
-# one string rather than being duplicated into each variant.
+# one string rather than being duplicated into each variant. Its two-space indent
+# makes it a CONTINUATION of that bullet, so it must stay the LAST thing in the
+# fragment — anything appended after it renders as new top-level bullets, outside
+# what "this guidance" refers to.
 _CPSAT_CONTRACT_ADVISORY = """\
   This guidance is advisory — the deterministic guarantee starts only when an
   MCP execution tool actually runs the script, so a script you write and never
@@ -725,13 +735,13 @@ User problem:
         out, exhaust memory, or repeat the model's own modeling bug on
         exactly the hard instances where an independent verdict matters.
       - Never accept VACUOUSLY. Validate the instance BEFORE grading against
-        it and return `error` for an empty or degenerate one (no jobs, no
-        items, a missing dimension): every constraint loop trivially
-        succeeds over an empty collection, so a serialization slip that
-        dropped the instance would otherwise score a clean `accepted`. For
-        the same reason check COVERAGE — every element the instance requires
-        is present in the solution — not only that the entries present are
-        self-consistent.
+        it and return `error` when required keys are missing or domain
+        cardinalities disagree with the supplied data. A zero-cardinality
+        domain is valid when its cardinality, data, solution, and objective
+        (when present) agree; an unexpectedly empty collection may instead
+        reveal a serialization slip. Check COVERAGE — every element the
+        instance requires is present in the solution — not only that the
+        entries present are self-consistent.
       - SAFETY: generate only validation code — no network access, no file
         mutations, no subprocess spawning — unless the user explicitly
         requested it. The server executes this code locally and does not
@@ -760,6 +770,14 @@ User problem:
    problem has structural constraints the reported `status` alone cannot
    confirm, or when the result will be reused and higher confidence is
    valuable.
+   OPTIONAL CHECKER SELF-TEST: `run_cpsat_python_file_checked(...,
+   test_checker=true)` reruns the checker only after its baseline accepts, using
+   four generic mutations of the solution. Read `checker_test.mutations`, not
+   just `rejected_count`/`accepted_count`: `rejected_count: 0, accepted_count:
+   0` can mean no mutation applied or that every probe errored, timed out, or
+   was skipped. A rejection shows non-vacuity, not completeness; zero rejections
+   is inconclusive because generic mutations can remain feasible. For stronger
+   evidence, also test a problem-specific known-invalid payload.
 
 8. To replay a saved artifact later, read its
    `.openconstraint-model.json` manifest and call
@@ -908,8 +926,8 @@ save-tool provenance.
    incorrect formulation from winning the tuning-stage race. That only holds
    if each checker is a PREDICATE that grades the emitted solution against
    the instance — one that re-solves the problem inherits the very failure it
-   exists to catch, and one that accepts an empty or degenerate instance
-   instead of erroring passes every candidate alike. For a
+   exists to catch, and one that accepts missing or cardinality-inconsistent
+   instance data instead of erroring passes every candidate alike. For a
    cross-backend comparison, draft TWO backend-specific checkers that enforce
    the same problem constraints. They are NOT interchangeable source:
    MiniZinc uses inline MiniZinc solution-checker source; CP-SAT uses a Python

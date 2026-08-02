@@ -1212,8 +1212,9 @@ core profile, so start the server with `openconstraint-mcp stdio --toolset full`
 
 - **`run_cpsat_python_file_checked(script_path: str, checker_path: str,
   timeout_ms: int = 30000, args: list[str] | None = None, problem: str | None =
-  None, checker_timeout_ms: int | None = None, seed: int | None = None, config:
-  dict | None = None)`** *(full profile only — start the server with
+  None, checker_timeout_ms: int | None = None, test_checker: bool = False,
+  seed: int | None = None, config: dict | None = None)`** *(full profile only —
+  start the server with
   `--toolset full`)* — `run_cpsat_python_file` plus a mandatory verification
   pass, in one synchronous call. Both `script_path` and the **required**
   `checker_path` are existing local files; each runs in **its own directory**
@@ -1247,34 +1248,128 @@ core profile, so start the server with `openconstraint-mcp stdio --toolset full`
   relative to the script's directory, not the instance itself.
   `examples/job_shop/checker.py`, for instance, returns `rejected` without it.
 
-  **`checker_timeout_ms`** defaults to `timeout_ms`. `args`, `seed`, and
-  `config` behave exactly as on `run_cpsat_python_file` and apply to the model
-  child only — the checker is a verification step, never a replayed solve.
+  **`checker_timeout_ms`** defaults to `timeout_ms`. When `test_checker` is on,
+  an omitted value is capped at the largest checker timeout that fits the
+  synchronous wall-clock budget, but never derived below **2000 ms** — see the
+  wall-clock section. `args`, `seed`, and `config` behave exactly as
+  on `run_cpsat_python_file` and apply to the model child only — the checker is
+  a verification step, never a replayed solve.
 
   Returns a **`CpsatPythonCheckedResult`**: every `CpsatPythonResult` field,
   plus `checker` (the checker report, whose `status` is the verdict),
   `checker_skipped_reason` (set *instead of* `checker` when the run produced no
-  checkable incumbent — the two are mutually exclusive), and
-  `checker_timeout_ms`. A checker that rejects, times out, crashes, or emits
+  checkable incumbent — the two are mutually exclusive), `checker_timeout_ms`,
+  and `checker_test` (the self-test report described below; `null` unless
+  `test_checker` opted in). A checker that rejects, times out, crashes, or emits
   garbage **does not fail the call**: the model result always survives and the
-  verdict is reported. The top-level `diagnostic` composes both halves — a run
-  timeout wins, else a failed checker overrides, else the run's own diagnostic
-  — so `diagnostic: null` is the clean-success signal only when the checker
-  also accepts; an `optimal` run the checker rejects surfaces a
-  `checker_failed` diagnostic instead. A timed-out run **with** a recovered
-  incumbent is still checked; one without it is skipped.
+  verdict is reported. The top-level `diagnostic` composes the run and baseline
+  checker: a run timeout wins, else a failed checker overrides, else the run's
+  own diagnostic. An `optimal` run the checker rejects surfaces a
+  `checker_failed` diagnostic. A
+  timed-out run **with** a recovered incumbent is still checked; one without it
+  is skipped.
+
+  **`test_checker` — mutation probe.** Opt-in, default `false`.
+  Nothing in an `accepted` verdict distinguishes a real checker from
+  `print('{"status": "accepted", "errors": []}')`. With `test_checker: true`,
+  after — and *only* after — an `accepted` baseline verdict, the server re-runs
+  **your checker** against four deterministic, domain-agnostic mutations of the
+  solution: `objective_perturbed`, `element_dropped`, `element_duplicated`, and
+  `numeric_field_perturbed`. The element mutations operate on the longest
+  non-empty list among the solution's top-level values (ties broken by sorted
+  key order); element type does not matter, since dropping or duplicating an
+  entry never looks inside it — a list of objects, of bare integers, of rendered
+  strings, or of nested lists is equally mutable. The numeric mutation bumps a
+  number reachable from that list's first element (its first integer field if
+  the element is an object, the element itself if it is an integer), falling
+  back to a top-level integer when there is no list *or* its leading element
+  yields no integer. If no integer exists anywhere, it flips the first boolean
+  instead, so a flat boolean assignment such as `{"x1": true, "x2": false}`
+  still produces an applied mutation. The result is reported in a new
+  `checker_test` field:
+
+  - `mutations` — one **compact** row per mutation with its `name`, plus
+    exactly one of a `skipped_reason` when the mutation was never graded (it
+    could not be produced, or its probe faulted mid-flight — one faulted row
+    never discards the others' verdicts) and the verdict when it was: `status`,
+    an `errors` prefix capped at 8 KiB of compact JSON (including an explicit
+    truncation marker), and `duration_ms`. A mutation ran iff its row
+    carries a `status`. Rows deliberately omit the mutant's raw
+    `stdout`/`stderr`/`details`: four of those, each able to hold a MiB of
+    checker output, would flood your client's context to say something
+    `status` and the bounded errors prefix already say. The accepted baseline
+    is not repeated here either — the top-level `checker` is the one full
+    report returned, including its complete errors.
+  - `rejected_count` — the checker graded the mutant and refused it. Evidence
+    the checker is not vacuous.
+  - `accepted_count` — the checker graded the mutant and swallowed it. This is
+    the tolerated-corruption count.
+
+  An `error`/`timeout` mutant reached no verdict and counts in neither field,
+  same as a skipped mutation — so `rejected_count: 0, accepted_count: 0` alone
+  cannot distinguish "the solution's shape offered nothing to corrupt" from
+  "every mutant that ran errored out or timed out": a checker that *choked* on
+  a corrupted payload is not a checker that *tolerated* it, and the two
+  deserve opposite reactions, but both leave these counts at zero. Read
+  `mutations` directly to tell them apart.
+
+  **A rejection proves non-vacuity, not completeness.** It shows the checker can
+  reject a payload — never that it grades every constraint. Like every probe
+  here it is not an independent correctness proof, and a checker does not prove
+  optimization optimality. Because these generic mutations are not
+  known-invalid, a zero `rejected_count` over mutants that actually ran is
+  still inconclusive and produces no top-level diagnostic: every mutated
+  solution may still be feasible. Treat it as a prompt
+  to test the checker separately with a problem-specific, known-invalid payload,
+  not as a verdict about the checker. A non-`accepted`
+  baseline leaves `checker_test` `null` — there is nothing to test the checker
+  against. A fault while probing one mutation becomes that row's
+  `skipped_reason` rather than escaping, so the run, its `accepted` verdict, and
+  the other rows all survive; if building the mutations fails outright — a
+  solution nested too deeply to copy, say — every row is reported skipped for
+  that reason and the run still returns normally. The self-test is
+  synchronous-only:
+  `submit_cpsat_python_file_job` has no `test_checker`.
 
   **Wall clock.** This call is nominally
   `(timeout_ms + ~8 s) + (checker_timeout_ms + ~8 s)` — two sequential children,
-  each plus the process-tree termination grace — so at the 30 s defaults it can
-  run about **76 s**. Set your MCP client's tool timeout accordingly in your own
-  client config — a 900 s cap (Codex's `tool_timeout_sec = 900`) leaves room for
-  a long solve without wedging the client indefinitely. `timeout_ms` has
-  no upper bound by design, because a caller must be able to ask for the solve
-  time the problem needs; every child still runs under the executor's own cap
-  with process-tree kill. For a solve longer than a synchronous MCP call can
-  hold, use `submit_cpsat_python_file_job`, which is path-native for the
-  *script* and is not bound by a synchronous timeout — but its `checker` is
+  each plus the process-tree termination grace — plus one further checker child
+  per applied mutation, `(applied mutations) × (checker_timeout_ms + ~8 s)`,
+  whenever `test_checker` is on. At the 30 s defaults that is about **76.5 s**
+  with it off. An explicitly requested 30 s checker timeout with all four
+  mutations would project to about **229.5 s** and is rejected.
+
+  **Only `test_checker` is gated.** With it on, the call limits the projected
+  worst case to **120 s**, charging each child its timeout plus a conservative
+  process-tree termination/poll overhead and assuming all four mutations apply.
+  When `checker_timeout_ms` is omitted, the server uses the smaller of
+  `timeout_ms` and the largest checker budget that fits. The 30 s model default
+  therefore derives an **8100 ms** checker timeout and projects to exactly 120 s,
+  so `test_checker: true` works without changing another argument. An explicit
+  over-budget checker timeout is rejected before any child runs.
+
+  The derived value shrinks as `timeout_ms` grows, and it becomes the **baseline**
+  checker's budget as well as the mutants' — so it is floored at **2000 ms**
+  rather than allowed to dwindle, and a `timeout_ms` that would force it lower
+  (above about **60.5 s**) is rejected instead. Without that floor, opting into
+  an informational probe could time out a baseline checker that would have been
+  given the full `timeout_ms`, turning a clean run into a `checker_failed` one.
+  The floor bounds only the *derived* cap: a deliberately short `timeout_ms`
+  still yields a checker timeout that matches it, and an explicit
+  `checker_timeout_ms` is honoured as given. The rejection message reports the
+  model/checker budgets, child count, overhead, and total. The ceiling exists because the
+  self-test is the only thing that turns one checker child into five *and* has
+  no background-job equivalent, so an over-budget probe would have nowhere to
+  go.
+
+  Without `test_checker`, `timeout_ms` has **no upper bound** by design, because
+  a caller must be able to ask for the solve time the problem needs; every child
+  still runs under the executor's own cap with process-tree kill. Set your MCP
+  client's tool timeout accordingly in your own client config — a 900 s cap
+  (Codex's `tool_timeout_sec = 900`) leaves room for a long solve without
+  wedging the client indefinitely. For a solve longer than a synchronous MCP
+  call can hold, use `submit_cpsat_python_file_job`, which is path-native for
+  the *script* and is not bound by a synchronous timeout — but its `checker` is
   **inline source**, run from a temp directory rather than the checker's own
   directory, so a checker that reads a relative sibling file will not find it
   there.

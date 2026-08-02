@@ -253,7 +253,9 @@ def test_output_contract_fragment_variants_differ_only_in_the_role_clause() -> N
     # The variants share one head and one advisory tail, so every contract RULE
     # and the advisory framing stay byte-identical; only the execution-role
     # clause between them may differ. This is the no-drift property the single
-    # constant used to give for free, now that there are two.
+    # constant used to give for free, now that there are two. Checker MANDATES
+    # are deliberately not here — they live in the full-only CP-SAT workflow
+    # prompt's step 7c, so neither variant carries them.
     def _shared_halves(fragment: str) -> tuple[str, str]:
         rules, _, rest = fragment.partition("- You generate and repair the script")
         _, _, advisory = rest.partition("This guidance is advisory")
@@ -1208,6 +1210,16 @@ async def test_checker_authoring_guidance_reads_error_back_as_no_valid_verdict()
 
 
 @pytest.mark.asyncio
+async def test_cpsat_workflow_prompt_interprets_the_optional_checker_self_test() -> None:
+    lower = await _cpsat_workflow_lower()
+
+    assert "optional checker self-test" in lower
+    assert "`rejected_count: 0, accepted_count: 0`" in lower
+    assert "non-vacuity, not completeness" in lower
+    assert "known-invalid payload" in lower
+
+
+@pytest.mark.asyncio
 async def test_cpsat_python_solution_workflow_prompt_checker_is_a_predicate_not_a_solver() -> None:
     """The checker child runs under `sys.executable` — the server's own venv, which
     ships `ortools` — so a checker CAN re-solve. One that does inherits the model's
@@ -1222,16 +1234,13 @@ async def test_cpsat_python_solution_workflow_prompt_checker_is_a_predicate_not_
 
 
 @pytest.mark.asyncio
-async def test_cpsat_python_solution_workflow_prompt_checker_must_not_accept_vacuously() -> None:
-    """A checker whose constraint loops run over an empty instance returns `accepted`
-    with no errors — a green verdict proving nothing. The instance must be validated
-    before it is graded against, and the solution checked for coverage."""
+async def test_cpsat_python_solution_workflow_prompt_checker_validates_cardinality() -> None:
     text = await _get_prompt_text("cpsat_python_solution_workflow", {"problem": SAMPLE_PROBLEM})
     lower = " ".join(text.split()).lower()
 
     assert "never accept vacuously" in lower
-    assert "return `error` for an empty or degenerate one" in lower
-    assert "every constraint loop trivially succeeds over an empty collection" in lower
+    assert "domain cardinalities disagree with the supplied data" in lower
+    assert "a zero-cardinality domain is valid" in lower
     assert "check coverage" in lower
 
 
@@ -1562,14 +1571,14 @@ async def test_auto_tune_constraint_problem_prompt_backend_local_winner_selectio
 @pytest.mark.asyncio
 async def test_auto_tune_constraint_problem_prompt_race_checker_must_discriminate() -> None:
     """The race attaches a checker precisely to keep an incorrect formulation from
-    winning. A checker that re-solves, or that accepts a degenerate instance, passes
-    every candidate alike — the race then ranks on speed with correctness unchecked."""
+    winning. A checker that re-solves or accepts malformed instance data passes every
+    candidate alike — the race then ranks on speed with correctness unchecked."""
     text = await _get_prompt_text("auto_tune_constraint_problem", {"problem": SAMPLE_PROBLEM})
     lower = " ".join(text.split()).lower()
 
     assert "each checker is a predicate that grades the emitted solution" in lower
     assert "re-solves the problem inherits the very failure it exists to catch" in lower
-    assert "accepts an empty or degenerate instance instead of erroring" in lower
+    assert "accepts missing or cardinality-inconsistent instance data" in lower
 
 
 @pytest.mark.asyncio
