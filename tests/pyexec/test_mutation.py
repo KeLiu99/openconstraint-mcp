@@ -209,6 +209,14 @@ def test_numeric_field_perturbed_bumps_a_bare_int_element() -> None:
     assert mutation.solution == {"assign": [4, 1, 2]}
 
 
+def test_numeric_field_perturbed_prefers_a_top_level_int_to_a_list_head_bool() -> None:
+    solution = {"tasks": [True], "makespan": 12}
+
+    mutation = _by_name(solution, 1)[NUMERIC_FIELD_PERTURBED]
+
+    assert mutation.solution == {"tasks": [True], "makespan": 13}
+
+
 def test_numeric_field_perturbed_is_skipped_for_a_list_of_strings() -> None:
     # A string head yields no number, and there is no top-level int to fall
     # back to.

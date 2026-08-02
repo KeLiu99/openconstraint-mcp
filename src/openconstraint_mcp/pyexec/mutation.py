@@ -116,32 +116,6 @@ def _select_list_key(solution: dict) -> str | None:
     return best_key
 
 
-def _first_int_field(mapping: dict) -> str | None:
-    """Return the first int-valued key of ``mapping`` in its own key order."""
-    for key, value in mapping.items():
-        if _is_plain_int(value):
-            return key
-    return None
-
-
-def _first_bool_field(mapping: dict) -> str | None:
-    """Return the first bool-valued key of ``mapping`` in its own key order."""
-    for key, value in mapping.items():
-        if isinstance(value, bool):
-            return key
-    return None
-
-
-def _no_perturbable_field_reason(list_key: str | None) -> str:
-    """Explain a numeric-mutation skip, naming every place that was searched."""
-    if list_key is None:
-        return "the solution has no top-level integer- or boolean-valued field"
-    return (
-        f"neither the first element of solution[{list_key!r}] nor the solution's "
-        "top level yields an integer or boolean to perturb"
-    )
-
-
 def generate_mutations(
     solution: dict | None, objective: float | int | None
 ) -> list[SolutionMutation]:
@@ -222,53 +196,40 @@ def _element_duplicated(
 def _numeric_field_perturbed(
     solution: dict, objective: float | int | None, list_key: str | None
 ) -> SolutionMutation:
+    # Search the selected list's head before the top level, but exhaust integer
+    # candidates before using a boolean fallback anywhere.
+    candidates: list[tuple[object, str | None]] = [(solution, None)]
     if list_key is not None:
-        head = solution[list_key][0]
-        # An object entry carries its numbers in fields; a bare int entry IS the
-        # number. Any other element type (a string, a nested list) yields nothing
-        # to bump and falls through to the top-level search below.
-        field = _first_int_field(head) if isinstance(head, dict) else None
-        if field is not None or _is_plain_int(head):
-            mutated = copy.deepcopy(solution)
-            if field is not None:
-                mutated[list_key][0][field] += 1
-            else:
-                mutated[list_key][0] += 1
-            return SolutionMutation(
-                name=NUMERIC_FIELD_PERTURBED, solution=mutated, objective=objective
-            )
-    # Fall back to a top-level int whether or not a list was selected: a
-    # selected list whose leading element is all strings still leaves a scalar
-    # summary field (a makespan, a total cost) worth perturbing.
-    field = _first_int_field(solution)
-    if field is not None:
-        mutated = copy.deepcopy(solution)
-        mutated[field] += 1
-        return SolutionMutation(
-            name=NUMERIC_FIELD_PERTURBED, solution=mutated, objective=objective
-        )
+        candidates.insert(0, (solution[list_key][0], list_key))
 
-    # Booleans are an in-domain fallback, not integers to increment: preserve
-    # existing numeric targeting when both shapes are present, then flip a bool
-    # only when no integer was available anywhere.
-    if list_key is not None:
-        head = solution[list_key][0]
-        bool_field = _first_bool_field(head) if isinstance(head, dict) else None
-        if bool_field is not None or isinstance(head, bool):
-            mutated = copy.deepcopy(solution)
-            if bool_field is not None:
-                mutated[list_key][0][bool_field] = not mutated[list_key][0][bool_field]
-            else:
-                mutated[list_key][0] = not mutated[list_key][0]
-            return SolutionMutation(
-                name=NUMERIC_FIELD_PERTURBED, solution=mutated, objective=objective
+    for booleans in (False, True):
+        for candidate, candidate_list_key in candidates:
+            values = candidate.items() if isinstance(candidate, dict) else ((0, candidate),)
+            for field, value in values:
+                if (isinstance(value, bool) if booleans else _is_plain_int(value)):
+                    mutated = copy.deepcopy(solution)
+                    if candidate_list_key is None:
+                        target = mutated
+                    elif isinstance(candidate, dict):
+                        target = mutated[candidate_list_key][0]
+                    else:
+                        target = mutated[candidate_list_key]
+                    if booleans:
+                        target[field] = not target[field]
+                    else:
+                        target[field] += 1
+                    return SolutionMutation(
+                        name=NUMERIC_FIELD_PERTURBED, solution=mutated, objective=objective
+                    )
+
+    return SolutionMutation(
+        name=NUMERIC_FIELD_PERTURBED,
+        skipped_reason=(
+            "the solution has no top-level integer- or boolean-valued field"
+            if list_key is None
+            else (
+                f"neither the first element of solution[{list_key!r}] nor the solution's "
+                "top level yields an integer or boolean to perturb"
             )
-    bool_field = _first_bool_field(solution)
-    if bool_field is None:
-        return SolutionMutation(
-            name=NUMERIC_FIELD_PERTURBED,
-            skipped_reason=_no_perturbable_field_reason(list_key),
-        )
-    mutated = copy.deepcopy(solution)
-    mutated[bool_field] = not mutated[bool_field]
-    return SolutionMutation(name=NUMERIC_FIELD_PERTURBED, solution=mutated, objective=objective)
+        ),
+    )
