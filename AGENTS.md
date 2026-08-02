@@ -18,6 +18,8 @@ State assumptions explicitly. Present multiple interpretations when the request 
 
 Write the minimum code that solves the stated problem. No speculative features, no abstractions for single-use code, no configurability that wasn't requested, no error handling for impossible scenarios. If 200 lines could be 50, rewrite it. Test: would a senior engineer call this overcomplicated?
 
+Avoid over-engineering and overkill: build the simplest thing that meets the stated requirements, and treat these as stop-and-ask signals rather than things to build and mention afterward — a config knob, an abstraction layer, a retry/cache/fallback, or a new module the request did not name. Stopping early applies to *design surface*, never to scope: finish the tests, docs, and every part of the ask.
+
 ### 3. Surgical Changes
 
 Touch only what the task requires. Don't "improve" adjacent code, comments, or formatting. Match existing style even if you'd do it differently. Flag unrelated dead code — don't delete it. Remove imports/variables/functions that *your* changes orphaned; leave pre-existing dead code alone. Every changed line should trace to the user's request.

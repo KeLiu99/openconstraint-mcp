@@ -123,9 +123,16 @@ from .script_path import validate_script_args, validate_script_path
 
 DEFAULT_PYEXEC_TIMEOUT_MS: int = 30_000
 
-# Shared ceiling for synchronous CP-SAT orchestrators that can run multiple
-# sequential children. Keep enough margin for typical MCP client timeouts.
-MAX_CPSAT_SYNC_WALL_CLOCK_MS: int = 120_000
+# Ceiling for the checker self-test's projected worst-case wall clock (see
+# `_resolve_checked_checker_timeout_ms`), which runs the checker sequentially
+# against the baseline plus every mutation. That projection is TIGHT — the runs
+# really are sequential, and children that time out realize it — so this number
+# is close to the wall clock a client actually waits. Keep enough margin for
+# typical MCP client timeouts. `run_cpsat_python_experiment` carries a higher
+# nominal cap (`MAX_CPSAT_EXPERIMENT_WALL_CLOCK_MS` in experiment.py) because
+# its projection is a loose upper bound, not because a longer real wait is
+# acceptable there — both tools block one synchronous MCP call.
+MAX_CPSAT_SELF_TEST_WALL_CLOCK_MS: int = 120_000
 _CPSAT_EXECUTOR_POLL_SLACK_MS: int = 250
 
 # Floor for a checker timeout DERIVED from the self-test budget. The derived
@@ -226,14 +233,16 @@ def _resolve_checked_checker_timeout_ms(*, timeout_ms: int, checker_timeout_ms: 
     fixed_budget_ms = model_budget_ms + checker_runs * overhead_ms
     no_fallback = "checker self-testing has no background-job equivalent"
     if checker_timeout_ms is None:
-        max_checker_timeout_ms = (MAX_CPSAT_SYNC_WALL_CLOCK_MS - fixed_budget_ms) // checker_runs
+        max_checker_timeout_ms = (
+            MAX_CPSAT_SELF_TEST_WALL_CLOCK_MS - fixed_budget_ms
+        ) // checker_runs
         if max_checker_timeout_ms < _MIN_SELF_TEST_CHECKER_TIMEOUT_MS:
             raise ValueError(
                 f"fixed budget {fixed_budget_ms} ms (timeout_ms={timeout_ms} + "
                 f"{checker_runs} checker runs x {overhead_ms} ms overhead) leaves only "
                 f"{max_checker_timeout_ms} ms per checker child, under the "
                 f"{_MIN_SELF_TEST_CHECKER_TIMEOUT_MS} ms floor "
-                f"(MAX_CPSAT_SYNC_WALL_CLOCK_MS={MAX_CPSAT_SYNC_WALL_CLOCK_MS} ms; "
+                f"(MAX_CPSAT_SELF_TEST_WALL_CLOCK_MS={MAX_CPSAT_SELF_TEST_WALL_CLOCK_MS} ms; "
                 f"reduce timeout_ms, or drop test_checker — {no_fallback})"
             )
         # The floor bounds the DERIVED cap, not the caller's own model timeout: a
@@ -242,12 +251,12 @@ def _resolve_checked_checker_timeout_ms(*, timeout_ms: int, checker_timeout_ms: 
         checker_timeout_ms = min(timeout_ms, max_checker_timeout_ms)
     checker_budget_ms = checker_timeout_ms + overhead_ms
     projected_ms = model_budget_ms + checker_runs * checker_budget_ms
-    if projected_ms <= MAX_CPSAT_SYNC_WALL_CLOCK_MS:
+    if projected_ms <= MAX_CPSAT_SELF_TEST_WALL_CLOCK_MS:
         return checker_timeout_ms
     raise ValueError(
         f"projected budget {projected_ms} ms (timeout_ms={timeout_ms} + "
         f"checker_timeout_ms={checker_timeout_ms}, x{checker_runs} runs incl. overhead) "
-        f"exceeds MAX_CPSAT_SYNC_WALL_CLOCK_MS={MAX_CPSAT_SYNC_WALL_CLOCK_MS} ms "
+        f"exceeds MAX_CPSAT_SELF_TEST_WALL_CLOCK_MS={MAX_CPSAT_SELF_TEST_WALL_CLOCK_MS} ms "
         f"(reduce timeout_ms and/or checker_timeout_ms, or drop test_checker — {no_fallback})"
     )
 
@@ -950,7 +959,7 @@ def run_cpsat_python_file_checked(
     plus ``(applied mutations) × (checker_timeout_ms + tree-kill grace)`` when
     ``test_checker`` is on. Only the ``test_checker`` projection is GATED: with
     the self-test on, the call conservatively assumes all four mutations apply
-    and rejects an explicit projection over ``MAX_CPSAT_SYNC_WALL_CLOCK_MS``
+    and rejects an explicit projection over ``MAX_CPSAT_SELF_TEST_WALL_CLOCK_MS``
     before any child runs. An omitted ``checker_timeout_ms`` is reduced to fit
     — the derived value is the BASELINE checker's budget too, so the call
     rejects instead of deriving one under the self-test floor.

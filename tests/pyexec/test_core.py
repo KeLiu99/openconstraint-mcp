@@ -1501,7 +1501,7 @@ def test_checked_run_rejects_an_over_budget_self_test_before_the_model_runs(
     script, checker = _checked_pair(tmp_path)
 
     with patch("openconstraint_mcp.pyexec.core.run_cpsat_python_file") as fake_run:
-        with pytest.raises(ValueError, match="MAX_CPSAT_SYNC_WALL_CLOCK_MS"):
+        with pytest.raises(ValueError, match="MAX_CPSAT_SELF_TEST_WALL_CLOCK_MS"):
             run_cpsat_python_file_checked(script, checker, **kwargs)
 
     fake_run.assert_not_called()
@@ -1618,7 +1618,7 @@ def _patch_checker_test(
     """
     # These tests isolate mutation/report behavior; admission has dedicated
     # coverage above.
-    monkeypatch.setattr("openconstraint_mcp.pyexec.core.MAX_CPSAT_SYNC_WALL_CLOCK_MS", 10**9)
+    monkeypatch.setattr("openconstraint_mcp.pyexec.core.MAX_CPSAT_SELF_TEST_WALL_CLOCK_MS", 10**9)
     seen: list[CpsatPythonResult] = []
     monkeypatch.setattr(
         "openconstraint_mcp.pyexec.core.run_cpsat_python_file",
@@ -1973,7 +1973,7 @@ def test_a_graded_row_caps_oversized_checker_errors(
     script, checker = _checked_pair(tmp_path)
     baseline = _checked_result("optimal", solution=_MUTABLE_SOLUTION)
     oversized_errors = ["x" * (_MUTATION_ERRORS_MAX_BYTES + 1), "second error"]
-    monkeypatch.setattr("openconstraint_mcp.pyexec.core.MAX_CPSAT_SYNC_WALL_CLOCK_MS", 10**9)
+    monkeypatch.setattr("openconstraint_mcp.pyexec.core.MAX_CPSAT_SELF_TEST_WALL_CLOCK_MS", 10**9)
     monkeypatch.setattr(
         "openconstraint_mcp.pyexec.core.run_cpsat_python_file", lambda script, **kw: baseline
     )

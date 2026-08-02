@@ -1609,7 +1609,7 @@ core profile, so start the server with `openconstraint-mcp stdio --toolset full`
   solving through the MCP file tools never mutates the checkout on its own.
   Because the 600s runs needed for the
   larger instances exceed `run_cpsat_python_experiment`'s non-overridable
-  120s wall-clock budget, those were driven with `submit_cpsat_python_file_job`
+  210s wall-clock budget, those were driven with `submit_cpsat_python_file_job`
   instead, three at a time so the compared models see identical machine load.
   Each model's docstring records its measured result; the short version is that
   no formulation wins outright. On mk01 all five prove the optimum of 40 in
