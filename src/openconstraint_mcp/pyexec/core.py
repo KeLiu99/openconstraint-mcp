@@ -789,9 +789,10 @@ def _run_checker_test(
     only a ``rejected`` verdict counts: an ``error``/``timeout`` mutant proves
     nothing, and a skipped mutation carries its reason instead.
 
-    A per-mutant checker infrastructure fault is absorbed by
-    ``_run_checker_or_report`` and recorded as an ``error`` report, so it does
-    not suppress the other mutation rows.
+    A fault while building or recording one mutant becomes that row's
+    ``skipped_reason``, so it cannot suppress the other mutation rows. A
+    per-mutant checker infrastructure fault is absorbed more specifically by
+    ``_run_checker_or_report`` and recorded as an ``error`` report.
 
     GENERATION gets its own boundary because it runs before any row exists.
     ``generate_mutations`` is stdlib over a pydantic-validated ``dict``, but its
@@ -815,26 +816,34 @@ def _run_checker_test(
                 CpsatMutationOutcome(name=mutation.name, skipped_reason=mutation.skipped_reason)
             )
             continue
-        mutant = run_result.model_copy(
-            update={"solution": mutation.solution, "objective": mutation.objective}
-        )
-        report = _run_checker_or_report(
-            checker_path,
-            mutant,
-            problem=problem,
-            timeout_ms=timeout_ms,
-            tracker=tracker,
-        )
-        outcomes.append(
-            CpsatMutationOutcome(
-                name=mutation.name,
-                # The mutant's diagnostic is stripped: see CpsatMutationOutcome.
-                # A `rejected` mutant is the DESIRED outcome here, so its
-                # `checker_failed` diagnostic would invert that category's
-                # meaning for every client that branches on it.
-                report=report.model_copy(update={"diagnostic": None}),
+        try:
+            mutant = run_result.model_copy(
+                update={"solution": mutation.solution, "objective": mutation.objective}
             )
-        )
+            report = _run_checker_or_report(
+                checker_path,
+                mutant,
+                problem=problem,
+                timeout_ms=timeout_ms,
+                tracker=tracker,
+            )
+            outcomes.append(
+                CpsatMutationOutcome(
+                    name=mutation.name,
+                    # The mutant's diagnostic is stripped: see CpsatMutationOutcome.
+                    # A `rejected` mutant is the DESIRED outcome here, so its
+                    # `checker_failed` diagnostic would invert that category's
+                    # meaning for every client that branches on it.
+                    report=report.model_copy(update={"diagnostic": None}),
+                )
+            )
+        except Exception as exc:  # noqa: BLE001 - one probe must not void the checked run
+            outcomes.append(
+                CpsatMutationOutcome(
+                    name=mutation.name,
+                    skipped_reason=f"mutation probe failed: {exception_summary(exc)}",
+                )
+            )
 
     return CpsatCheckerTestReport(baseline=baseline, mutations=outcomes)
 

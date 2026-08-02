@@ -1770,6 +1770,36 @@ def test_a_checker_that_swallows_every_mutation_reports_them_as_tolerated(
     assert result.checker_test.accepted_count == 4
 
 
+def test_a_faulted_mutation_probe_keeps_other_verdicts(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    built = 0
+
+    class _FaultsOnTheSecondMutant(CpsatPythonResult):
+        def model_copy(self, **kwargs: Any) -> CpsatPythonResult:
+            nonlocal built
+            built += 1
+            if built == 2:
+                raise RuntimeError("mutant build exploded")
+            return super().model_copy(**kwargs)
+
+    script, checker = _checked_pair(tmp_path)
+    base = _checked_result("optimal", solution=_MUTABLE_SOLUTION)
+    _patch_checker_test(
+        monkeypatch,
+        _FaultsOnTheSecondMutant(**base.model_dump()),
+        lambda result: "accepted" if result.solution == _MUTABLE_SOLUTION else "rejected",
+    )
+
+    result = run_cpsat_python_file_checked(script, checker, test_checker=True)
+
+    assert result.checker_test is not None
+    assert result.checker_test.rejected_count == 2
+    assert result.checker_test.mutations[1].skipped_reason == (
+        "mutation probe failed: RuntimeError: mutant build exploded"
+    )
+
+
 def _deeply_nested_solution() -> dict:
     """A solution whose nesting outruns `copy.deepcopy` but nothing else.
 
