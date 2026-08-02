@@ -1757,7 +1757,7 @@ def test_errored_mutants_remain_graded_rows(
     result = run_cpsat_python_file_checked(script, checker, test_checker=True)
 
     assert result.checker_test is not None
-    assert [m.report.status for m in result.checker_test.mutations if m.report is not None] == [
+    assert [m.status for m in result.checker_test.mutations if m.status is not None] == [
         "error"
     ] * 4
 
@@ -1865,7 +1865,7 @@ def test_a_generation_fault_reports_every_mutation_as_skipped(
     assert result.checker_test is not None
     assert [m.name for m in result.checker_test.mutations] == list(CPSAT_MUTATION_NAMES)
     assert all(
-        m.report is None and (m.skipped_reason or "").startswith("mutation generation failed:")
+        m.status is None and (m.skipped_reason or "").startswith("mutation generation failed:")
         for m in result.checker_test.mutations
     )
 
@@ -1898,7 +1898,7 @@ def test_a_mutation_that_cannot_apply_is_skipped_with_a_reason(
     result = run_cpsat_python_file_checked(script, checker, test_checker=True)
 
     assert result.checker_test is not None
-    skipped = [m for m in result.checker_test.mutations if m.report is None]
+    skipped = [m for m in result.checker_test.mutations if m.status is None]
     assert [m.name for m in skipped] == [
         "element_dropped",
         "element_duplicated",
@@ -2012,9 +2012,31 @@ def test_a_flat_boolean_solution_gets_one_checker_probe(
     assert result.checker_test.accepted_count == 1
 
 
-def test_the_report_carries_the_baseline_verdict(
+def test_a_graded_row_projects_the_mutant_verdict_without_its_raw_output(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    # Four mutant reports' worth of stdout/stderr/details would flood a client;
+    # the row keeps only what the probe is asked to report.
+    script, checker = _checked_pair(tmp_path)
+    _patch_checker_test(
+        monkeypatch,
+        _checked_result("optimal", solution=_MUTABLE_SOLUTION),
+        _reject_a_dropped_task,
+    )
+
+    result = run_cpsat_python_file_checked(script, checker, test_checker=True)
+
+    assert result.checker_test is not None
+    rejected = [m for m in result.checker_test.mutations if m.status == "rejected"]
+    assert [(m.name, m.errors, m.duration_ms) for m in rejected] == [
+        ("element_dropped", ["nope"], 1)
+    ]
+
+
+def test_the_report_does_not_repeat_the_baseline_report(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The accepted baseline is already returned once, in full, as `checker`.
     script, checker = _checked_pair(tmp_path)
     _patch_checker_test(
         monkeypatch,
@@ -2024,8 +2046,8 @@ def test_the_report_carries_the_baseline_verdict(
 
     result = run_cpsat_python_file_checked(script, checker, test_checker=True)
 
-    assert result.checker_test is not None
-    assert result.checker_test.baseline.status == "accepted"
+    assert result.checker is not None and result.checker.status == "accepted"
+    assert "baseline" not in result.model_dump()["checker_test"]
 
 
 def test_a_rejected_baseline_produces_no_report(
@@ -2220,7 +2242,7 @@ def test_mutants_that_all_faulted_are_reported_as_errored_verdicts(
     result = _run_with_a_failing_mutant_child(tmp_path, monkeypatch)
 
     assert result.checker_test is not None
-    assert [m.report.status for m in result.checker_test.mutations if m.report is not None] == [
+    assert [m.status for m in result.checker_test.mutations if m.status is not None] == [
         "error"
     ] * 4
 

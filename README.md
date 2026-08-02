@@ -1288,12 +1288,16 @@ core profile, so start the server with `openconstraint-mcp stdio --toolset full`
   still produces an applied mutation. The result is reported in a new
   `checker_test` field:
 
-  - `baseline` — the checker's report on the real solution (always `accepted`).
-  - `mutations` — one row per mutation with its `name`, plus exactly one of a
-    `skipped_reason` when the mutation was never graded (it could not be
-    produced, or its probe faulted mid-flight — one faulted row never discards
-    the others' verdicts) and the checker's `report` when it was. A mutation
-    ran iff its row carries a `report`.
+  - `mutations` — one **compact** row per mutation with its `name`, plus
+    exactly one of a `skipped_reason` when the mutation was never graded (it
+    could not be produced, or its probe faulted mid-flight — one faulted row
+    never discards the others' verdicts) and the verdict when it was: `status`,
+    the checker's `errors`, and `duration_ms`. A mutation ran iff its row
+    carries a `status`. Rows deliberately omit the mutant's raw
+    `stdout`/`stderr`/`details`: four of those, each able to hold a MiB of
+    checker output, would flood your client's context to say something
+    `status` and `errors` already say. The accepted baseline is not repeated
+    here either — the top-level `checker` is the one full report returned.
   - `rejected_count` — the checker graded the mutant and refused it. Evidence
     the checker is not vacuous.
   - `accepted_count` — the checker graded the mutant and swallowed it. This is

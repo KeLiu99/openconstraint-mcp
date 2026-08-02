@@ -659,14 +659,26 @@ def _mutation_report(status: str) -> CpsatCheckerReport:
 
 
 def test_cpsat_mutation_outcome_graded_round_trips() -> None:
-    outcome = CpsatMutationOutcome(name="element_dropped", report=_mutation_report("rejected"))
+    outcome = CpsatMutationOutcome(
+        name="element_dropped", status="rejected", errors=["corrupted"], duration_ms=3
+    )
     dumped = outcome.model_dump()
     assert dumped["name"] == "element_dropped"
-    assert dumped["report"]["status"] == "rejected"
+    assert dumped["status"] == "rejected"
+
+
+def test_cpsat_mutation_outcome_carries_no_raw_checker_output() -> None:
+    # Up to four mutants run per checked call, each a checker child whose
+    # stdout+stderr share a 1 MiB cap and whose `details` is arbitrary JSON.
+    # Carrying those would let one tool result flood a client's context; the
+    # verdict plus its errors is the whole signal the probe exists to report.
+    bulky = {"stdout", "stderr", "details", "report"}
+
+    assert bulky.isdisjoint(CpsatMutationOutcome.model_fields)
 
 
 def test_cpsat_mutation_outcome_carries_no_separate_applied_field() -> None:
-    # A row ran IFF it carries a `report`; a third representation of that
+    # A row ran IFF it carries a `status`; a third representation of that
     # two-state fact could only ever restate it or contradict it.
     assert "applied" not in CpsatMutationOutcome.model_fields
 
@@ -685,38 +697,52 @@ def test_cpsat_mutation_outcome_skipped_round_trips() -> None:
     assert outcome.model_dump()["skipped_reason"] == "the run reported no objective"
 
 
-def test_cpsat_mutation_outcome_skipped_omits_the_report_under_exclude_none() -> None:
+def test_cpsat_mutation_outcome_skipped_omits_the_verdict_under_exclude_none() -> None:
     outcome = CpsatMutationOutcome(name="element_dropped", skipped_reason="no list")
-    assert "report" not in outcome.model_dump(exclude_none=True)
+    dumped = outcome.model_dump(exclude_none=True)
+
+    assert ("status" in dumped, "duration_ms" in dumped) == (False, False)
 
 
 def test_cpsat_mutation_outcome_rejects_a_row_carrying_both_outcomes() -> None:
-    with pytest.raises(ValidationError, match="exactly one of report and skipped_reason"):
+    with pytest.raises(ValidationError, match="exactly one of status and skipped_reason"):
         CpsatMutationOutcome(
             name="element_dropped",
             skipped_reason="no list",
-            report=_mutation_report("rejected"),
+            status="rejected",
         )
 
 
 def test_cpsat_mutation_outcome_rejects_a_row_carrying_neither_outcome() -> None:
     """A mutation that could not apply is never silently dropped."""
-    with pytest.raises(ValidationError, match="exactly one of report and skipped_reason"):
+    with pytest.raises(ValidationError, match="exactly one of status and skipped_reason"):
         CpsatMutationOutcome(name="element_dropped")
 
 
 def _checker_test_report(*statuses: str) -> CpsatCheckerTestReport:
     mutations = [
-        CpsatMutationOutcome(name=name, report=_mutation_report(status))
+        CpsatMutationOutcome(
+            name=name,
+            status=status,  # type: ignore[arg-type]
+            errors=[] if status == "accepted" else ["corrupted"],
+            duration_ms=3,
+        )
         for name, status in zip(CPSAT_MUTATION_NAMES, statuses, strict=False)
     ]
-    return CpsatCheckerTestReport(baseline=_mutation_report("accepted"), mutations=mutations)
+    return CpsatCheckerTestReport(mutations=mutations)
 
 
 def test_cpsat_checker_test_report_round_trips() -> None:
     report = _checker_test_report("accepted", "rejected")
     dumped = report.model_dump()
     assert (dumped["rejected_count"], "discriminating" in dumped) == (1, False)
+
+
+def test_cpsat_checker_test_report_does_not_repeat_the_baseline() -> None:
+    # The report only ever rides on a CpsatPythonCheckedResult whose top-level
+    # `checker` IS the accepted baseline, so repeating it here would serialize
+    # a second copy of a report that can hold a MiB of checker output.
+    assert "baseline" not in CpsatCheckerTestReport.model_fields
 
 
 def test_cpsat_checker_test_report_does_not_count_an_indeterminate_mutant() -> None:
@@ -732,7 +758,6 @@ def test_cpsat_checker_test_report_counts_a_tolerated_mutant() -> None:
 
 def test_cpsat_checker_test_report_excludes_a_skipped_row_from_every_count() -> None:
     report = CpsatCheckerTestReport(
-        baseline=_mutation_report("accepted"),
         mutations=[CpsatMutationOutcome(name="objective_perturbed", skipped_reason="no list")],
     )
 
@@ -743,10 +768,7 @@ def test_cpsat_checker_test_report_overrides_a_miscounted_tally() -> None:
     # The counts are derived from `mutations`, so a supplied tally cannot
     # misreport the table it summarizes.
     report = CpsatCheckerTestReport(
-        baseline=_mutation_report("accepted"),
-        mutations=[
-            CpsatMutationOutcome(name="objective_perturbed", report=_mutation_report("accepted"))
-        ],
+        mutations=[CpsatMutationOutcome(name="objective_perturbed", status="accepted")],
         rejected_count=1,
     )
 

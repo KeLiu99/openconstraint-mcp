@@ -791,7 +791,6 @@ def _run_checker_test(
     checker_path: Path,
     run_result: CpsatPythonResult,
     *,
-    baseline: CpsatCheckerReport,
     problem: str | None,
     timeout_ms: int,
     tracker: ChildProcessTracker | None,
@@ -806,6 +805,14 @@ def _run_checker_test(
     ``model_copy`` of the run result — the caller's result is never mutated — and
     only a ``rejected`` verdict counts: an ``error``/``timeout`` mutant proves
     nothing, and a skipped mutation carries its reason instead.
+
+    Each mutant's full ``CpsatCheckerReport`` is projected down to a compact
+    ``CpsatMutationOutcome`` and its raw output discarded; the accepted baseline
+    is not repeated here at all. The caller already returns that one report in
+    full as ``checker``, and up to four more — each able to carry a MiB of
+    checker stdout/stderr plus arbitrary ``details`` JSON — would make one tool
+    result several MiB of context for a diagnostic that only asks whether the
+    checker refused a corrupted payload.
 
     A fault while building or recording one mutant becomes that row's
     ``skipped_reason``, so it cannot suppress the other mutation rows. A
@@ -850,11 +857,15 @@ def _run_checker_test(
             outcomes.append(
                 CpsatMutationOutcome(
                     name=mutation.name,
-                    # The mutant's diagnostic is stripped: see CpsatMutationOutcome.
-                    # A `rejected` mutant is the DESIRED outcome here, so its
-                    # `checker_failed` diagnostic would invert that category's
-                    # meaning for every client that branches on it.
-                    report=report.model_copy(update={"diagnostic": None}),
+                    # Projected down to a compact row: see CpsatMutationOutcome.
+                    # The mutant's raw stdout/stderr/details are dropped (four
+                    # of these would flood a client's context), and so is its
+                    # diagnostic — a `rejected` mutant is the DESIRED outcome
+                    # here, so a `checker_failed` diagnostic would invert that
+                    # category's meaning for every client that branches on it.
+                    status=report.status,
+                    errors=report.errors,
+                    duration_ms=report.duration_ms,
                 )
             )
         except Exception as exc:  # noqa: BLE001 - one probe must not void the checked run
@@ -865,7 +876,7 @@ def _run_checker_test(
                 )
             )
 
-    return CpsatCheckerTestReport(baseline=baseline, mutations=outcomes)
+    return CpsatCheckerTestReport(mutations=outcomes)
 
 
 def run_cpsat_python_file_checked(
@@ -964,7 +975,6 @@ def run_cpsat_python_file_checked(
         checker_test = _run_checker_test(
             resolved_checker,
             run_result,
-            baseline=report,
             problem=problem,
             timeout_ms=effective_timeout_ms,
             tracker=tracker,

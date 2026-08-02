@@ -107,30 +107,46 @@ class CpsatMutationOutcome(BaseModel):
 
     ``name`` is the mutation's fixed identifier (``objective_perturbed``,
     ``element_dropped``, ``element_duplicated``, ``numeric_field_perturbed``).
-    Exactly one of ``report`` and ``skipped_reason`` is set: a mutation ran IFF
-    it carries a ``report``, so "the checker tolerated this" is always
+    Exactly one of ``status`` and ``skipped_reason`` is set: a mutation ran IFF
+    it carries a ``status``, so "the checker tolerated this" is always
     distinguishable from "this was never tried". A ``skipped_reason`` covers
     both a mutation that could not be produced and one whose probe faulted
-    mid-flight; either way it was never graded.
+    mid-flight; either way it was never graded, so ``errors`` stays empty and
+    ``duration_ms`` stays ``None`` (no checker child ran to time).
 
-    A mutant ``report`` deliberately carries NO ``Diagnostic``. Its verdict is
+    A COMPACT row, deliberately NOT a nested ``CpsatCheckerReport``. Up to four
+    mutants run per checked call, each a full checker child whose ``stdout`` +
+    ``stderr`` share a 1 MiB cap and whose ``details`` is arbitrary
+    checker-authored JSON. Embedding whole reports would let one tool result
+    serialize several MiB of raw output into an MCP client's context, and none
+    of it answers the question this probe exists to ask. ``status`` plus
+    ``errors`` is the entire signal: whether the checker refused the mutant and
+    what it said. The baseline's raw output is still available in full on the
+    result's top-level ``checker``.
+
+    The dropped ``timed_out``/``truncated`` flags are derivable from what
+    remains — a truncated mutant is ``error`` with ``"checker output was
+    truncated"``, a timed-out one is ``timeout`` with ``"checker timed out"``.
+
+    A mutant row deliberately carries NO ``Diagnostic``. Its verdict is
     evidence about the CHECKER, not a failure of this run: ``rejected`` is the
     DESIRED outcome here, so the ``checker_failed`` diagnostic every checker
     report normally carries would invert the meaning of a category clients
-    branch on everywhere else. ``status`` and ``errors`` carry the whole signal.
-    The top-level ``checker`` (baseline) report keeps its diagnostic as usual.
+    branch on everywhere else.
     """
 
     name: CpsatMutationName
+    status: Literal["accepted", "rejected", "error", "timeout"] | None = None
+    errors: list[str] = Field(default_factory=list)
+    duration_ms: int | None = None
     skipped_reason: str | None = None
-    report: CpsatCheckerReport | None = None
 
     @model_validator(mode="after")
-    def _report_and_reason_are_exclusive(self) -> CpsatMutationOutcome:
-        """Enforce the report/reason split the checker-test counts are tallied from."""
-        if (self.report is None) == (self.skipped_reason is None):
+    def _status_and_reason_are_exclusive(self) -> CpsatMutationOutcome:
+        """Enforce the verdict/reason split the checker-test counts are tallied from."""
+        if (self.status is None) == (self.skipped_reason is None):
             raise ValueError(
-                "CpsatMutationOutcome carries exactly one of report and skipped_reason "
+                "CpsatMutationOutcome carries exactly one of status and skipped_reason "
                 "(a graded mutation has a verdict; one that could not apply has a "
                 "reason and is never silently dropped)"
             )
@@ -141,9 +157,16 @@ class CpsatCheckerTestReport(BaseModel):
     """Report a caller-supplied checker's verdicts on generic mutations.
 
     Produced only when a checked run opted into ``test_checker`` AND the
-    ``baseline`` verdict on the real solution was ``accepted`` — there is
-    nothing to test the checker against otherwise. Each entry in ``mutations``
-    is the checker re-run against one mutated copy of that solution.
+    baseline verdict on the real solution was ``accepted`` — there is nothing
+    to test the checker against otherwise. Each entry in ``mutations`` is the
+    checker re-run against one mutated copy of that solution.
+
+    This report carries no baseline of its own. It only ever appears on a
+    ``CpsatPythonCheckedResult`` whose top-level ``checker`` IS that baseline —
+    the runner passes one object to both — and a validator there already
+    enforces that it was ``accepted``. Repeating it here would serialize a
+    second full copy of a report that can hold a MiB of checker output, to say
+    something the result already says.
 
     Both counts are DERIVED from ``mutations``, so neither can drift from the
     table it summarizes. A graded mutant lands in exactly one of two buckets,
@@ -155,8 +178,8 @@ class CpsatCheckerTestReport(BaseModel):
     alone cannot distinguish "nothing was corruptible" from "every mutant that
     ran errored out or timed out"; both leave zero evidence about the checker,
     but for different reasons. A client that needs that distinction reads
-    ``mutations`` directly, where each row's ``report.status`` or
-    ``skipped_reason`` says which.
+    ``mutations`` directly, where each row's ``status`` or ``skipped_reason``
+    says which.
 
     A positive ``rejected_count`` shows that the checker rejected a payload, not
     that it grades every constraint. Zero-of-nonzero is still inconclusive
@@ -165,7 +188,6 @@ class CpsatCheckerTestReport(BaseModel):
     ``status``/``objective``/``solution`` or produces a top-level diagnostic.
     """
 
-    baseline: CpsatCheckerReport
     mutations: list[CpsatMutationOutcome] = Field(default_factory=list)
     rejected_count: int = 0
     accepted_count: int = 0
@@ -179,7 +201,7 @@ class CpsatCheckerTestReport(BaseModel):
         fields are invisible — and these counts are the numbers a client reads
         first, so they have to appear in the advertised schema.
         """
-        graded = [m.report.status for m in self.mutations if m.report is not None]
+        graded = [m.status for m in self.mutations if m.status is not None]
         self.rejected_count = graded.count("rejected")
         self.accepted_count = graded.count("accepted")
         return self
@@ -205,7 +227,8 @@ class CpsatPythonCheckedResult(CpsatPythonResult):
     - ``checker_test`` is set only when the caller opted into ``test_checker``
       AND the checker accepted; it reports whether that checker rejected any
       generic mutation. ``None`` otherwise — including for a non-``accepted``
-      baseline, which leaves nothing to test the checker against.
+      baseline, which leaves nothing to test the checker against. Its rows are
+      compact verdicts; ``checker`` above is the one full report returned.
 
     The top-level ``diagnostic`` composes the run and baseline checker: a run
     timeout wins, else a failed checker overrides, else the run's own diagnostic.
@@ -241,9 +264,10 @@ class CpsatPythonCheckedResult(CpsatPythonResult):
         The invariant the runner's orchestration actually depends on: mutants are
         graded against the same checker that accepted the real solution, so a
         ``checker_test`` attached to a missing, rejected, errored, or timed-out
-        checker would report mutation evidence no run ever produced. The
-        ``baseline`` needs no separate check — the runner passes the very object
-        gated here as the baseline, so the two cannot disagree.
+        checker would report mutation evidence no run ever produced. This is
+        also what lets ``CpsatCheckerTestReport`` omit a baseline of its own:
+        the gate below establishes that ``checker`` IS the accepted baseline
+        those mutants were graded against.
         """
         if self.checker_test is None:
             return self
