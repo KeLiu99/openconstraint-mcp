@@ -123,8 +123,12 @@ from .script_path import validate_script_args, validate_script_path
 
 DEFAULT_PYEXEC_TIMEOUT_MS: int = 30_000
 
-# Shared ceiling for synchronous CP-SAT orchestrators that can run multiple
-# sequential children. Keep enough margin for typical MCP client timeouts.
+# Ceiling for the checker self-test's projected worst-case wall clock (see
+# `_resolve_checked_checker_timeout_ms`), which runs the checker sequentially
+# against the baseline plus every mutation. Keep enough margin for typical MCP
+# client timeouts. `run_cpsat_python_experiment` has its own, wider cap —
+# `MAX_CPSAT_EXPERIMENT_WALL_CLOCK_MS` in experiment.py — since its
+# batches-of-independent-attempts shape tolerates a longer admission budget.
 MAX_CPSAT_SYNC_WALL_CLOCK_MS: int = 120_000
 _CPSAT_EXECUTOR_POLL_SLACK_MS: int = 250
 

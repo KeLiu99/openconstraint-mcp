@@ -13,7 +13,7 @@ from pydantic import ValidationError
 
 from openconstraint_mcp.pyexec import experiment
 from openconstraint_mcp.pyexec.experiment import (
-    MAX_CPSAT_SYNC_WALL_CLOCK_MS,
+    MAX_CPSAT_EXPERIMENT_WALL_CLOCK_MS,
     run_cpsat_python_experiment,
 )
 from openconstraint_mcp.schemas.cpsat import (
@@ -923,9 +923,9 @@ def test_max_parallel_attempts_bool_rejected() -> None:
 
 def test_projected_budget_over_cap_rejected(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(experiment, "_max_parallel_attempts_cap", lambda: 4)
-    with pytest.raises(ValueError, match="MAX_CPSAT_SYNC_WALL_CLOCK_MS") as exc_info:
+    with pytest.raises(ValueError, match="MAX_CPSAT_EXPERIMENT_WALL_CLOCK_MS") as exc_info:
         run_cpsat_python_experiment(
-            [_attempt("a", timeout_ms=MAX_CPSAT_SYNC_WALL_CLOCK_MS)],
+            [_attempt("a", timeout_ms=MAX_CPSAT_EXPERIMENT_WALL_CLOCK_MS)],
             objective_sense="minimize",
         )
 
@@ -965,9 +965,9 @@ def test_budget_rejection_reuses_overhead_from_breakdown_without_recomputing(
 
     monkeypatch.setattr(experiment, "cpsat_child_timeout_overhead_ms", _counting)
 
-    with pytest.raises(ValueError, match="MAX_CPSAT_SYNC_WALL_CLOCK_MS") as exc_info:
+    with pytest.raises(ValueError, match="MAX_CPSAT_EXPERIMENT_WALL_CLOCK_MS") as exc_info:
         run_cpsat_python_experiment(
-            [_attempt("a", timeout_ms=MAX_CPSAT_SYNC_WALL_CLOCK_MS)],
+            [_attempt("a", timeout_ms=MAX_CPSAT_EXPERIMENT_WALL_CLOCK_MS)],
             objective_sense="minimize",
         )
 
@@ -983,10 +983,10 @@ def test_budget_rejection_from_batching_hints_at_concrete_fit_values(
     knobs" suggestion — a caller can act on them without inverting the budget
     formula by hand."""
     monkeypatch.setattr(experiment, "_max_parallel_attempts_cap", lambda: 4)
-    per_attempt_timeout = (MAX_CPSAT_SYNC_WALL_CLOCK_MS // 2) - 1000
+    per_attempt_timeout = (MAX_CPSAT_EXPERIMENT_WALL_CLOCK_MS // 2) - 1000
     attempts = [_attempt("a", timeout_ms=per_attempt_timeout) for _ in range(3)]
 
-    with pytest.raises(ValueError, match="MAX_CPSAT_SYNC_WALL_CLOCK_MS") as exc_info:
+    with pytest.raises(ValueError, match="MAX_CPSAT_EXPERIMENT_WALL_CLOCK_MS") as exc_info:
         experiment._check_wall_clock_budget(
             attempts,
             default_timeout_ms=30_000,
@@ -997,15 +997,15 @@ def test_budget_rejection_from_batching_hints_at_concrete_fit_values(
 
     message = str(exc_info.value)
     assert "attempt_count=3" in message
-    # attempts=3, max_parallel_attempts=1, per-attempt total_ms=65250 (59000 +
+    # attempts=3, max_parallel_attempts=1, per-attempt total_ms=110250 (104000 +
     # 6000 process-tree grace + 250 executor slack) => batches_max=1,
     # max_attempts_to_fit=1*1=1, min_parallel_to_fit=ceil(3/1)=3,
-    # max_slowest_total_ms=120000//3=40000.
+    # max_slowest_total_ms=210000//3=70000.
     assert "reduce attempt count to <= 1" in message
     assert "increase max_parallel_attempts to >= 3" in message
     assert (
         "reduce the slowest attempt's timeout_ms + overhead + checker budget "
-        "to <= 40000 ms total" in message
+        "to <= 70000 ms total" in message
     )
     assert "exceeds this machine's max_parallel_attempts cap" not in message
     assert "use run_cpsat_python instead" not in message
@@ -1017,10 +1017,10 @@ def test_budget_rejection_hint_flags_unfittable_parallelism_cap(
     """When even the min parallelism needed to fit exceeds this machine's own
     cap, the hint says so instead of silently suggesting an unreachable value."""
     monkeypatch.setattr(experiment, "_max_parallel_attempts_cap", lambda: 2)
-    per_attempt_timeout = (MAX_CPSAT_SYNC_WALL_CLOCK_MS // 2) - 1000
+    per_attempt_timeout = (MAX_CPSAT_EXPERIMENT_WALL_CLOCK_MS // 2) - 1000
     attempts = [_attempt("a", timeout_ms=per_attempt_timeout) for _ in range(3)]
 
-    with pytest.raises(ValueError, match="MAX_CPSAT_SYNC_WALL_CLOCK_MS") as exc_info:
+    with pytest.raises(ValueError, match="MAX_CPSAT_EXPERIMENT_WALL_CLOCK_MS") as exc_info:
         experiment._check_wall_clock_budget(
             attempts,
             default_timeout_ms=30_000,
@@ -1045,10 +1045,45 @@ def test_budget_gate_fires_before_any_child_runs(monkeypatch: pytest.MonkeyPatch
     monkeypatch.setattr("openconstraint_mcp.pyexec.experiment.run_cpsat_python", _fake)
     monkeypatch.setattr(experiment, "_max_parallel_attempts_cap", lambda: 4)
 
-    with pytest.raises(ValueError, match="MAX_CPSAT_SYNC_WALL_CLOCK_MS"):
+    with pytest.raises(ValueError, match="MAX_CPSAT_EXPERIMENT_WALL_CLOCK_MS"):
         run_cpsat_python_experiment(
-            [_attempt("a", timeout_ms=MAX_CPSAT_SYNC_WALL_CLOCK_MS)],
+            [_attempt("a", timeout_ms=MAX_CPSAT_EXPERIMENT_WALL_CLOCK_MS)],
             objective_sense="minimize",
+        )
+
+    assert called is False
+
+
+def test_projected_budget_exactly_at_cap_accepted(monkeypatch: pytest.MonkeyPatch) -> None:
+    # A single attempt whose projected total lands exactly on the cap is
+    # admitted (the gate uses <=, not <).
+    overhead = experiment.cpsat_child_timeout_overhead_ms()
+    timeout_ms = MAX_CPSAT_EXPERIMENT_WALL_CLOCK_MS - overhead
+    _patch_runner(monkeypatch, {"a": _result()})
+
+    result = run_cpsat_python_experiment(
+        [_attempt("a", timeout_ms=timeout_ms)], objective_sense="minimize"
+    )
+
+    assert result.status == "winner"
+
+
+def test_projected_budget_one_ms_over_cap_rejected(monkeypatch: pytest.MonkeyPatch) -> None:
+    # One ms past the same boundary is rejected before any child runs.
+    overhead = experiment.cpsat_child_timeout_overhead_ms()
+    timeout_ms = MAX_CPSAT_EXPERIMENT_WALL_CLOCK_MS - overhead + 1
+    called = False
+
+    def _fake(source: str, *, timeout_ms: int, tracker: Any = None, env: Any = None) -> Any:
+        nonlocal called
+        called = True
+        return _result()
+
+    monkeypatch.setattr("openconstraint_mcp.pyexec.experiment.run_cpsat_python", _fake)
+
+    with pytest.raises(ValueError, match="MAX_CPSAT_EXPERIMENT_WALL_CLOCK_MS"):
+        run_cpsat_python_experiment(
+            [_attempt("a", timeout_ms=timeout_ms)], objective_sense="minimize"
         )
 
     assert called is False
@@ -1058,11 +1093,11 @@ def test_higher_max_parallel_attempts_can_fit_a_budget_that_serial_cannot(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr(experiment, "_max_parallel_attempts_cap", lambda: 4)
-    per_attempt_timeout = (MAX_CPSAT_SYNC_WALL_CLOCK_MS // 2) - 1000
+    per_attempt_timeout = (MAX_CPSAT_EXPERIMENT_WALL_CLOCK_MS // 2) - 1000
     attempts = [_attempt("a", timeout_ms=per_attempt_timeout) for _ in range(3)]
 
     # Serial (implicit batches=3) is over budget...
-    with pytest.raises(ValueError, match="MAX_CPSAT_SYNC_WALL_CLOCK_MS"):
+    with pytest.raises(ValueError, match="MAX_CPSAT_EXPERIMENT_WALL_CLOCK_MS"):
         experiment._check_wall_clock_budget(
             attempts,
             default_timeout_ms=30_000,
