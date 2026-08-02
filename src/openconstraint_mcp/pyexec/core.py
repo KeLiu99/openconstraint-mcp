@@ -100,7 +100,12 @@ from ..schemas.cpsat import (
     CpsatStatus,
 )
 from ..shared.childproc import ChildProcessTracker
-from ..shared.childrun import ChildExecutionResult, ChildSpawnError, execute_child
+from ..shared.childrun import (
+    ChildExecutionResult,
+    ChildSpawnError,
+    execute_child,
+    validate_timeout_ms,
+)
 from ..shared.job_errors import exception_summary
 from ..shared.proc import process_tree_terminate_worst_case_ms
 from ..shared.save_target import text_sha256
@@ -197,8 +202,6 @@ def _resolve_checked_checker_timeout_ms(*, timeout_ms: int, checker_timeout_ms: 
     it would leave a file-based checker with no path at all. Self-testing is
     new and opt-in, so a ceiling on it strands no existing caller.
     """
-    if timeout_ms <= 0:
-        raise ValueError("timeout_ms must be positive")
     overhead_ms = cpsat_child_timeout_overhead_ms()
     checker_runs = 1 + len(MUTATION_NAMES)
     model_budget_ms = timeout_ms + overhead_ms
@@ -911,6 +914,7 @@ def run_cpsat_python_file_checked(
     resolved_script = validate_script_path(script_path)
     resolved_checker = validate_script_path(checker_path, parameter="checker_path")
     validate_checker_timeout_ms(checker_timeout_ms)
+    validate_timeout_ms(timeout_ms)
     if test_checker:
         effective_timeout_ms = _resolve_checked_checker_timeout_ms(
             timeout_ms=timeout_ms, checker_timeout_ms=checker_timeout_ms

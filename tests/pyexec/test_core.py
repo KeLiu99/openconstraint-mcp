@@ -1464,6 +1464,19 @@ def test_checked_run_rejects_a_non_positive_checker_timeout(tmp_path: Path) -> N
         run_cpsat_python_file_checked(script, checker, checker_timeout_ms=0)
 
 
+@pytest.mark.parametrize("test_checker", [False, True], ids=["plain", "self-test"])
+def test_checked_run_rejects_a_non_positive_timeout_before_the_model_runs(
+    tmp_path: Path, test_checker: bool
+) -> None:
+    script, checker = _checked_pair(tmp_path)
+
+    with patch("openconstraint_mcp.pyexec.core.run_cpsat_python_file") as fake_run:
+        with pytest.raises(ValueError, match="timeout_ms must be positive"):
+            run_cpsat_python_file_checked(script, checker, timeout_ms=0, test_checker=test_checker)
+
+    fake_run.assert_not_called()
+
+
 @pytest.mark.parametrize(
     "kwargs",
     [
