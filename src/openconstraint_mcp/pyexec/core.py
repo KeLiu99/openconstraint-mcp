@@ -186,9 +186,7 @@ def cpsat_child_timeout_overhead_ms() -> int:
     return process_tree_terminate_worst_case_ms() + _CPSAT_EXECUTOR_POLL_SLACK_MS
 
 
-def _resolve_checked_checker_timeout_ms(
-    *, timeout_ms: int, checker_timeout_ms: int | None
-) -> int:
+def _resolve_checked_checker_timeout_ms(*, timeout_ms: int, checker_timeout_ms: int | None) -> int:
     """Resolve a SELF-TESTING checker timeout within the synchronous ceiling.
 
     Enforced only for ``test_checker=True``, which is what turns one checker
@@ -206,9 +204,7 @@ def _resolve_checked_checker_timeout_ms(
     model_budget_ms = timeout_ms + overhead_ms
     fixed_budget_ms = model_budget_ms + checker_runs * overhead_ms
     if checker_timeout_ms is None:
-        max_checker_timeout_ms = (
-            MAX_CPSAT_SYNC_WALL_CLOCK_MS - fixed_budget_ms
-        ) // checker_runs
+        max_checker_timeout_ms = (MAX_CPSAT_SYNC_WALL_CLOCK_MS - fixed_budget_ms) // checker_runs
         if max_checker_timeout_ms <= 0:
             raise ValueError(
                 f"projected checked-run fixed budget {fixed_budget_ms} ms leaves no "

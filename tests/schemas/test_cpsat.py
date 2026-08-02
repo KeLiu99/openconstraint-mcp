@@ -712,28 +712,15 @@ def test_cpsat_checker_test_report_round_trips() -> None:
     assert (dumped["rejected_count"], "discriminating" in dumped) == (1, False)
 
 
-def test_cpsat_checker_test_report_does_not_count_an_errored_mutant() -> None:
-    """A mutant run that errored proves nothing; it is not a rejection."""
-    assert _checker_test_report("error", "timeout").rejected_count == 0
+def test_cpsat_checker_test_report_does_not_count_an_indeterminate_mutant() -> None:
+    # A mutant that errors or times out reached no verdict.
+    report = _checker_test_report("error", "timeout")
 
-
-def test_cpsat_checker_test_report_does_not_count_an_errored_mutant_as_tolerated() -> None:
-    # A checker that CHOKED on a corrupted payload did not tolerate it. Folding
-    # the two together would report a vacuous checker where there is none.
-    assert _checker_test_report("error", "timeout").accepted_count == 0
+    assert (report.rejected_count, report.accepted_count) == (0, 0)
 
 
 def test_cpsat_checker_test_report_counts_a_tolerated_mutant() -> None:
     assert _checker_test_report("accepted", "accepted").accepted_count == 2
-
-
-def test_cpsat_checker_test_report_leaves_an_errored_mutant_out_of_both_verdict_counts() -> None:
-    # An errored mutant RAN, but it lands in neither verdict bucket, which is
-    # exactly the gap `accepted_count`/`rejected_count` alone cannot expose —
-    # a caller must read `mutations` to see it ran at all.
-    report = _checker_test_report("error", "accepted", "rejected")
-
-    assert (report.accepted_count, report.rejected_count) == (1, 1)
 
 
 def test_cpsat_checker_test_report_excludes_a_skipped_row_from_every_count() -> None:

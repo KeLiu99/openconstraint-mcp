@@ -1703,9 +1703,7 @@ def test_every_mutation_is_reported_as_its_own_row_in_a_fixed_order(
     ]
 
 
-def test_only_rejected_mutants_are_counted(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_only_rejected_mutants_are_counted(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     script, checker = _checked_pair(tmp_path)
     _patch_checker_test(
         monkeypatch,
@@ -1719,48 +1717,28 @@ def test_only_rejected_mutants_are_counted(
     assert result.checker_test.rejected_count == 1
 
 
-def test_a_mutant_that_errored_is_not_counted_as_a_rejection(
+def test_errored_mutants_remain_graded_rows(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    # A mutant run that errors proves nothing about the checker's power.
+    # A checker fault against a mutant is an indeterminate graded outcome, not
+    # a skipped probe.
     script, checker = _checked_pair(tmp_path)
     _patch_checker_test(
         monkeypatch,
         _checked_result("optimal", solution=_MUTABLE_SOLUTION),
-        lambda result: "accepted" if result.solution == _MUTABLE_SOLUTION else "error",
+        lambda result: (
+            "accepted"
+            if (result.solution, result.objective) == (_MUTABLE_SOLUTION, 10)
+            else "error"
+        ),
     )
 
     result = run_cpsat_python_file_checked(script, checker, test_checker=True)
 
     assert result.checker_test is not None
-    assert result.checker_test.rejected_count == 0
-
-
-def test_a_mutant_that_errored_is_not_counted_as_tolerated_either(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    # The whole probe erroring must NOT read as "the checker swallowed every
-    # corruption": `rejected_count: 0, accepted_count: 0` is the vacuous-checker
-    # signal only when those mutants were actually GRADED, not when they all
-    # errored. This checker chokes on every mutated payload — objective
-    # included, so no mutant slips through as a genuine toleration.
-    script, checker = _checked_pair(tmp_path)
-    _patch_checker_test(
-        monkeypatch,
-        _checked_result("optimal", solution=_MUTABLE_SOLUTION),
-        lambda result: "accepted"
-        if (result.solution, result.objective) == (_MUTABLE_SOLUTION, 10)
-        else "error",
-    )
-
-    result = run_cpsat_python_file_checked(script, checker, test_checker=True)
-
-    assert result.checker_test is not None
-    assert result.checker_test.accepted_count == 0
-    # All four mutants ran (none skipped) — visible only by reading the rows.
-    assert [
-        m.report.status for m in result.checker_test.mutations if m.report is not None
-    ] == ["error"] * 4
+    assert [m.report.status for m in result.checker_test.mutations if m.report is not None] == [
+        "error"
+    ] * 4
 
 
 def test_a_checker_that_swallows_every_mutation_reports_them_as_tolerated(
@@ -1857,9 +1835,7 @@ def test_a_faulted_mutation_probe_does_not_void_the_run(
 
     script, checker = _checked_pair(tmp_path)
     base = _checked_result("optimal", solution=_MUTABLE_SOLUTION)
-    _patch_checker_test(
-        monkeypatch, _AlwaysFaults(**base.model_dump()), _accept_everything
-    )
+    _patch_checker_test(monkeypatch, _AlwaysFaults(**base.model_dump()), _accept_everything)
 
     result = run_cpsat_python_file_checked(script, checker, test_checker=True)
 
@@ -2199,98 +2175,34 @@ def test_the_mutants_leave_the_runs_own_status_and_objective_untouched(
     assert (result.status, result.objective) == ("optimal", 10)
 
 
-def test_mutants_reuse_the_effective_checker_timeout(
+def test_mutants_reuse_the_baseline_checker_configuration(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     script, checker = _checked_pair(tmp_path)
-    timeouts: list[int] = []
+    calls: list[tuple[Path, str | None, int, Any]] = []
     monkeypatch.setattr(
         "openconstraint_mcp.pyexec.core.run_cpsat_python_file",
         lambda script_path, **kw: _checked_result("optimal", solution=_MUTABLE_SOLUTION),
     )
 
     def _fake(checker_path: Path, result: Any, **kw: Any) -> CpsatCheckerReport:
-        timeouts.append(kw["timeout_ms"])
-        return _checker_report("accepted")
-
-    monkeypatch.setattr("openconstraint_mcp.pyexec.core.run_checker_file", _fake)
-
-    run_cpsat_python_file_checked(script, checker, checker_timeout_ms=777, test_checker=True)
-
-    assert timeouts == [777] * 5
-
-
-def test_mutants_reuse_the_problem_text(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    script, checker = _checked_pair(tmp_path)
-    problems: list[str | None] = []
-    monkeypatch.setattr(
-        "openconstraint_mcp.pyexec.core.run_cpsat_python_file",
-        lambda script_path, **kw: _checked_result("optimal", solution=_MUTABLE_SOLUTION),
-    )
-
-    def _fake(checker_path: Path, result: Any, **kw: Any) -> CpsatCheckerReport:
-        problems.append(kw["problem"])
-        return _checker_report("accepted")
-
-    monkeypatch.setattr("openconstraint_mcp.pyexec.core.run_checker_file", _fake)
-
-    run_cpsat_python_file_checked(
-        script,
-        checker,
-        problem='{"jobs": []}',
-        checker_timeout_ms=1_000,
-        test_checker=True,
-    )
-
-    assert problems == ['{"jobs": []}'] * 5
-
-
-def test_mutants_reuse_the_same_checker_path(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    script, checker = _checked_pair(tmp_path)
-    paths: list[Path] = []
-    monkeypatch.setattr(
-        "openconstraint_mcp.pyexec.core.run_cpsat_python_file",
-        lambda script_path, **kw: _checked_result("optimal", solution=_MUTABLE_SOLUTION),
-    )
-
-    def _fake(checker_path: Path, result: Any, **kw: Any) -> CpsatCheckerReport:
-        paths.append(checker_path)
-        return _checker_report("accepted")
-
-    monkeypatch.setattr("openconstraint_mcp.pyexec.core.run_checker_file", _fake)
-
-    run_cpsat_python_file_checked(script, checker, checker_timeout_ms=1_000, test_checker=True)
-
-    assert paths == [checker.resolve()] * 5
-
-
-def test_mutants_reuse_the_baselines_tracker(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    # A mutant child that skips the tracker is orphaned on teardown.
-    script, checker = _checked_pair(tmp_path)
-    trackers: list[Any] = []
-    monkeypatch.setattr(
-        "openconstraint_mcp.pyexec.core.run_cpsat_python_file",
-        lambda script_path, **kw: _checked_result("optimal", solution=_MUTABLE_SOLUTION),
-    )
-
-    def _fake(checker_path: Path, result: Any, **kw: Any) -> CpsatCheckerReport:
-        trackers.append(kw["tracker"])
+        calls.append((checker_path, kw["problem"], kw["timeout_ms"], kw["tracker"]))
         return _checker_report("accepted")
 
     monkeypatch.setattr("openconstraint_mcp.pyexec.core.run_checker_file", _fake)
     tracker = _SpyTracker()
+    problem = '{"jobs": []}'
 
     run_cpsat_python_file_checked(
-        script, checker, checker_timeout_ms=1_000, tracker=tracker, test_checker=True
+        script,
+        checker,
+        problem=problem,
+        checker_timeout_ms=777,
+        tracker=tracker,
+        test_checker=True,
     )
 
-    assert trackers == [tracker] * 5
+    assert calls == [(checker.resolve(), problem, 777, tracker)] * 5
 
 
 def _run_with_a_failing_mutant_child(

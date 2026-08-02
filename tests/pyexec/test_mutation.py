@@ -234,9 +234,7 @@ def test_numeric_field_perturbed_flips_a_bool_field_when_no_int_exists() -> None
 
 
 def test_numeric_field_perturbed_flips_a_flat_boolean_assignment() -> None:
-    mutation = _by_name({"x1": True, "x2": False, "x3": True}, None)[
-        NUMERIC_FIELD_PERTURBED
-    ]
+    mutation = _by_name({"x1": True, "x2": False, "x3": True}, None)[NUMERIC_FIELD_PERTURBED]
 
     assert mutation.solution == {"x1": False, "x2": False, "x3": True}
 

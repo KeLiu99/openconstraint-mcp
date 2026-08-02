@@ -132,7 +132,7 @@ def _numeric_field_perturbed(
         for candidate, candidate_list_key in candidates:
             values = candidate.items() if isinstance(candidate, dict) else ((0, candidate),)
             for field, value in values:
-                if (isinstance(value, bool) if booleans else _is_plain_int(value)):
+                if isinstance(value, bool) if booleans else _is_plain_int(value):
                     mutated = copy.deepcopy(solution)
                     if candidate_list_key is None:
                         target = mutated
