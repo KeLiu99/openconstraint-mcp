@@ -7,12 +7,12 @@ import copy
 from openconstraint_mcp.pyexec.mutation import (
     ELEMENT_DROPPED,
     ELEMENT_DUPLICATED,
-    MUTATION_NAMES,
     NUMERIC_FIELD_PERTURBED,
     OBJECTIVE_PERTURBED,
     SolutionMutation,
     generate_mutations,
 )
+from openconstraint_mcp.schemas.cpsat import CPSAT_MUTATION_NAMES
 
 # A solution shaped like a schedule: one list of task objects plus a scalar.
 _SCHEDULE = {
@@ -40,10 +40,10 @@ def test_generate_returns_the_four_named_mutations_in_a_fixed_order() -> None:
 
 
 def test_mutation_names_matches_what_generate_emits() -> None:
-    # `core` builds the fixed row set from `MUTATION_NAMES` alone when generation
+    # `core` builds the fixed row set from `CPSAT_MUTATION_NAMES` alone when generation
     # faults, and sizes the self-test's checker budget from its length, so a name
     # or count that drifts from the generator is a silent mismatch there.
-    assert list(MUTATION_NAMES) == [m.name for m in generate_mutations(_SCHEDULE, 12)]
+    assert list(CPSAT_MUTATION_NAMES) == [m.name for m in generate_mutations(_SCHEDULE, 12)]
 
 
 # --- objective_perturbed -----------------------------------------------------

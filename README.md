@@ -1250,7 +1250,8 @@ core profile, so start the server with `openconstraint-mcp stdio --toolset full`
 
   **`checker_timeout_ms`** defaults to `timeout_ms`. When `test_checker` is on,
   an omitted value is capped at the largest checker timeout that fits the
-  synchronous wall-clock budget. `args`, `seed`, and `config` behave exactly as
+  synchronous wall-clock budget, but never derived below **2000 ms** — see the
+  wall-clock section. `args`, `seed`, and `config` behave exactly as
   on `run_cpsat_python_file` and apply to the model child only — the checker is
   a verification step, never a replayed solve.
 
@@ -1339,10 +1340,18 @@ core profile, so start the server with `openconstraint-mcp stdio --toolset full`
   `timeout_ms` and the largest checker budget that fits. The 30 s model default
   therefore derives an **8100 ms** checker timeout and projects to exactly 120 s,
   so `test_checker: true` works without changing another argument. An explicit
-  over-budget checker timeout is rejected before any child runs; an omitted one
-  is also rejected when the model timeout and fixed child overhead leave no
-  positive checker budget. The rejection message reports the model/checker
-  budgets, child count, overhead, and total. The ceiling exists because the
+  over-budget checker timeout is rejected before any child runs.
+
+  The derived value shrinks as `timeout_ms` grows, and it becomes the **baseline**
+  checker's budget as well as the mutants' — so it is floored at **2000 ms**
+  rather than allowed to dwindle, and a `timeout_ms` that would force it lower
+  (above about **60.5 s**) is rejected instead. Without that floor, opting into
+  an informational probe could time out a baseline checker that would have been
+  given the full `timeout_ms`, turning a clean run into a `checker_failed` one.
+  The floor bounds only the *derived* cap: a deliberately short `timeout_ms`
+  still yields a checker timeout that matches it, and an explicit
+  `checker_timeout_ms` is honoured as given. The rejection message reports the
+  model/checker budgets, child count, overhead, and total. The ceiling exists because the
   self-test is the only thing that turns one checker child into five *and* has
   no background-job equivalent, so an over-budget probe would have nowhere to
   go.

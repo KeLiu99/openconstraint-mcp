@@ -6,16 +6,13 @@ import copy
 from dataclasses import dataclass
 from typing import TypeGuard
 
-from ..schemas.cpsat import CPSAT_MUTATION_NAMES, CpsatMutationName
+from ..schemas.cpsat import CpsatMutationName
 
-# The fixed mutation names, in generation order.
-(
-    OBJECTIVE_PERTURBED,
-    ELEMENT_DROPPED,
-    ELEMENT_DUPLICATED,
-    NUMERIC_FIELD_PERTURBED,
-) = CPSAT_MUTATION_NAMES
-MUTATION_NAMES: tuple[CpsatMutationName, ...] = CPSAT_MUTATION_NAMES
+# The fixed mutation names; `CPSAT_MUTATION_NAMES` carries their generation order.
+OBJECTIVE_PERTURBED: CpsatMutationName = "objective_perturbed"
+ELEMENT_DROPPED: CpsatMutationName = "element_dropped"
+ELEMENT_DUPLICATED: CpsatMutationName = "element_duplicated"
+NUMERIC_FIELD_PERTURBED: CpsatMutationName = "numeric_field_perturbed"
 
 _NO_LIST_REASON = "no non-empty list among the solution's top-level values"
 

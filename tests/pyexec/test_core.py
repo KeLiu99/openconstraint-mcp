@@ -31,8 +31,8 @@ from openconstraint_mcp.pyexec.diagnostics import (
     cpsat_result_diagnostic,
 )
 from openconstraint_mcp.pyexec.eligibility import diagnostic_incumbent_eligibility
-from openconstraint_mcp.pyexec.mutation import MUTATION_NAMES
 from openconstraint_mcp.schemas.cpsat import (
+    CPSAT_MUTATION_NAMES,
     CpsatCheckerReport,
     CpsatPythonCheckedResult,
     CpsatPythonResult,
@@ -1482,8 +1482,16 @@ def test_checked_run_rejects_a_non_positive_timeout_before_the_model_runs(
     [
         {"test_checker": True, "checker_timeout_ms": 30_000},
         {"test_checker": True, "timeout_ms": 600_000},
+        # The derived checker timeout is the BASELINE checker's budget too, so a
+        # model timeout that squeezes it under the floor must reject rather than
+        # let an opt-in probe time out the primary verdict.
+        {"test_checker": True, "timeout_ms": 65_000},
     ],
-    ids=["explicit-checker-timeout", "model-leaves-no-checker-budget"],
+    ids=[
+        "explicit-checker-timeout",
+        "model-leaves-no-checker-budget",
+        "model-leaves-a-checker-budget-under-the-floor",
+    ],
 )
 def test_checked_run_rejects_an_over_budget_self_test_before_the_model_runs(
     tmp_path: Path, kwargs: dict[str, Any]
@@ -1855,7 +1863,7 @@ def test_a_generation_fault_reports_every_mutation_as_skipped(
     result = run_cpsat_python_file_checked(script, checker, test_checker=True)
 
     assert result.checker_test is not None
-    assert [m.name for m in result.checker_test.mutations] == list(MUTATION_NAMES)
+    assert [m.name for m in result.checker_test.mutations] == list(CPSAT_MUTATION_NAMES)
     assert all(
         m.report is None and (m.skipped_reason or "").startswith("mutation generation failed:")
         for m in result.checker_test.mutations

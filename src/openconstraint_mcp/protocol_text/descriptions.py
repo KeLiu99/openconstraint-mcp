@@ -890,7 +890,8 @@ RUN_CPSAT_PYTHON_FILE_CHECKED_DESCRIPTION = (
     "script's directory, not the instance itself). "
     "`checker_timeout_ms` defaults to `timeout_ms`; when `test_checker` is on, "
     "an omitted value is capped at the largest checker timeout that fits the "
-    "synchronous wall-clock budget. `args` is appended after `script_path` as "
+    "synchronous wall-clock budget, never derived below 2000 ms (a `timeout_ms` "
+    "that would force it lower is rejected). `args` is appended after `script_path` as "
     "the model script's `sys.argv[1:]`; `seed`/`config` are the same replay aids "
     "`run_cpsat_python_file` documents. "
     + _CPSAT_ARGS_LIMITS

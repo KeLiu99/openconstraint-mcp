@@ -92,6 +92,7 @@ from subprocess import Popen
 from typing import Any, cast
 
 from ..schemas.cpsat import (
+    CPSAT_MUTATION_NAMES,
     CpsatCheckerReport,
     CpsatCheckerTestReport,
     CpsatMutationOutcome,
@@ -117,7 +118,7 @@ from .diagnostics import (
 )
 from .eligibility import diagnostic_incumbent_eligibility
 from .env_vars import CPSAT_CONFIG_ENV_VAR, CPSAT_SEED_ENV_VAR
-from .mutation import MUTATION_NAMES, SolutionMutation, generate_mutations
+from .mutation import SolutionMutation, generate_mutations
 from .script_path import validate_script_args, validate_script_path
 
 DEFAULT_PYEXEC_TIMEOUT_MS: int = 30_000
@@ -126,6 +127,15 @@ DEFAULT_PYEXEC_TIMEOUT_MS: int = 30_000
 # sequential children. Keep enough margin for typical MCP client timeouts.
 MAX_CPSAT_SYNC_WALL_CLOCK_MS: int = 120_000
 _CPSAT_EXECUTOR_POLL_SLACK_MS: int = 250
+
+# Floor for a checker timeout DERIVED from the self-test budget. The derived
+# value shrinks as `timeout_ms` grows, and it feeds the BASELINE checker as well
+# as the mutants — so an unfloored derivation would let an opt-in diagnostic
+# starve the primary verdict, timing out a checker that would have been given
+# the full `timeout_ms` had the caller not asked for the probe. Below this the
+# call rejects instead, which sends the caller to a smaller `timeout_ms`.
+# Well above interpreter startup, so it never fails a checker that would run.
+_MIN_SELF_TEST_CHECKER_TIMEOUT_MS: int = 2_000
 
 # OR-Tools CP-SAT's random_seed parameter is a signed int32. Reject values outside
 # that range before they reach a child process.
@@ -195,28 +205,36 @@ def _resolve_checked_checker_timeout_ms(*, timeout_ms: int, checker_timeout_ms: 
     """Resolve a SELF-TESTING checker timeout within the synchronous ceiling.
 
     Enforced only for ``test_checker=True``, which is what turns one checker
-    child into ``1 + len(MUTATION_NAMES)`` sequential ones. A plain
+    child into ``1 + len(CPSAT_MUTATION_NAMES)`` sequential ones. A plain
     checked run is two children and keeps its historical freedom to ask for the
     solve time the problem needs — it has ``submit_cpsat_python_file_job`` as an
     unbounded fallback only when the checker needs no sibling file, so capping
     it would leave a file-based checker with no path at all. Self-testing is
     new and opt-in, so a ceiling on it strands no existing caller.
+
+    An omitted ``checker_timeout_ms`` is DERIVED from what the ceiling leaves,
+    down to ``_MIN_SELF_TEST_CHECKER_TIMEOUT_MS``; below that the call rejects
+    rather than hand the baseline checker a budget too small to run in.
     """
     overhead_ms = cpsat_child_timeout_overhead_ms()
-    checker_runs = 1 + len(MUTATION_NAMES)
+    checker_runs = 1 + len(CPSAT_MUTATION_NAMES)
     model_budget_ms = timeout_ms + overhead_ms
     fixed_budget_ms = model_budget_ms + checker_runs * overhead_ms
     if checker_timeout_ms is None:
         max_checker_timeout_ms = (MAX_CPSAT_SYNC_WALL_CLOCK_MS - fixed_budget_ms) // checker_runs
-        if max_checker_timeout_ms <= 0:
+        if max_checker_timeout_ms < _MIN_SELF_TEST_CHECKER_TIMEOUT_MS:
             raise ValueError(
-                f"projected checked-run fixed budget {fixed_budget_ms} ms leaves no "
-                "positive checker_timeout_ms under "
-                f"MAX_CPSAT_SYNC_WALL_CLOCK_MS={MAX_CPSAT_SYNC_WALL_CLOCK_MS} ms: "
-                f"timeout_ms={timeout_ms}, checker_runs={checker_runs}, "
+                f"projected checked-run fixed budget {fixed_budget_ms} ms leaves only "
+                f"{max_checker_timeout_ms} ms per checker child under "
+                f"MAX_CPSAT_SYNC_WALL_CLOCK_MS={MAX_CPSAT_SYNC_WALL_CLOCK_MS} ms, below the "
+                f"{_MIN_SELF_TEST_CHECKER_TIMEOUT_MS} ms floor a derived checker timeout must "
+                f"clear: timeout_ms={timeout_ms}, checker_runs={checker_runs}, "
                 f"overhead_ms={overhead_ms} (reduce timeout_ms or drop test_checker — "
                 "checker self-testing has no background-job equivalent)"
             )
+        # The floor bounds the DERIVED cap, not the caller's own model timeout: a
+        # deliberately short `timeout_ms` still yields a checker timeout that
+        # matches it, since that caller asked for a fast run end to end.
         checker_timeout_ms = min(timeout_ms, max_checker_timeout_ms)
     checker_budget_ms = checker_timeout_ms + overhead_ms
     projected_ms = model_budget_ms + checker_runs * checker_budget_ms
@@ -807,7 +825,9 @@ def _run_checker_test(
         mutations = generate_mutations(run_result.solution, run_result.objective)
     except Exception as exc:  # noqa: BLE001 - a probe must not void the checked run
         reason = f"mutation generation failed: {exception_summary(exc)}"
-        mutations = [SolutionMutation(name=name, skipped_reason=reason) for name in MUTATION_NAMES]
+        mutations = [
+            SolutionMutation(name=name, skipped_reason=reason) for name in CPSAT_MUTATION_NAMES
+        ]
 
     outcomes: list[CpsatMutationOutcome] = []
     for mutation in mutations:
@@ -900,8 +920,9 @@ def run_cpsat_python_file_checked(
     ``test_checker`` is on. Only the ``test_checker`` projection is GATED: with
     the self-test on, the call conservatively assumes all four mutations apply
     and rejects an explicit projection over ``MAX_CPSAT_SYNC_WALL_CLOCK_MS``
-    before any child runs. An omitted ``checker_timeout_ms`` is reduced to fit;
-    the call still rejects when ``timeout_ms`` leaves no positive checker budget.
+    before any child runs. An omitted ``checker_timeout_ms`` is reduced to fit
+    — the derived value is the BASELINE checker's budget too, so the call
+    rejects instead of deriving one under the self-test floor.
     A plain checked run stays ungated — ``timeout_ms`` has no upper bound, since
     a caller must be able to ask for the solve time the problem needs. Background
     jobs have no checker self-test.
