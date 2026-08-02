@@ -69,10 +69,13 @@ from .eligibility import diagnostic_incumbent_eligibility
 from .script_path import validate_script_args, validate_script_path
 
 # Ceiling for this tool's projected worst-case wall-clock admission check (see
-# `_check_wall_clock_budget`). Distinct from `core.MAX_CPSAT_SYNC_WALL_CLOCK_MS`
-# (the checker self-test's cap): an experiment's batches x slowest-attempt
-# projection amortizes overhead across independent attempts, so it tolerates a
-# wider budget than self-test's single small ceiling.
+# `_check_wall_clock_budget`). Higher than `core.MAX_CPSAT_SELF_TEST_WALL_CLOCK_MS`
+# only because the two projections are not comparable: this one charges every
+# attempt its full timeout plus overhead and then multiplies the SLOWEST attempt
+# by the batch count, an upper bound parallelism can only undershoot, while the
+# self-test's sequential projection is tight. Both tools block one synchronous
+# MCP call, so it is the real wait a cap admits — not its nominal value — that
+# has to stay inside typical MCP client timeouts.
 MAX_CPSAT_EXPERIMENT_WALL_CLOCK_MS: int = 210_000
 
 # A config dict is a small cooperative parameter bag, not a data payload — bound
