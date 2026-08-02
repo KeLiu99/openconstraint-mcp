@@ -789,22 +789,18 @@ def _run_checker_test(
     only a ``rejected`` verdict counts: an ``error``/``timeout`` mutant proves
     nothing, and a skipped mutation carries its reason instead.
 
-    Faults are absorbed PER MUTATION, so evidence already gathered is never
-    thrown away: anything that raises while probing one mutation becomes that
-    row's ``skipped_reason`` and the loop moves on, so a fault on the third
-    mutation cannot discard the rejections the first two earned. A per-mutant
-    checker infrastructure fault is finer-grained still and is absorbed by
-    ``_run_checker_or_report``, which records it as an ``error`` report.
+    A per-mutant checker infrastructure fault is absorbed by
+    ``_run_checker_or_report`` and recorded as an ``error`` report, so it does
+    not suppress the other mutation rows.
 
-    GENERATION gets its own boundary, because it runs before any row exists and
-    so is not covered by the per-mutation one. ``generate_mutations`` is stdlib
-    over a pydantic-validated ``dict``, but its ``copy.deepcopy`` recurses in
-    Python where the JSON decode that produced the solution did not, so a deeply
-    nested payload can arrive intact and raise ``RecursionError`` there. This
-    diagnostic is opt-in and its verdicts are inconclusive by design; it must
-    never cost the caller a completed model result and an accepted baseline.
-    A generation fault therefore degrades to the full fixed row set, every row
-    skipped with the reason.
+    GENERATION gets its own boundary because it runs before any row exists.
+    ``generate_mutations`` is stdlib over a pydantic-validated ``dict``, but its
+    ``copy.deepcopy`` recurses in Python where the JSON decode that produced the
+    solution did not, so a deeply nested payload can arrive intact and raise
+    ``RecursionError`` there. This diagnostic is opt-in and its verdicts are
+    inconclusive by design; it must never cost the caller a completed model
+    result and an accepted baseline. A generation fault therefore degrades to
+    the full fixed row set, every row skipped with the reason.
     """
     try:
         mutations = generate_mutations(run_result.solution, run_result.objective)
@@ -819,37 +815,27 @@ def _run_checker_test(
                 CpsatMutationOutcome(name=mutation.name, skipped_reason=mutation.skipped_reason)
             )
             continue
-        try:
-            mutant = run_result.model_copy(
-                update={"solution": mutation.solution, "objective": mutation.objective}
+        mutant = run_result.model_copy(
+            update={"solution": mutation.solution, "objective": mutation.objective}
+        )
+        report = _run_checker_or_report(
+            checker_path,
+            mutant,
+            problem=problem,
+            timeout_ms=timeout_ms,
+            tracker=tracker,
+        )
+        outcomes.append(
+            CpsatMutationOutcome(
+                name=mutation.name,
+                # The mutant's diagnostic is stripped: see CpsatMutationOutcome.
+                # A `rejected` mutant is the DESIRED outcome here, so its
+                # `checker_failed` diagnostic would invert that category's
+                # meaning for every client that branches on it.
+                report=report.model_copy(update={"diagnostic": None}),
             )
-            report = _run_checker_or_report(
-                checker_path,
-                mutant,
-                problem=problem,
-                timeout_ms=timeout_ms,
-                tracker=tracker,
-            )
-            outcomes.append(
-                CpsatMutationOutcome(
-                    name=mutation.name,
-                    # The mutant's diagnostic is stripped: see CpsatMutationOutcome.
-                    # A `rejected` mutant is the DESIRED outcome here, so its
-                    # `checker_failed` diagnostic would invert that category's
-                    # meaning for every client that branches on it.
-                    report=report.model_copy(update={"diagnostic": None}),
-                )
-            )
-        except Exception as exc:  # noqa: BLE001 - one faulted probe, not the whole self-test
-            outcomes.append(
-                CpsatMutationOutcome(
-                    name=mutation.name,
-                    skipped_reason=f"mutation probe failed: {exception_summary(exc)}",
-                )
-            )
+        )
 
-    # Both counts are derived from `mutations` by the model itself, so a
-    # row that took the faulted path cannot leave a tally behind.
     return CpsatCheckerTestReport(baseline=baseline, mutations=outcomes)
 
 

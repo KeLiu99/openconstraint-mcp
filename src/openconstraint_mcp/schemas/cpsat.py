@@ -24,6 +24,18 @@ from .job_state import RESULT_BEARING_STATES, JobState
 # ---------------------------------------------------------------------------
 
 CpsatStatus = Literal["optimal", "feasible", "infeasible", "unknown", "error", "timeout"]
+CpsatMutationName = Literal[
+    "objective_perturbed",
+    "element_dropped",
+    "element_duplicated",
+    "numeric_field_perturbed",
+]
+CPSAT_MUTATION_NAMES: tuple[CpsatMutationName, ...] = (
+    "objective_perturbed",
+    "element_dropped",
+    "element_duplicated",
+    "numeric_field_perturbed",
+)
 
 
 class CpsatPythonResult(BaseModel):
@@ -109,7 +121,7 @@ class CpsatMutationOutcome(BaseModel):
     The top-level ``checker`` (baseline) report keeps its diagnostic as usual.
     """
 
-    name: str
+    name: CpsatMutationName
     skipped_reason: str | None = None
     report: CpsatCheckerReport | None = None
 

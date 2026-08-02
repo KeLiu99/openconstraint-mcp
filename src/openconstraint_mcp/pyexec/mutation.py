@@ -6,19 +6,16 @@ import copy
 from dataclasses import dataclass
 from typing import TypeGuard
 
-# The fixed mutation names, in generation order.
-OBJECTIVE_PERTURBED = "objective_perturbed"
-ELEMENT_DROPPED = "element_dropped"
-ELEMENT_DUPLICATED = "element_duplicated"
-NUMERIC_FIELD_PERTURBED = "numeric_field_perturbed"
+from ..schemas.cpsat import CPSAT_MUTATION_NAMES, CpsatMutationName
 
-# Fixed output shape used to budget checker probes and report generation failures.
-MUTATION_NAMES: tuple[str, ...] = (
+# The fixed mutation names, in generation order.
+(
     OBJECTIVE_PERTURBED,
     ELEMENT_DROPPED,
     ELEMENT_DUPLICATED,
     NUMERIC_FIELD_PERTURBED,
-)
+) = CPSAT_MUTATION_NAMES
+MUTATION_NAMES: tuple[CpsatMutationName, ...] = CPSAT_MUTATION_NAMES
 
 _NO_LIST_REASON = "no non-empty list among the solution's top-level values"
 
@@ -30,7 +27,7 @@ class SolutionMutation:
     A skipped mutation has no usable payload.
     """
 
-    name: str
+    name: CpsatMutationName
     solution: dict | None = None
     objective: float | int | None = None
     skipped_reason: str | None = None
@@ -80,7 +77,7 @@ def _objective_perturbed(solution: dict, objective: float | int | None) -> Solut
     if objective is None:
         return SolutionMutation(
             name=OBJECTIVE_PERTURBED,
-            skipped_reason="objective is not a finite number",
+            skipped_reason="the run reported no objective",
         )
     perturbed = objective + 1
     # Skip a float mutation when ``+ 1`` leaves the payload unchanged.

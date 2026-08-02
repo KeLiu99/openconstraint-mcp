@@ -6,6 +6,7 @@ import pytest
 from pydantic import ValidationError
 
 from openconstraint_mcp.schemas.cpsat import (
+    CPSAT_MUTATION_NAMES,
     CpsatCheckerReport,
     CpsatCheckerTestReport,
     CpsatExpectation,
@@ -670,12 +671,18 @@ def test_cpsat_mutation_outcome_carries_no_separate_applied_field() -> None:
     assert "applied" not in CpsatMutationOutcome.model_fields
 
 
+def test_cpsat_mutation_outcome_name_schema_lists_fixed_names() -> None:
+    schema = CpsatMutationOutcome.model_json_schema()
+
+    assert schema["properties"]["name"]["enum"] == list(CPSAT_MUTATION_NAMES)
+
+
 def test_cpsat_mutation_outcome_skipped_round_trips() -> None:
     outcome = CpsatMutationOutcome(
         name="objective_perturbed",
-        skipped_reason="objective is not a finite number",
+        skipped_reason="the run reported no objective",
     )
-    assert outcome.model_dump()["skipped_reason"] == "objective is not a finite number"
+    assert outcome.model_dump()["skipped_reason"] == "the run reported no objective"
 
 
 def test_cpsat_mutation_outcome_skipped_omits_the_report_under_exclude_none() -> None:
@@ -700,8 +707,8 @@ def test_cpsat_mutation_outcome_rejects_a_row_carrying_neither_outcome() -> None
 
 def _checker_test_report(*statuses: str) -> CpsatCheckerTestReport:
     mutations = [
-        CpsatMutationOutcome(name=f"m{i}", report=_mutation_report(status))
-        for i, status in enumerate(statuses)
+        CpsatMutationOutcome(name=name, report=_mutation_report(status))
+        for name, status in zip(CPSAT_MUTATION_NAMES, statuses, strict=False)
     ]
     return CpsatCheckerTestReport(baseline=_mutation_report("accepted"), mutations=mutations)
 
@@ -726,7 +733,7 @@ def test_cpsat_checker_test_report_counts_a_tolerated_mutant() -> None:
 def test_cpsat_checker_test_report_excludes_a_skipped_row_from_every_count() -> None:
     report = CpsatCheckerTestReport(
         baseline=_mutation_report("accepted"),
-        mutations=[CpsatMutationOutcome(name="m0", skipped_reason="no list")],
+        mutations=[CpsatMutationOutcome(name="objective_perturbed", skipped_reason="no list")],
     )
 
     assert (report.rejected_count, report.accepted_count) == (0, 0)
@@ -737,7 +744,9 @@ def test_cpsat_checker_test_report_overrides_a_miscounted_tally() -> None:
     # misreport the table it summarizes.
     report = CpsatCheckerTestReport(
         baseline=_mutation_report("accepted"),
-        mutations=[CpsatMutationOutcome(name="m0", report=_mutation_report("accepted"))],
+        mutations=[
+            CpsatMutationOutcome(name="objective_perturbed", report=_mutation_report("accepted"))
+        ],
         rejected_count=1,
     )
 

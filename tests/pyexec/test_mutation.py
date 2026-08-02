@@ -66,7 +66,7 @@ def test_objective_perturbed_leaves_the_solution_alone() -> None:
 def test_objective_perturbed_is_skipped_for_a_null_objective() -> None:
     mutation = _by_name(_SCHEDULE, None)[OBJECTIVE_PERTURBED]
 
-    assert mutation.skipped_reason == "objective is not a finite number"
+    assert mutation.skipped_reason == "the run reported no objective"
 
 
 def test_objective_perturbed_skip_is_not_applied() -> None:
