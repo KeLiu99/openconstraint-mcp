@@ -1283,6 +1283,16 @@ async def test_checker_authoring_guidance_reads_error_back_as_no_valid_verdict()
 
 
 @pytest.mark.asyncio
+async def test_cpsat_workflow_prompt_interprets_the_optional_checker_self_test() -> None:
+    lower = await _cpsat_workflow_lower()
+
+    assert "optional checker self-test" in lower
+    assert "`rejected_count: 0, accepted_count: 0`" in lower
+    assert "non-vacuity, not completeness" in lower
+    assert "known-invalid payload" in lower
+
+
+@pytest.mark.asyncio
 async def test_cpsat_python_solution_workflow_prompt_checker_is_a_predicate_not_a_solver() -> None:
     """The checker child runs under `sys.executable` — the server's own venv, which
     ships `ortools` — so a checker CAN re-solve. One that does inherits the model's

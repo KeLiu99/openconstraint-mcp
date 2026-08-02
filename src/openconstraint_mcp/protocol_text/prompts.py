@@ -119,11 +119,25 @@ _CPSAT_CHECKER_MANDATES_FULL = """\
   repair the constraints when the bug is in the print statement.
 """
 
+# Detailed self-test interpretation is fetched on demand with the full prompt;
+# the full-profile tool description keeps only the compact call-time contract.
+_CPSAT_CHECKER_SELF_TEST_GUIDANCE_FULL = """\
+- OPTIONAL CHECKER SELF-TEST: `run_cpsat_python_file_checked(...,
+  test_checker=true)` reruns the checker only after its baseline accepts, using
+  four generic mutations. Read `checker_test.mutations`, not just
+  `rejected_count`/`accepted_count`: `rejected_count: 0, accepted_count: 0`
+  can mean no mutation applied or that every probe errored, timed out, or was
+  skipped. A rejection shows non-vacuity, not completeness; zero rejections is
+  inconclusive because generic mutations can remain feasible. For stronger
+  evidence, also test a problem-specific known-invalid payload.
+"""
+
 CPSAT_OUTPUT_CONTRACT_GUIDANCE = (
     _CPSAT_OUTPUT_CONTRACT_HEAD
     + _CPSAT_CONTRACT_ROLE_FULL
     + _CPSAT_CONTRACT_ADVISORY
     + _CPSAT_CHECKER_MANDATES_FULL
+    + _CPSAT_CHECKER_SELF_TEST_GUIDANCE_FULL
 )
 
 CPSAT_OUTPUT_CONTRACT_GUIDANCE_CORE = (
