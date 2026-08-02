@@ -15,6 +15,7 @@ import pytest
 from openconstraint_mcp.pyexec.core import (
     _KEY_PATH_MAX_CHARS,
     _MUTATION_ERRORS_MAX_BYTES,
+    _compact_mutation_errors,
     _envelope_violation,
     effective_checker_timeout_ms,
     run_cpsat_python,
@@ -1995,6 +1996,45 @@ def test_a_graded_row_caps_oversized_checker_errors(
         <= _MUTATION_ERRORS_MAX_BYTES
     )
     assert errors[-1] == "... checker errors truncated (2 affected)"
+
+
+def test_capped_errors_keep_whole_rows_before_the_one_that_overran() -> None:
+    """Rows that fit are carried over byte-identical; only the overrunning one is cut."""
+    errors = [f"row {index:03d} " + "e" * 90 for index in range(200)]
+
+    compact = _compact_mutation_errors(errors)
+
+    kept = compact[:-2]  # every row but the truncated prefix and the marker
+    assert kept and kept == errors[: len(kept)]
+
+
+def test_capped_errors_truncate_the_overrunning_row_to_a_prefix() -> None:
+    """The row that broke the budget is kept as a non-empty proper prefix, not dropped."""
+    errors = ["e" * 100] * 200
+
+    compact = _compact_mutation_errors(errors)
+
+    assert compact[-2] in {"e" * length for length in range(1, 100)}
+
+
+def test_capped_errors_drop_a_row_that_cannot_fit_even_one_character() -> None:
+    """With room for the marker but not one more character, the row vanishes entirely.
+
+    Sizing the fillers so the budget lands in that four-byte window is the whole
+    point: a retained character costs its own quotes and separator, so this is
+    the one path where the marker replaces a row instead of following a prefix
+    of it.
+    """
+    marker = "... checker errors truncated (1 affected)"
+    filler = "x" * 12
+    # A compact JSON array of n equal ASCII strings costs n * (len(item) + 3) + 1
+    # bytes, so this is the most fillers that still leave room for the marker.
+    count = (_MUTATION_ERRORS_MAX_BYTES - len(marker) - 4) // (len(filler) + 3)
+    errors = [filler] * count + ["y" * 5000]
+
+    compact = _compact_mutation_errors(errors)
+
+    assert compact == [*errors[:count], marker]
 
 
 def test_the_report_does_not_repeat_the_baseline_report(
