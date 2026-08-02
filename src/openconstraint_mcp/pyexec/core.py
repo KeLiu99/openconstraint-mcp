@@ -93,12 +93,16 @@ from typing import Any, cast
 
 from ..schemas.cpsat import (
     CpsatCheckerReport,
+    CpsatCheckerTestReport,
+    CpsatMutationOutcome,
     CpsatPythonCheckedResult,
     CpsatPythonResult,
     CpsatStatus,
 )
 from ..shared.childproc import ChildProcessTracker
 from ..shared.childrun import ChildExecutionResult, ChildSpawnError, execute_child
+from ..shared.job_errors import exception_summary
+from ..shared.proc import process_tree_terminate_worst_case_ms
 from ..shared.save_target import text_sha256
 from .checker import checker_infrastructure_report, run_checker_file
 from .diagnostics import (
@@ -108,9 +112,15 @@ from .diagnostics import (
 )
 from .eligibility import diagnostic_incumbent_eligibility
 from .env_vars import CPSAT_CONFIG_ENV_VAR, CPSAT_SEED_ENV_VAR
+from .mutation import MUTATION_NAMES, SolutionMutation, generate_mutations
 from .script_path import validate_script_args, validate_script_path
 
 DEFAULT_PYEXEC_TIMEOUT_MS: int = 30_000
+
+# Shared ceiling for synchronous CP-SAT orchestrators that can run multiple
+# sequential children. Keep enough margin for typical MCP client timeouts.
+MAX_CPSAT_SYNC_WALL_CLOCK_MS: int = 120_000
+_CPSAT_EXECUTOR_POLL_SLACK_MS: int = 250
 
 # OR-Tools CP-SAT's random_seed parameter is a signed int32. Reject values outside
 # that range before they reach a child process.
@@ -169,6 +179,42 @@ def validate_checker_args(*, checker: str | None, checker_timeout_ms: int | None
 def effective_checker_timeout_ms(*, checker_timeout_ms: int | None, default_timeout_ms: int) -> int:
     """Return the checker timeout after applying the tool's default timeout fallback."""
     return checker_timeout_ms if checker_timeout_ms is not None else default_timeout_ms
+
+
+def cpsat_child_timeout_overhead_ms() -> int:
+    """Return conservative cleanup/poll overhead for one timed-out CP-SAT child."""
+    return process_tree_terminate_worst_case_ms() + _CPSAT_EXECUTOR_POLL_SLACK_MS
+
+
+def _check_checked_wall_clock_budget(*, timeout_ms: int, checker_timeout_ms: int) -> None:
+    """Reject a projected SELF-TESTING checked run over the synchronous ceiling.
+
+    Enforced only for ``test_checker=True``, which is what turns one checker
+    child into ``1 + len(MUTATION_NAMES)`` sequential ones. A plain
+    checked run is two children and keeps its historical freedom to ask for the
+    solve time the problem needs — it has ``submit_cpsat_python_file_job`` as an
+    unbounded fallback only when the checker needs no sibling file, so capping
+    it would leave a file-based checker with no path at all. Self-testing is
+    new and opt-in, so a ceiling on it strands no existing caller.
+    """
+    if timeout_ms <= 0:
+        raise ValueError("timeout_ms must be positive")
+    overhead_ms = cpsat_child_timeout_overhead_ms()
+    checker_runs = 1 + len(MUTATION_NAMES)
+    model_budget_ms = timeout_ms + overhead_ms
+    checker_budget_ms = checker_timeout_ms + overhead_ms
+    projected_ms = model_budget_ms + checker_runs * checker_budget_ms
+    if projected_ms <= MAX_CPSAT_SYNC_WALL_CLOCK_MS:
+        return
+    raise ValueError(
+        f"projected checked-run budget {projected_ms} ms exceeds "
+        f"MAX_CPSAT_SYNC_WALL_CLOCK_MS={MAX_CPSAT_SYNC_WALL_CLOCK_MS} ms: "
+        f"timeout_ms={timeout_ms}, checker_timeout_ms={checker_timeout_ms}, "
+        f"checker_runs={checker_runs}, overhead_ms={overhead_ms}, "
+        f"model_budget_ms={model_budget_ms}, checker_budget_ms={checker_budget_ms} "
+        "(reduce timeout_ms and/or checker_timeout_ms, or drop test_checker — "
+        "checker self-testing has no background-job equivalent)"
+    )
 
 
 def validate_cpsat_random_seed(seed: object, *, label: str = "seed") -> int:
@@ -681,6 +727,116 @@ def run_cpsat_python_file(
     return _result_from_child(child)
 
 
+def _run_checker_or_report(
+    checker_path: Path,
+    run_result: CpsatPythonResult,
+    *,
+    problem: str | None,
+    timeout_ms: int,
+    tracker: ChildProcessTracker | None,
+) -> CpsatCheckerReport:
+    """Run the on-disk checker, turning an infrastructure fault into a report.
+
+    The one call shape both the baseline check and every mutation-test mutant
+    go through, so a temp-file/spawn failure can never void the completed model
+    result on either path.
+    """
+    try:
+        return run_checker_file(
+            checker_path,
+            run_result,
+            problem=problem,
+            timeout_ms=timeout_ms,
+            tracker=tracker,
+        )
+    except Exception as exc:  # noqa: BLE001 - a checker fault must not void the run
+        return checker_infrastructure_report(exc)
+
+
+def _run_checker_test(
+    checker_path: Path,
+    run_result: CpsatPythonResult,
+    *,
+    baseline: CpsatCheckerReport,
+    problem: str | None,
+    timeout_ms: int,
+    tracker: ChildProcessTracker | None,
+) -> CpsatCheckerTestReport:
+    """Re-run the checker against deterministic mutations of the solution.
+
+    Each applied mutation costs exactly one more checker child, reusing the same
+    checker path, ``problem``, effective timeout, and tracker as the baseline so
+    the probe cannot differ from the verdict it is testing. The mutations are
+    domain-agnostic and not known-invalid: a rejection is positive evidence, but
+    zero rejections is inconclusive. The mutant payload is carried on a
+    ``model_copy`` of the run result — the caller's result is never mutated — and
+    only a ``rejected`` verdict counts: an ``error``/``timeout`` mutant proves
+    nothing, and a skipped mutation carries its reason instead.
+
+    Faults are absorbed PER MUTATION, so evidence already gathered is never
+    thrown away: anything that raises while probing one mutation becomes that
+    row's ``skipped_reason`` and the loop moves on, so a fault on the third
+    mutation cannot discard the rejections the first two earned. A per-mutant
+    checker infrastructure fault is finer-grained still and is absorbed by
+    ``_run_checker_or_report``, which records it as an ``error`` report.
+
+    GENERATION gets its own boundary, because it runs before any row exists and
+    so is not covered by the per-mutation one. ``generate_mutations`` is stdlib
+    over a pydantic-validated ``dict``, but its ``copy.deepcopy`` recurses in
+    Python where the JSON decode that produced the solution did not, so a deeply
+    nested payload can arrive intact and raise ``RecursionError`` there. This
+    diagnostic is opt-in and its verdicts are inconclusive by design; it must
+    never cost the caller a completed model result and an accepted baseline.
+    A generation fault therefore degrades to the full fixed row set, every row
+    skipped with the reason.
+    """
+    try:
+        mutations = generate_mutations(run_result.solution, run_result.objective)
+    except Exception as exc:  # noqa: BLE001 - a probe must not void the checked run
+        reason = f"mutation generation failed: {exception_summary(exc)}"
+        mutations = [SolutionMutation(name=name, skipped_reason=reason) for name in MUTATION_NAMES]
+
+    outcomes: list[CpsatMutationOutcome] = []
+    for mutation in mutations:
+        if not mutation.applied:
+            outcomes.append(
+                CpsatMutationOutcome(name=mutation.name, skipped_reason=mutation.skipped_reason)
+            )
+            continue
+        try:
+            mutant = run_result.model_copy(
+                update={"solution": mutation.solution, "objective": mutation.objective}
+            )
+            report = _run_checker_or_report(
+                checker_path,
+                mutant,
+                problem=problem,
+                timeout_ms=timeout_ms,
+                tracker=tracker,
+            )
+            outcomes.append(
+                CpsatMutationOutcome(
+                    name=mutation.name,
+                    # The mutant's diagnostic is stripped: see CpsatMutationOutcome.
+                    # A `rejected` mutant is the DESIRED outcome here, so its
+                    # `checker_failed` diagnostic would invert that category's
+                    # meaning for every client that branches on it.
+                    report=report.model_copy(update={"diagnostic": None}),
+                )
+            )
+        except Exception as exc:  # noqa: BLE001 - one faulted probe, not the whole self-test
+            outcomes.append(
+                CpsatMutationOutcome(
+                    name=mutation.name,
+                    skipped_reason=f"mutation probe failed: {exception_summary(exc)}",
+                )
+            )
+
+    # Both counts are derived from `mutations` by the model itself, so a
+    # row that took the faulted path cannot leave a tally behind.
+    return CpsatCheckerTestReport(baseline=baseline, mutations=outcomes)
+
+
 def run_cpsat_python_file_checked(
     script_path: Path,
     checker_path: Path,
@@ -689,6 +845,7 @@ def run_cpsat_python_file_checked(
     timeout_ms: int = DEFAULT_PYEXEC_TIMEOUT_MS,
     checker_timeout_ms: int | None = None,
     args: list[str] | None = None,
+    test_checker: bool = False,
     tracker: ChildProcessTracker | None = None,
     env: dict[str, str | None] | None = None,
 ) -> CpsatPythonCheckedResult:
@@ -708,13 +865,31 @@ def run_cpsat_python_file_checked(
 
     A checker that times out, exits nonzero, or emits malformed output does not
     fail this call — it yields a non-``accepted`` ``CpsatCheckerReport``. The
-    model result always survives. The top-level ``diagnostic`` composes both
-    halves via ``checked_result_diagnostic``.
+    model result always survives. The top-level ``diagnostic`` is composed by
+    ``checked_result_diagnostic``, whose precedence is: a run TIMEOUT wins, else
+    a FAILED checker overrides the run's own diagnostic. A checker self-test does
+    not produce a top-level diagnostic because its generic mutations are not
+    known-invalid.
 
-    Nominal worst-case wall clock is additive:
-    ``(timeout_ms + tree-kill grace) + (checker_timeout_ms + tree-kill grace)``.
-    Beyond what a synchronous MCP call can hold, use
-    ``submit_cpsat_python_file_job``.
+    ``test_checker`` (opt-in, default off) adds a checker self-test: after — and
+    only after — an ``accepted`` baseline verdict, the same checker is re-run
+    against deterministic mutations of the solution, and ``checker_test``
+    reports whether at least one was rejected. Zero rejections is inconclusive,
+    since a generic mutation can remain feasible. Any other baseline leaves
+    ``checker_test`` ``None``, since there is nothing to test the checker
+    against. A fault while probing one mutation becomes that row's
+    ``skipped_reason`` rather than escaping, so the other rows' verdicts stand.
+    The probe never alters the run's own ``status``/``objective``/``solution``.
+
+    Projected worst-case wall clock is additive:
+    ``(timeout_ms + tree-kill grace) + (checker_timeout_ms + tree-kill grace)``,
+    plus ``(applied mutations) × (checker_timeout_ms + tree-kill grace)`` when
+    ``test_checker`` is on. Only the ``test_checker`` projection is GATED: with
+    the self-test on, the call conservatively assumes all four mutations apply
+    and rejects a projection over ``MAX_CPSAT_SYNC_WALL_CLOCK_MS`` before any
+    child runs. A plain checked run stays ungated — ``timeout_ms`` has no upper
+    bound, since a caller must be able to ask for the solve time the problem
+    needs. Background jobs have no checker self-test.
     """
     resolved_script = validate_script_path(script_path)
     resolved_checker = validate_script_path(checker_path, parameter="checker_path")
@@ -722,6 +897,10 @@ def run_cpsat_python_file_checked(
     effective_timeout_ms = effective_checker_timeout_ms(
         checker_timeout_ms=checker_timeout_ms, default_timeout_ms=timeout_ms
     )
+    if test_checker:
+        _check_checked_wall_clock_budget(
+            timeout_ms=timeout_ms, checker_timeout_ms=effective_timeout_ms
+        )
 
     run_result = run_cpsat_python_file(
         resolved_script,
@@ -734,16 +913,24 @@ def run_cpsat_python_file_checked(
     eligible, skipped_reason = diagnostic_incumbent_eligibility(run_result)
     report: CpsatCheckerReport | None = None
     if eligible:
-        try:
-            report = run_checker_file(
-                resolved_checker,
-                run_result,
-                problem=problem,
-                timeout_ms=effective_timeout_ms,
-                tracker=tracker,
-            )
-        except Exception as exc:  # noqa: BLE001 - a checker fault must not void the run
-            report = checker_infrastructure_report(exc)
+        report = _run_checker_or_report(
+            resolved_checker,
+            run_result,
+            problem=problem,
+            timeout_ms=effective_timeout_ms,
+            tracker=tracker,
+        )
+
+    checker_test: CpsatCheckerTestReport | None = None
+    if test_checker and report is not None and report.status == "accepted":
+        checker_test = _run_checker_test(
+            resolved_checker,
+            run_result,
+            baseline=report,
+            problem=problem,
+            timeout_ms=effective_timeout_ms,
+            tracker=tracker,
+        )
 
     return CpsatPythonCheckedResult(
         **run_result.model_dump(exclude={"diagnostic"}),
@@ -751,4 +938,5 @@ def run_cpsat_python_file_checked(
         checker=report,
         checker_skipped_reason=skipped_reason,
         checker_timeout_ms=effective_timeout_ms,
+        checker_test=checker_test,
     )

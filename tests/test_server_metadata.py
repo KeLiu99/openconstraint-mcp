@@ -15,6 +15,11 @@ from openconstraint_mcp.protocol_text.descriptions import (
     MCP_SERVER_INSTRUCTIONS_CORE,
 )
 from openconstraint_mcp.pyexec.jobs import CpsatJobRegistry
+from openconstraint_mcp.schemas.cpsat import (
+    CpsatCheckerTestReport,
+    CpsatPythonCheckedResult,
+    CpsatPythonResult,
+)
 from openconstraint_mcp.server import (
     _homepage_url,
     _make_lifespan,
@@ -578,6 +583,36 @@ async def test_run_cpsat_python_file_checked_is_full_only() -> None:
     assert "run_cpsat_python_file_checked" not in await _tools_by_name("core")
 
 
+# --- checked-result shape, documented in three registers -------------------
+
+# The three sites that enumerate CpsatPythonCheckedResult's extra fields BY HAND:
+# `run_cpsat_python_file`'s terse cross-reference to its checked sibling, the
+# checked tool's own per-field gloss, and the README reference docs. They
+# deliberately differ in register, so they are not collapsed into one shared
+# string — instead the SCHEMA is the source of truth and this gate fails when a
+# new field fails to reach any of them.
+_CHECKED_SHAPE_SITES = ("run_cpsat_python_file", "run_cpsat_python_file_checked", "README.md")
+_README_PATH = Path(__file__).parent.parent / "README.md"
+
+
+async def _checked_shape_site_text(site: str) -> str:
+    """The prose of one site that documents the checked result's extra fields."""
+    if site == "README.md":
+        return _README_PATH.read_text(encoding="utf-8")
+    return (await _tools_by_name("full"))[site].description or ""
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("site", _CHECKED_SHAPE_SITES)
+async def test_every_checked_only_field_is_documented(site: str) -> None:
+    extra_fields = set(CpsatPythonCheckedResult.model_fields) - set(CpsatPythonResult.model_fields)
+    text = await _checked_shape_site_text(site)
+    missing = sorted(name for name in extra_fields if f"`{name}`" not in text)
+    assert not missing, (
+        f"{site} does not document CpsatPythonCheckedResult field(s): {', '.join(missing)}"
+    )
+
+
 @pytest.mark.asyncio
 async def test_run_cpsat_python_file_checked_advertises_the_checker_fields() -> None:
     tools = await _tools_by_name("full")
@@ -603,6 +638,59 @@ async def test_run_cpsat_python_file_checked_requires_both_paths() -> None:
     tools = await _tools_by_name("full")
     required = tools["run_cpsat_python_file_checked"].input_schema.get("required", [])
     assert set(required) == {"script_path", "checker_path"}
+
+
+@pytest.mark.asyncio
+async def test_run_cpsat_python_file_checked_advertises_the_test_checker_parameter() -> None:
+    tools = await _tools_by_name("full")
+    properties = tools["run_cpsat_python_file_checked"].input_schema["properties"]
+    assert "test_checker" in properties
+
+
+@pytest.mark.asyncio
+async def test_run_cpsat_python_file_checked_test_checker_defaults_off() -> None:
+    # The probe costs one extra checker child per applied mutation, so a client
+    # must have to ask for it.
+    tools = await _tools_by_name("full")
+    properties = tools["run_cpsat_python_file_checked"].input_schema["properties"]
+    assert properties["test_checker"]["default"] is False
+
+
+@pytest.mark.asyncio
+async def test_run_cpsat_python_file_checked_advertises_the_checker_test_field() -> None:
+    tools = await _tools_by_name("full")
+    output_schema = tools["run_cpsat_python_file_checked"].output_schema
+    assert output_schema is not None
+    assert "checker_test" in output_schema["properties"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("field", ["rejected_count", "accepted_count"])
+async def test_the_checker_test_counts_reach_the_advertised_output_schema(field: str) -> None:
+    # Both counts are derived from `mutations`, but they must stay REAL fields:
+    # the MCP SDK builds output schemas in pydantic's validation mode, which
+    # omits `computed_field`s, so deriving them that way would hide from every
+    # client the two numbers it reads first.
+    tools = await _tools_by_name("full")
+    output_schema = tools["run_cpsat_python_file_checked"].output_schema
+    assert output_schema is not None
+    report = output_schema["$defs"]["CpsatCheckerTestReport"]
+    assert field in report["properties"]
+
+
+# Derived from the SCHEMA, not from a phrase: `accepted_count` is only readable
+# next to the other two (a client told just the rejection count would infer
+# toleration by subtraction and mis-score a checker that choked), so the gate is
+# that every field of the report reaches both audiences — and it survives any
+# rewording of the prose that carries them.
+@pytest.mark.asyncio
+@pytest.mark.parametrize("site", ("run_cpsat_python_file_checked", "README.md"))
+async def test_every_checker_test_field_is_documented(site: str) -> None:
+    text = await _checked_shape_site_text(site)
+    missing = sorted(
+        name for name in CpsatCheckerTestReport.model_fields if f"`{name}`" not in text
+    )
+    assert not missing, f"{site} does not document CpsatCheckerTestReport field(s): {missing}"
 
 
 def test_core_instructions_toolset_hint_is_paragraph_two_within_head_budget() -> None:

@@ -249,19 +249,94 @@ def test_full_output_contract_fragment_keeps_the_checker_execution_clause() -> N
     assert "the server only executes it and runs the checker you supply" in normalized
 
 
-def test_output_contract_fragment_variants_differ_only_in_the_role_clause() -> None:
-    # The variants share one head and one advisory tail, so every contract RULE
-    # and the advisory framing stay byte-identical; only the execution-role
-    # clause between them may differ. This is the no-drift property the single
-    # constant used to give for free, now that there are two.
-    def _shared_halves(fragment: str) -> tuple[str, str]:
-        rules, _, rest = fragment.partition("- You generate and repair the script")
-        _, _, advisory = rest.partition("This guidance is advisory")
-        return rules, advisory
+def test_full_output_contract_fragment_mandates_a_checker_that_is_not_a_solver() -> None:
+    # Mandate form, not recommendation form: "should"/"consider" phrasing loses
+    # to cost pressure at generation time.
+    normalized = " ".join(CPSAT_OUTPUT_CONTRACT_GUIDANCE.split())
 
-    assert _shared_halves(CPSAT_OUTPUT_CONTRACT_GUIDANCE) == _shared_halves(
+    assert "A CHECKER IS A PREDICATE, NOT A SOLVER." in normalized
+
+
+def test_full_output_contract_fragment_allows_a_zero_cardinality_instance() -> None:
+    normalized = " ".join(CPSAT_OUTPUT_CONTRACT_GUIDANCE.split())
+
+    assert "A consistent zero-cardinality domain may have a valid empty solution" in normalized
+
+
+def test_full_output_contract_fragment_mandates_the_error_versus_rejected_split() -> None:
+    normalized = " ".join(CPSAT_OUTPUT_CONTRACT_GUIDANCE.split())
+
+    assert "A CHECKER MUST USE THE `error` VERSUS `rejected` SPLIT" in normalized
+
+
+def test_core_output_contract_fragment_carries_no_checker_mandates() -> None:
+    # Core exposes no checker-capable CP-SAT tool, so a mandate about a checker
+    # the server runs would advertise a capability core cannot deliver.
+    normalized = " ".join(CPSAT_OUTPUT_CONTRACT_GUIDANCE_CORE.split())
+
+    assert "A CHECKER" not in normalized
+
+
+# The fragment is assembled as: shared head, then the per-profile execution-role
+# bullet, then the shared advisory continuation of that bullet, then — full only
+# — the checker mandates as fresh top-level bullets. These three helpers cut a
+# fragment at those seams so the no-drift and core-leak properties can each be
+# asserted on their own piece.
+
+
+def _contract_rules(fragment: str) -> str:
+    """Everything before the profile-dependent execution-role bullet."""
+    return fragment.partition("- You generate and repair the script")[0]
+
+
+def _advisory_clause(fragment: str) -> str:
+    """The advisory continuation alone, stopping at the next top-level bullet.
+
+    Not simply the fragment's tail: full appends its checker mandates as new
+    bullets after this continuation, so the tail is the mandates there.
+    """
+    _, marker, rest = fragment.partition("This guidance is advisory")
+    end = rest.find("\n- ")
+    return marker + (rest if end == -1 else rest[: end + 1])
+
+
+def _after_the_advisory(fragment: str) -> str:
+    """Whatever the variant appends as top-level bullets after the advisory."""
+    _, _, rest = fragment.partition("This guidance is advisory")
+    end = rest.find("\n- ")
+    return "" if end == -1 else rest[end + 1 :]
+
+
+def test_output_contract_fragment_variants_share_every_contract_rule() -> None:
+    # The head is profile-independent, so every contract RULE stays byte-identical
+    # across the variants. This is half the no-drift property the single constant
+    # used to give for free, now that there are two.
+    assert _contract_rules(CPSAT_OUTPUT_CONTRACT_GUIDANCE) == _contract_rules(
         CPSAT_OUTPUT_CONTRACT_GUIDANCE_CORE
     )
+
+
+def test_output_contract_fragment_variants_share_the_advisory_clause() -> None:
+    # The other half: both variants splice the SAME advisory continuation, so the
+    # advisory framing cannot drift even though full appends mandates after it.
+    assert _advisory_clause(CPSAT_OUTPUT_CONTRACT_GUIDANCE) == _advisory_clause(
+        CPSAT_OUTPUT_CONTRACT_GUIDANCE_CORE
+    )
+
+
+def test_core_output_contract_fragment_appends_nothing_after_the_advisory() -> None:
+    # Structural form of the leak guard: the advisory is the LAST thing core
+    # carries, so no full-only block — the checker mandates today, anything else
+    # tomorrow — can reach a profile whose toolset cannot deliver it.
+    assert _after_the_advisory(CPSAT_OUTPUT_CONTRACT_GUIDANCE_CORE) == ""
+
+
+def test_full_output_contract_fragment_appends_the_mandates_after_the_advisory() -> None:
+    # Placed AHEAD of the advisory, "This guidance is advisory" reads as a hedge
+    # on the three MUSTs and licenses a generating model to downgrade them.
+    fragment = CPSAT_OUTPUT_CONTRACT_GUIDANCE
+
+    assert fragment.index("This guidance is advisory") < fragment.index("A CHECKER IS A PREDICATE")
 
 
 def test_core_output_contract_fragment_is_brace_free_for_str_format() -> None:
@@ -1222,16 +1297,13 @@ async def test_cpsat_python_solution_workflow_prompt_checker_is_a_predicate_not_
 
 
 @pytest.mark.asyncio
-async def test_cpsat_python_solution_workflow_prompt_checker_must_not_accept_vacuously() -> None:
-    """A checker whose constraint loops run over an empty instance returns `accepted`
-    with no errors — a green verdict proving nothing. The instance must be validated
-    before it is graded against, and the solution checked for coverage."""
+async def test_cpsat_python_solution_workflow_prompt_checker_validates_cardinality() -> None:
     text = await _get_prompt_text("cpsat_python_solution_workflow", {"problem": SAMPLE_PROBLEM})
     lower = " ".join(text.split()).lower()
 
     assert "never accept vacuously" in lower
-    assert "return `error` for an empty or degenerate one" in lower
-    assert "every constraint loop trivially succeeds over an empty collection" in lower
+    assert "domain cardinalities disagree with the supplied data" in lower
+    assert "a zero-cardinality domain is valid" in lower
     assert "check coverage" in lower
 
 
@@ -1562,14 +1634,14 @@ async def test_auto_tune_constraint_problem_prompt_backend_local_winner_selectio
 @pytest.mark.asyncio
 async def test_auto_tune_constraint_problem_prompt_race_checker_must_discriminate() -> None:
     """The race attaches a checker precisely to keep an incorrect formulation from
-    winning. A checker that re-solves, or that accepts a degenerate instance, passes
-    every candidate alike — the race then ranks on speed with correctness unchecked."""
+    winning. A checker that re-solves or accepts malformed instance data passes every
+    candidate alike — the race then ranks on speed with correctness unchecked."""
     text = await _get_prompt_text("auto_tune_constraint_problem", {"problem": SAMPLE_PROBLEM})
     lower = " ".join(text.split()).lower()
 
     assert "each checker is a predicate that grades the emitted solution" in lower
     assert "re-solves the problem inherits the very failure it exists to catch" in lower
-    assert "accepts an empty or degenerate instance instead of erroring" in lower
+    assert "accepts missing or cardinality-inconsistent instance data" in lower
 
 
 @pytest.mark.asyncio

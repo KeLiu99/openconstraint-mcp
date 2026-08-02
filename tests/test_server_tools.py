@@ -3304,6 +3304,42 @@ async def test_run_cpsat_python_file_checked_forwards_problem_and_checker_timeou
 
 
 @pytest.mark.asyncio
+async def test_run_cpsat_python_file_checked_forwards_test_checker(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Dropping `test_checker=` on the inner call would silently return a null
+    # `checker_test` for a caller who asked for the checker self-test.
+    seen = _patch_checked_runner(monkeypatch)
+
+    mcp = create_mcp_server("full")
+    await mcp.call_tool(
+        "run_cpsat_python_file_checked",
+        {
+            "script_path": "/tmp/model.py",
+            "checker_path": "/tmp/checker.py",
+            "test_checker": True,
+        },
+    )
+
+    assert seen["test_checker"] is True
+
+
+@pytest.mark.asyncio
+async def test_run_cpsat_python_file_checked_defaults_test_checker_off(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    seen = _patch_checked_runner(monkeypatch)
+
+    mcp = create_mcp_server("full")
+    await mcp.call_tool(
+        "run_cpsat_python_file_checked",
+        {"script_path": "/tmp/model.py", "checker_path": "/tmp/checker.py"},
+    )
+
+    assert seen["test_checker"] is False
+
+
+@pytest.mark.asyncio
 async def test_run_cpsat_python_file_checked_seed_replay_passes_seed_env(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

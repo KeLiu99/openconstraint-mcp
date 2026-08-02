@@ -16,8 +16,9 @@ from __future__ import annotations
 # profile. Prompts are fetched on demand and carry no byte budget, so the fuller
 # wording lives here rather than in the metadata-budgeted tool descriptions.
 #
-# Everything up to the execution-role bullet is profile-independent; only that
-# bullet is composed per profile (see `_CPSAT_CONTRACT_ROLE_CORE`).
+# Everything up to the execution-role bullet is profile-independent. That bullet
+# is composed per profile (see `_CPSAT_CONTRACT_ROLE_CORE`), and the full profile
+# alone appends the checker mandates after the shared advisory tail.
 _CPSAT_OUTPUT_CONTRACT_HEAD = """\
 CP-SAT OUTPUT CONTRACT — the transport the server parses, and the form any
 checker must be able to grade:
@@ -66,6 +67,12 @@ checker must be able to grade:
 # grade", "one grading standard applies to every variant") but must never say
 # the server runs, supplies, or invokes one — that claim is only true in the
 # full profile, and the head reaches core verbatim.
+#
+# The checker MANDATES (`_CPSAT_CHECKER_MANDATES_FULL`) are bound by the same
+# rule and are therefore spliced into the FULL variant only. They are claims
+# about a checker the server RUNS, and every checker-capable CP-SAT tool is
+# full-only, so moving them up into the shared head would advertise to the core
+# profile a capability it does not have.
 _CPSAT_CONTRACT_ROLE_FULL = """\
 - You generate and repair the script; the server only executes it and runs the
   checker you supply.
@@ -76,15 +83,47 @@ _CPSAT_CONTRACT_ROLE_CORE = """\
 """
 
 # Shared tail of the execution-role bullet: true in both profiles, so it stays
-# one string rather than being duplicated into each variant.
+# one string rather than being duplicated into each variant. Its two-space indent
+# makes it a CONTINUATION of that bullet, and it must stay the LAST thing in that
+# bullet — anything appended after it renders as new top-level bullets, outside
+# what "this guidance" refers to.
 _CPSAT_CONTRACT_ADVISORY = """\
   This guidance is advisory — the deterministic guarantee starts only when an
   MCP execution tool actually runs the script, so a script you write and never
   run carries no server guarantee at all.
 """
 
+# FULL-ONLY, and deliberately spliced AFTER the advisory rather than before it.
+# These are MANDATES, and the advisory is an indented continuation of the
+# execution-role bullet: placed ahead of it, "This guidance is advisory" reads as
+# a hedge on the three MUSTs and hands the generating model a licence to
+# downgrade them under cost pressure. Appended after, the advisory keeps scoping
+# the execution-role bullet alone and the mandates render unhedged.
+_CPSAT_CHECKER_MANDATES_FULL = """\
+- A CHECKER IS A PREDICATE, NOT A SOLVER. It MUST grade the `solution` it is
+  handed against the problem instance, and MUST NOT search for an answer of its
+  own: a checker that imports `ortools` and re-solves can fail exactly the way
+  the model does, and a bug the two share is invisible to both.
+- A CHECKER MUST VALIDATE INSTANCE CARDINALITY rather than reject or accept an
+  instance based on emptiness alone. It MUST verify that the keys it grades are
+  present, that domain cardinalities agree with supplied data, and that every
+  constraint required by the instance was evaluated. A consistent
+  zero-cardinality domain may have a valid empty solution; missing or
+  inconsistent instance data MUST produce `error`.
+- A CHECKER MUST USE THE `error` VERSUS `rejected` SPLIT, because they name
+  different broken artifacts. `error` means UNGRADEABLE — a missing key, an
+  unparseable payload, a solution that describes the answer instead of
+  containing it; the SCRIPT's output is at fault. `rejected` means GRADED AND
+  WRONG — the solution was readable and violates the problem; the MODEL is at
+  fault. Reporting `rejected` for an ungradeable payload sends the caller to
+  repair the constraints when the bug is in the print statement.
+"""
+
 CPSAT_OUTPUT_CONTRACT_GUIDANCE = (
-    _CPSAT_OUTPUT_CONTRACT_HEAD + _CPSAT_CONTRACT_ROLE_FULL + _CPSAT_CONTRACT_ADVISORY
+    _CPSAT_OUTPUT_CONTRACT_HEAD
+    + _CPSAT_CONTRACT_ROLE_FULL
+    + _CPSAT_CONTRACT_ADVISORY
+    + _CPSAT_CHECKER_MANDATES_FULL
 )
 
 CPSAT_OUTPUT_CONTRACT_GUIDANCE_CORE = (
@@ -725,13 +764,13 @@ User problem:
         out, exhaust memory, or repeat the model's own modeling bug on
         exactly the hard instances where an independent verdict matters.
       - Never accept VACUOUSLY. Validate the instance BEFORE grading against
-        it and return `error` for an empty or degenerate one (no jobs, no
-        items, a missing dimension): every constraint loop trivially
-        succeeds over an empty collection, so a serialization slip that
-        dropped the instance would otherwise score a clean `accepted`. For
-        the same reason check COVERAGE — every element the instance requires
-        is present in the solution — not only that the entries present are
-        self-consistent.
+        it and return `error` when required keys are missing or domain
+        cardinalities disagree with the supplied data. A zero-cardinality
+        domain is valid when its cardinality, data, solution, and objective
+        (when present) agree; an unexpectedly empty collection may instead
+        reveal a serialization slip. Check COVERAGE — every element the
+        instance requires is present in the solution — not only that the
+        entries present are self-consistent.
       - SAFETY: generate only validation code — no network access, no file
         mutations, no subprocess spawning — unless the user explicitly
         requested it. The server executes this code locally and does not
@@ -908,8 +947,8 @@ save-tool provenance.
    incorrect formulation from winning the tuning-stage race. That only holds
    if each checker is a PREDICATE that grades the emitted solution against
    the instance — one that re-solves the problem inherits the very failure it
-   exists to catch, and one that accepts an empty or degenerate instance
-   instead of erroring passes every candidate alike. For a
+   exists to catch, and one that accepts missing or cardinality-inconsistent
+   instance data instead of erroring passes every candidate alike. For a
    cross-backend comparison, draft TWO backend-specific checkers that enforce
    the same problem constraints. They are NOT interchangeable source:
    MiniZinc uses inline MiniZinc solution-checker source; CP-SAT uses a Python

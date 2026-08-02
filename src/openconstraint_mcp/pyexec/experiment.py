@@ -50,13 +50,14 @@ from ..schemas.cpsat import (
 )
 from ..shared.childproc import ChildProcessTracker
 from ..shared.hashing import path_sha256
-from ..shared.proc import process_tree_terminate_worst_case_ms
 from ..shared.save_target import text_sha256
 from .checker import run_checker
 from .core import (
     DEFAULT_PYEXEC_TIMEOUT_MS,
+    MAX_CPSAT_SYNC_WALL_CLOCK_MS,
     canonical_json_byte_length,
     config_sha256,
+    cpsat_child_timeout_overhead_ms,
     effective_checker_timeout_ms,
     replay_env_scope,
     run_cpsat_python,
@@ -71,11 +72,7 @@ from .script_path import validate_script_args, validate_script_path
 # The synchronous experiment's pre-flight wall-clock budget, matching the
 # removed seed sweep's MAX_SWEEP_WALL_CLOCK_MS: comfortably under a typical
 # synchronous MCP client timeout.
-MAX_CPSAT_EXPERIMENT_WALL_CLOCK_MS: int = 120_000
-
-# Small allowance for the executor's polling interval and orchestration
-# overhead, folded into each attempt's projected timeout overhead.
-EXECUTOR_POLL_SLACK_MS: int = 250
+MAX_CPSAT_EXPERIMENT_WALL_CLOCK_MS: int = MAX_CPSAT_SYNC_WALL_CLOCK_MS
 
 # A config dict is a small cooperative parameter bag, not a data payload — bound
 # its canonical JSON encoding well under the 1 MiB child-output cap.
@@ -325,7 +322,7 @@ def _child_timeout_overhead_ms() -> int:
     only the executor's poll/orchestration slack on top of that worst-case
     cleanup budget.
     """
-    return process_tree_terminate_worst_case_ms() + EXECUTOR_POLL_SLACK_MS
+    return cpsat_child_timeout_overhead_ms()
 
 
 class _AttemptBudget(NamedTuple):

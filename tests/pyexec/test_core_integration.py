@@ -10,6 +10,7 @@ from openconstraint_mcp.pyexec.core import (
     VERIFIED_STATUSES,
     run_cpsat_python,
     run_cpsat_python_file,
+    run_cpsat_python_file_checked,
 )
 
 _EXAMPLES = Path(__file__).parent.parent / "fixtures" / "cpsat_python"
@@ -111,3 +112,55 @@ def test_run_cpsat_python_file_forwards_args_to_child_argv(tmp_path: Path) -> No
 
     assert result.solution is not None
     assert result.solution["argv"] == ["--flag", "value"]
+
+
+@pytest.mark.integration
+def test_checker_self_test_reports_rejections_through_real_children(tmp_path: Path) -> None:
+    # The mocked unit tests grade a stubbed `run_checker_file`; this proves the
+    # whole probe survives real children — the mutant payload really reaches a
+    # separate interpreter through the temp payload file, and its verdict really
+    # comes back through the stdout envelope.
+    script = tmp_path / "model.py"
+    script.write_text(
+        "import json\n"
+        "from ortools.sat.python import cp_model\n"
+        "model = cp_model.CpModel()\n"
+        "xs = [model.new_int_var(0, 5, f'x{i}') for i in range(2)]\n"
+        "model.add(xs[0] + xs[1] == 5)\n"
+        "solver = cp_model.CpSolver()\n"
+        "solver.parameters.max_time_in_seconds = 5\n"
+        "solver.solve(model)\n"
+        "print(json.dumps({\n"
+        "    'status': 'optimal',\n"
+        "    'objective': 5,\n"
+        "    'solution': {'items': [{'value': solver.value(x)} for x in xs]},\n"
+        "}))\n",
+        encoding="utf-8",
+    )
+    # A feasibility-only checker: it grades the item list and ignores the
+    # objective, so it tolerates `objective_perturbed` and rejects the other
+    # three.
+    checker = tmp_path / "checker.py"
+    checker.write_text(
+        "import json, sys\n"
+        "from pathlib import Path\n"
+        "payload = json.loads(Path(sys.argv[1]).read_text())\n"
+        "items = (payload.get('solution') or {}).get('items')\n"
+        "errors = []\n"
+        "if not isinstance(items, list) or len(items) != 2:\n"
+        "    errors.append('expected exactly 2 items')\n"
+        "elif sum(item['value'] for item in items) != 5:\n"
+        "    errors.append('item values do not sum to 5')\n"
+        "print(json.dumps({\n"
+        "    'status': 'rejected' if errors else 'accepted',\n"
+        "    'errors': errors,\n"
+        "}))\n",
+        encoding="utf-8",
+    )
+
+    result = run_cpsat_python_file_checked(
+        script, checker, timeout_ms=15_000, checker_timeout_ms=10_000, test_checker=True
+    )
+
+    assert result.checker_test is not None
+    assert result.checker_test.rejected_count == 3

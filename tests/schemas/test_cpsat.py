@@ -7,7 +7,9 @@ from pydantic import ValidationError
 
 from openconstraint_mcp.schemas.cpsat import (
     CpsatCheckerReport,
+    CpsatCheckerTestReport,
     CpsatExpectation,
+    CpsatMutationOutcome,
     CpsatPythonCheckedResult,
     CpsatPythonExperimentAttemptResult,
     CpsatPythonExperimentResult,
@@ -638,3 +640,153 @@ def test_cpsat_python_checked_result_allows_a_skipped_checker() -> None:
         **_checked_kwargs(), checker_skipped_reason="solution is missing or empty"
     )
     assert result.checker is None
+
+
+# --- CpsatMutationOutcome / CpsatCheckerTestReport --------------------------
+
+
+def _mutation_report(status: str) -> CpsatCheckerReport:
+    return CpsatCheckerReport(
+        status=status,  # type: ignore[arg-type]
+        errors=[] if status == "accepted" else ["corrupted"],
+        stdout="",
+        stderr="",
+        duration_ms=3,
+        timed_out=status == "timeout",
+        truncated=False,
+    )
+
+
+def test_cpsat_mutation_outcome_graded_round_trips() -> None:
+    outcome = CpsatMutationOutcome(name="element_dropped", report=_mutation_report("rejected"))
+    dumped = outcome.model_dump()
+    assert dumped["name"] == "element_dropped"
+    assert dumped["report"]["status"] == "rejected"
+
+
+def test_cpsat_mutation_outcome_carries_no_separate_applied_field() -> None:
+    # A row ran IFF it carries a `report`; a third representation of that
+    # two-state fact could only ever restate it or contradict it.
+    assert "applied" not in CpsatMutationOutcome.model_fields
+
+
+def test_cpsat_mutation_outcome_skipped_round_trips() -> None:
+    outcome = CpsatMutationOutcome(
+        name="objective_perturbed",
+        skipped_reason="objective is not a finite number",
+    )
+    assert outcome.model_dump()["skipped_reason"] == "objective is not a finite number"
+
+
+def test_cpsat_mutation_outcome_skipped_omits_the_report_under_exclude_none() -> None:
+    outcome = CpsatMutationOutcome(name="element_dropped", skipped_reason="no list")
+    assert "report" not in outcome.model_dump(exclude_none=True)
+
+
+def test_cpsat_mutation_outcome_rejects_a_row_carrying_both_outcomes() -> None:
+    with pytest.raises(ValidationError, match="exactly one of report and skipped_reason"):
+        CpsatMutationOutcome(
+            name="element_dropped",
+            skipped_reason="no list",
+            report=_mutation_report("rejected"),
+        )
+
+
+def test_cpsat_mutation_outcome_rejects_a_row_carrying_neither_outcome() -> None:
+    """A mutation that could not apply is never silently dropped."""
+    with pytest.raises(ValidationError, match="exactly one of report and skipped_reason"):
+        CpsatMutationOutcome(name="element_dropped")
+
+
+def _checker_test_report(*statuses: str) -> CpsatCheckerTestReport:
+    mutations = [
+        CpsatMutationOutcome(name=f"m{i}", report=_mutation_report(status))
+        for i, status in enumerate(statuses)
+    ]
+    return CpsatCheckerTestReport(baseline=_mutation_report("accepted"), mutations=mutations)
+
+
+def test_cpsat_checker_test_report_round_trips() -> None:
+    report = _checker_test_report("accepted", "rejected")
+    dumped = report.model_dump()
+    assert (dumped["rejected_count"], "discriminating" in dumped) == (1, False)
+
+
+def test_cpsat_checker_test_report_does_not_count_an_errored_mutant() -> None:
+    """A mutant run that errored proves nothing; it is not a rejection."""
+    assert _checker_test_report("error", "timeout").rejected_count == 0
+
+
+def test_cpsat_checker_test_report_does_not_count_an_errored_mutant_as_tolerated() -> None:
+    # A checker that CHOKED on a corrupted payload did not tolerate it. Folding
+    # the two together would report a vacuous checker where there is none.
+    assert _checker_test_report("error", "timeout").accepted_count == 0
+
+
+def test_cpsat_checker_test_report_counts_a_tolerated_mutant() -> None:
+    assert _checker_test_report("accepted", "accepted").accepted_count == 2
+
+
+def test_cpsat_checker_test_report_leaves_an_errored_mutant_out_of_both_verdict_counts() -> None:
+    # An errored mutant RAN, but it lands in neither verdict bucket, which is
+    # exactly the gap `accepted_count`/`rejected_count` alone cannot expose —
+    # a caller must read `mutations` to see it ran at all.
+    report = _checker_test_report("error", "accepted", "rejected")
+
+    assert (report.accepted_count, report.rejected_count) == (1, 1)
+
+
+def test_cpsat_checker_test_report_excludes_a_skipped_row_from_every_count() -> None:
+    report = CpsatCheckerTestReport(
+        baseline=_mutation_report("accepted"),
+        mutations=[CpsatMutationOutcome(name="m0", skipped_reason="no list")],
+    )
+
+    assert (report.rejected_count, report.accepted_count) == (0, 0)
+
+
+def test_cpsat_checker_test_report_overrides_a_miscounted_tally() -> None:
+    # The counts are derived from `mutations`, so a supplied tally cannot
+    # misreport the table it summarizes.
+    report = CpsatCheckerTestReport(
+        baseline=_mutation_report("accepted"),
+        mutations=[CpsatMutationOutcome(name="m0", report=_mutation_report("accepted"))],
+        rejected_count=1,
+    )
+
+    assert report.rejected_count == 0
+
+
+def test_cpsat_python_checked_result_defaults_checker_test_to_none() -> None:
+    result = CpsatPythonCheckedResult(
+        **_checked_kwargs(), checker_skipped_reason="solution is missing or empty"
+    )
+    assert result.checker_test is None
+
+
+def test_cpsat_python_checked_result_omits_a_null_checker_test_under_exclude_none() -> None:
+    result = CpsatPythonCheckedResult(
+        **_checked_kwargs(), checker_skipped_reason="solution is missing or empty"
+    )
+    assert "checker_test" not in result.model_dump(exclude_none=True)
+
+
+def test_cpsat_python_checked_result_carries_a_checker_test_report() -> None:
+    result = CpsatPythonCheckedResult(
+        **_checked_kwargs(),
+        checker=_mutation_report("accepted"),
+        checker_test=_checker_test_report("rejected"),
+    )
+    assert result.checker_test is not None
+    assert result.checker_test.rejected_count == 1
+
+
+def test_cpsat_python_checked_result_rejects_a_checker_test_without_a_checker() -> None:
+    # A probe reported where no checker ran would be evidence no run ever
+    # produced.
+    with pytest.raises(ValidationError, match="requires an accepted checker"):
+        CpsatPythonCheckedResult(
+            **_checked_kwargs(),
+            checker_skipped_reason="solution is missing or empty",
+            checker_test=_checker_test_report("rejected"),
+        )

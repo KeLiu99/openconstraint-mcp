@@ -90,6 +90,89 @@ class CpsatCheckerReport(BaseModel):
     diagnostic: Diagnostic | None = None
 
 
+class CpsatMutationOutcome(BaseModel):
+    """One deterministic solution mutation's outcome in a checker self-test.
+
+    ``name`` is the mutation's fixed identifier (``objective_perturbed``,
+    ``element_dropped``, ``element_duplicated``, ``numeric_field_perturbed``).
+    Exactly one of ``report`` and ``skipped_reason`` is set: a mutation ran IFF
+    it carries a ``report``, so "the checker tolerated this" is always
+    distinguishable from "this was never tried". A ``skipped_reason`` covers
+    both a mutation that could not be produced and one whose probe faulted
+    mid-flight; either way it was never graded.
+
+    A mutant ``report`` deliberately carries NO ``Diagnostic``. Its verdict is
+    evidence about the CHECKER, not a failure of this run: ``rejected`` is the
+    DESIRED outcome here, so the ``checker_failed`` diagnostic every checker
+    report normally carries would invert the meaning of a category clients
+    branch on everywhere else. ``status`` and ``errors`` carry the whole signal.
+    The top-level ``checker`` (baseline) report keeps its diagnostic as usual.
+    """
+
+    name: str
+    skipped_reason: str | None = None
+    report: CpsatCheckerReport | None = None
+
+    @model_validator(mode="after")
+    def _report_and_reason_are_exclusive(self) -> CpsatMutationOutcome:
+        """Enforce the report/reason split the checker-test counts are tallied from."""
+        if (self.report is None) == (self.skipped_reason is None):
+            raise ValueError(
+                "CpsatMutationOutcome carries exactly one of report and skipped_reason "
+                "(a graded mutation has a verdict; one that could not apply has a "
+                "reason and is never silently dropped)"
+            )
+        return self
+
+
+class CpsatCheckerTestReport(BaseModel):
+    """Report a caller-supplied checker's verdicts on generic mutations.
+
+    Produced only when a checked run opted into ``test_checker`` AND the
+    ``baseline`` verdict on the real solution was ``accepted`` — there is
+    nothing to test the checker against otherwise. Each entry in ``mutations``
+    is the checker re-run against one mutated copy of that solution.
+
+    Both counts are DERIVED from ``mutations``, so neither can drift from the
+    table it summarizes. A graded mutant lands in exactly one of two buckets,
+    reported separately because they license different conclusions:
+    ``rejected_count`` (graded and refused — the checker is not vacuous) and
+    ``accepted_count`` (graded and swallowed — the vacuous-checker signal). An
+    ``error``/``timeout`` mutant reached no verdict and lands in neither count,
+    same as a skipped mutation — so ``rejected_count: 0, accepted_count: 0``
+    alone cannot distinguish "nothing was corruptible" from "every mutant that
+    ran errored out or timed out"; both leave zero evidence about the checker,
+    but for different reasons. A client that needs that distinction reads
+    ``mutations`` directly, where each row's ``report.status`` or
+    ``skipped_reason`` says which.
+
+    A positive ``rejected_count`` shows that the checker rejected a payload, not
+    that it grades every constraint. Zero-of-nonzero is still inconclusive
+    because these domain-agnostic mutations are not known-invalid and can remain
+    feasible. This report never alters the run's own
+    ``status``/``objective``/``solution`` or produces a top-level diagnostic.
+    """
+
+    baseline: CpsatCheckerReport
+    mutations: list[CpsatMutationOutcome] = Field(default_factory=list)
+    rejected_count: int = 0
+    accepted_count: int = 0
+
+    @model_validator(mode="after")
+    def _derive_counts_from_the_mutation_table(self) -> CpsatCheckerTestReport:
+        """Recompute both tallies from ``mutations`` — the single source of truth.
+
+        Real fields rather than ``computed_field``s because the MCP SDK builds
+        tool output schemas in pydantic's *validation* mode, where computed
+        fields are invisible — and these counts are the numbers a client reads
+        first, so they have to appear in the advertised schema.
+        """
+        graded = [m.report.status for m in self.mutations if m.report is not None]
+        self.rejected_count = graded.count("rejected")
+        self.accepted_count = graded.count("accepted")
+        return self
+
+
 class CpsatPythonCheckedResult(CpsatPythonResult):
     """A synchronous CP-SAT file run plus its checker verdict.
 
@@ -107,16 +190,22 @@ class CpsatPythonCheckedResult(CpsatPythonResult):
       value, else ``timeout_ms``); it is always set, since this tool always
       requests a check.
 
-    The top-level ``diagnostic`` composes both halves: a run timeout wins, else
-    a failed checker overrides, else the run's own diagnostic — so
-    ``diagnostic: null`` is the clean-success signal only when the checker also
-    accepts; an ``optimal`` run the checker rejects surfaces a
-    ``checker_failed`` diagnostic instead.
+    - ``checker_test`` is set only when the caller opted into ``test_checker``
+      AND the checker accepted; it reports whether that checker rejected any
+      generic mutation. ``None`` otherwise — including for a non-``accepted``
+      baseline, which leaves nothing to test the checker against.
+
+    The top-level ``diagnostic`` composes the run and baseline checker: a run
+    timeout wins, else a failed checker overrides, else the run's own diagnostic.
+    The self-test remains informational because its mutations are not
+    known-invalid. An ``optimal`` run the checker rejects surfaces a
+    ``checker_failed`` diagnostic.
     """
 
     checker: CpsatCheckerReport | None = None
     checker_skipped_reason: str | None = None
     checker_timeout_ms: int | None = None
+    checker_test: CpsatCheckerTestReport | None = None
 
     @model_validator(mode="after")
     def _checker_outcome_is_exclusive(self) -> CpsatPythonCheckedResult:
@@ -130,6 +219,26 @@ class CpsatPythonCheckedResult(CpsatPythonResult):
                 "CpsatPythonCheckedResult requires checker or checker_skipped_reason "
                 "(this tool always requests a check, so exactly one outcome exists). "
                 "CpsatPythonJobStatus permits neither because a job may supply no checker"
+            )
+        return self
+
+    @model_validator(mode="after")
+    def _checker_test_follows_an_accepted_checker(self) -> CpsatPythonCheckedResult:
+        """A probe exists only where there was an accepted verdict to test against.
+
+        The invariant the runner's orchestration actually depends on: mutants are
+        graded against the same checker that accepted the real solution, so a
+        ``checker_test`` attached to a missing, rejected, errored, or timed-out
+        checker would report mutation evidence no run ever produced. The
+        ``baseline`` needs no separate check — the runner passes the very object
+        gated here as the baseline, so the two cannot disagree.
+        """
+        if self.checker_test is None:
+            return self
+        if self.checker is None or self.checker.status != "accepted":
+            raise ValueError(
+                "CpsatPythonCheckedResult checker_test requires an accepted checker "
+                "verdict (there is nothing to test the checker against otherwise)"
             )
         return self
 
