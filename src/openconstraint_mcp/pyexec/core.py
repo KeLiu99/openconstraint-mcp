@@ -224,17 +224,17 @@ def _resolve_checked_checker_timeout_ms(*, timeout_ms: int, checker_timeout_ms: 
     checker_runs = 1 + len(CPSAT_MUTATION_NAMES)
     model_budget_ms = timeout_ms + overhead_ms
     fixed_budget_ms = model_budget_ms + checker_runs * overhead_ms
+    no_fallback = "checker self-testing has no background-job equivalent"
     if checker_timeout_ms is None:
         max_checker_timeout_ms = (MAX_CPSAT_SYNC_WALL_CLOCK_MS - fixed_budget_ms) // checker_runs
         if max_checker_timeout_ms < _MIN_SELF_TEST_CHECKER_TIMEOUT_MS:
             raise ValueError(
-                f"projected checked-run fixed budget {fixed_budget_ms} ms leaves only "
-                f"{max_checker_timeout_ms} ms per checker child under "
-                f"MAX_CPSAT_SYNC_WALL_CLOCK_MS={MAX_CPSAT_SYNC_WALL_CLOCK_MS} ms, below the "
-                f"{_MIN_SELF_TEST_CHECKER_TIMEOUT_MS} ms floor a derived checker timeout must "
-                f"clear: timeout_ms={timeout_ms}, checker_runs={checker_runs}, "
-                f"overhead_ms={overhead_ms} (reduce timeout_ms or drop test_checker — "
-                "checker self-testing has no background-job equivalent)"
+                f"fixed budget {fixed_budget_ms} ms (timeout_ms={timeout_ms} + "
+                f"{checker_runs} checker runs x {overhead_ms} ms overhead) leaves only "
+                f"{max_checker_timeout_ms} ms per checker child, under the "
+                f"{_MIN_SELF_TEST_CHECKER_TIMEOUT_MS} ms floor "
+                f"(MAX_CPSAT_SYNC_WALL_CLOCK_MS={MAX_CPSAT_SYNC_WALL_CLOCK_MS} ms; "
+                f"reduce timeout_ms, or drop test_checker — {no_fallback})"
             )
         # The floor bounds the DERIVED cap, not the caller's own model timeout: a
         # deliberately short `timeout_ms` still yields a checker timeout that
@@ -245,13 +245,10 @@ def _resolve_checked_checker_timeout_ms(*, timeout_ms: int, checker_timeout_ms: 
     if projected_ms <= MAX_CPSAT_SYNC_WALL_CLOCK_MS:
         return checker_timeout_ms
     raise ValueError(
-        f"projected checked-run budget {projected_ms} ms exceeds "
-        f"MAX_CPSAT_SYNC_WALL_CLOCK_MS={MAX_CPSAT_SYNC_WALL_CLOCK_MS} ms: "
-        f"timeout_ms={timeout_ms}, checker_timeout_ms={checker_timeout_ms}, "
-        f"checker_runs={checker_runs}, overhead_ms={overhead_ms}, "
-        f"model_budget_ms={model_budget_ms}, checker_budget_ms={checker_budget_ms} "
-        "(reduce timeout_ms and/or checker_timeout_ms, or drop test_checker — "
-        "checker self-testing has no background-job equivalent)"
+        f"projected budget {projected_ms} ms (timeout_ms={timeout_ms} + "
+        f"checker_timeout_ms={checker_timeout_ms}, x{checker_runs} runs incl. overhead) "
+        f"exceeds MAX_CPSAT_SYNC_WALL_CLOCK_MS={MAX_CPSAT_SYNC_WALL_CLOCK_MS} ms "
+        f"(reduce timeout_ms and/or checker_timeout_ms, or drop test_checker — {no_fallback})"
     )
 
 
@@ -833,22 +830,16 @@ def _run_checker_test(
 
     Each applied mutation costs exactly one more checker child, reusing the same
     checker path, ``problem``, effective timeout, and tracker as the baseline so
-    the probe cannot differ from the verdict it is testing. The mutations are
-    domain-agnostic and not known-invalid: a rejection is positive evidence, but
-    zero rejections is inconclusive. The mutant payload is carried on a
-    ``model_copy`` of the run result — the caller's result is never mutated — and
-    only a ``rejected`` verdict counts: an ``error``/``timeout`` mutant proves
-    nothing, and a skipped mutation carries its reason instead.
+    the probe cannot differ from the verdict it is testing. The mutant payload is
+    carried on a ``model_copy`` of the run result — the caller's result is never
+    mutated — and only a ``rejected`` verdict counts: an ``error``/``timeout``
+    mutant proves nothing, and a skipped mutation carries its reason instead.
+    See ``CpsatCheckerTestReport`` for why zero rejections is inconclusive.
 
     Each mutant's full ``CpsatCheckerReport`` is projected down to a compact
-    ``CpsatMutationOutcome`` and its raw output discarded; the accepted baseline
-    is not repeated here at all. The caller already returns that one report in
-    full as ``checker``, and up to four more — each able to carry a MiB of
-    checker stdout/stderr plus arbitrary ``details`` JSON and a parsed copy of
-    most of that output in ``errors`` — would make one tool result several MiB
-    of context for a diagnostic that only asks whether the checker refused a
-    corrupted payload. The retained errors prefix, including its truncation
-    marker, is capped at 8 KiB of compact JSON per row.
+    ``CpsatMutationOutcome`` (see that class for why) and its raw output
+    discarded; the accepted baseline is not repeated here at all — the caller
+    already returns that one report in full as ``checker``.
 
     A fault while building or recording one mutant becomes that row's
     ``skipped_reason``, so it cannot suppress the other mutation rows. A
@@ -893,12 +884,7 @@ def _run_checker_test(
             outcomes.append(
                 CpsatMutationOutcome(
                     name=mutation.name,
-                    # Projected down to a compact row: see CpsatMutationOutcome.
-                    # The mutant's raw stdout/stderr/details are dropped (four
-                    # of these would flood a client's context), and so is its
-                    # diagnostic — a `rejected` mutant is the DESIRED outcome
-                    # here, so a `checker_failed` diagnostic would invert that
-                    # category's meaning for every client that branches on it.
+                    # Compact row, no diagnostic: see CpsatMutationOutcome for why.
                     status=report.status,
                     errors=_compact_mutation_errors(report.errors),
                     duration_ms=report.duration_ms,
@@ -946,16 +932,14 @@ def run_cpsat_python_file_checked(
     A checker that times out, exits nonzero, or emits malformed output does not
     fail this call — it yields a non-``accepted`` ``CpsatCheckerReport``. The
     model result always survives. The top-level ``diagnostic`` is composed by
-    ``checked_result_diagnostic``, whose precedence is: a run TIMEOUT wins, else
-    a FAILED checker overrides the run's own diagnostic. A checker self-test does
-    not produce a top-level diagnostic because its generic mutations are not
-    known-invalid.
+    ``checked_result_diagnostic``; see that function for its precedence and for
+    why a checker self-test never contributes one.
 
     ``test_checker`` (opt-in, default off) adds a checker self-test: after — and
     only after — an ``accepted`` baseline verdict, the same checker is re-run
     against deterministic mutations of the solution, and ``checker_test``
-    reports whether at least one was rejected. Zero rejections is inconclusive,
-    since a generic mutation can remain feasible. Any other baseline leaves
+    reports whether at least one was rejected (see ``CpsatCheckerTestReport``
+    for why zero rejections is inconclusive). Any other baseline leaves
     ``checker_test`` ``None``, since there is nothing to test the checker
     against. A fault while probing one mutation becomes that row's
     ``skipped_reason`` rather than escaping, so the other rows' verdicts stand.

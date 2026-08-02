@@ -69,11 +69,6 @@ from .diagnostics import experiment_attempt_diagnostic, experiment_diagnostic
 from .eligibility import diagnostic_incumbent_eligibility
 from .script_path import validate_script_args, validate_script_path
 
-# The synchronous experiment's pre-flight wall-clock budget, matching the
-# removed seed sweep's MAX_SWEEP_WALL_CLOCK_MS: comfortably under a typical
-# synchronous MCP client timeout.
-MAX_CPSAT_EXPERIMENT_WALL_CLOCK_MS: int = MAX_CPSAT_SYNC_WALL_CLOCK_MS
-
 # A config dict is a small cooperative parameter bag, not a data payload — bound
 # its canonical JSON encoding well under the 1 MiB child-output cap.
 MAX_EXPERIMENT_CONFIG_BYTES: int = 64 * 1024
@@ -315,16 +310,6 @@ def _effective_timeout_ms(attempt: CpsatPythonExperimentAttempt, default_timeout
     return attempt.timeout_ms if attempt.timeout_ms is not None else default_timeout_ms
 
 
-def _child_timeout_overhead_ms() -> int:
-    """Conservative per-child time a timed-out child can burn after its nominal cap.
-
-    The process-tree leaf owns the termination sequence. The experiment adds
-    only the executor's poll/orchestration slack on top of that worst-case
-    cleanup budget.
-    """
-    return cpsat_child_timeout_overhead_ms()
-
-
 class _AttemptBudget(NamedTuple):
     """One attempt's admission-budget components, in ms.
 
@@ -352,7 +337,7 @@ def _attempt_budget_breakdown(
     (``_check_wall_clock_budget``) and its rejection message can never disagree
     about how a projected total was derived.
     """
-    overhead = _child_timeout_overhead_ms()
+    overhead = cpsat_child_timeout_overhead_ms()
     timeout_ms = _effective_timeout_ms(attempt, default_timeout_ms)
     attempt_budget_ms = timeout_ms + overhead
     effective_checker_ms: int | None = None
@@ -406,10 +391,10 @@ def _check_wall_clock_budget(
     batches = math.ceil(len(attempts) / max_parallel_attempts)
     slowest = max(breakdowns, key=lambda b: b.total_ms)
     projected_ms = batches * slowest.total_ms
-    if projected_ms <= MAX_CPSAT_EXPERIMENT_WALL_CLOCK_MS:
+    if projected_ms <= MAX_CPSAT_SYNC_WALL_CLOCK_MS:
         return
 
-    if slowest.total_ms > MAX_CPSAT_EXPERIMENT_WALL_CLOCK_MS:
+    if slowest.total_ms > MAX_CPSAT_SYNC_WALL_CLOCK_MS:
         # Even a single run of the slowest attempt (batches=1) is already over
         # the cap: no attempt-count or max_parallel_attempts change can fit it.
         hint = (
@@ -428,14 +413,14 @@ def _check_wall_clock_budget(
         #   - min_parallel_to_fit: ceil(attempt_count / batches_max) (the
         #     least parallelism that admits today's attempt count), flagged
         #     when it exceeds this machine's own parallelism cap.
-        #   - max_slowest_total_ms: MAX_CPSAT_EXPERIMENT_WALL_CLOCK_MS //
+        #   - max_slowest_total_ms: MAX_CPSAT_SYNC_WALL_CLOCK_MS //
         #     batches (today's batches, not batches_max) — the ceiling the
         #     slowest attempt's timeout_ms + overhead + checker budget must
         #     drop under at today's attempt count and parallelism.
-        batches_max = MAX_CPSAT_EXPERIMENT_WALL_CLOCK_MS // slowest.total_ms
+        batches_max = MAX_CPSAT_SYNC_WALL_CLOCK_MS // slowest.total_ms
         max_attempts_to_fit = batches_max * max_parallel_attempts
         min_parallel_to_fit = math.ceil(len(attempts) / batches_max)
-        max_slowest_total_ms = MAX_CPSAT_EXPERIMENT_WALL_CLOCK_MS // batches
+        max_slowest_total_ms = MAX_CPSAT_SYNC_WALL_CLOCK_MS // batches
         parallel_cap = _max_parallel_attempts_cap()
         parallel_note = (
             f" (exceeds this machine's max_parallel_attempts cap of {parallel_cap})"
@@ -450,7 +435,7 @@ def _check_wall_clock_budget(
         )
     raise ValueError(
         f"projected experiment budget {projected_ms} ms exceeds "
-        f"MAX_CPSAT_EXPERIMENT_WALL_CLOCK_MS={MAX_CPSAT_EXPERIMENT_WALL_CLOCK_MS} ms. "
+        f"MAX_CPSAT_SYNC_WALL_CLOCK_MS={MAX_CPSAT_SYNC_WALL_CLOCK_MS} ms. "
         f"Breakdown (slowest attempt): attempt_count={len(attempts)}, "
         f"max_parallel_attempts={max_parallel_attempts}, batches={batches}, "
         f"per_attempt_timeout_ms={slowest.timeout_ms}, "
@@ -459,7 +444,7 @@ def _check_wall_clock_budget(
         f"checker_budget_ms={slowest.checker_budget_ms}, "
         f"overhead_ms={slowest.attempt_budget_ms - slowest.timeout_ms}, "
         f"total_budget_ms={projected_ms}, "
-        f"max_budget_ms={MAX_CPSAT_EXPERIMENT_WALL_CLOCK_MS} ({hint})"
+        f"max_budget_ms={MAX_CPSAT_SYNC_WALL_CLOCK_MS} ({hint})"
     )
 
 
@@ -734,7 +719,7 @@ def run_cpsat_python_experiment(
     replay — alongside any ``num_workers``-oversubscription advisory.
 
     Raises ``ValueError`` for an invalid request — including a projected budget
-    over ``MAX_CPSAT_EXPERIMENT_WALL_CLOCK_MS`` or a ``max_parallel_attempts``
+    over ``MAX_CPSAT_SYNC_WALL_CLOCK_MS`` or a ``max_parallel_attempts``
     over the server cap — before any child is spawned.
     """
     validated_objective_sense = _validate_objective_sense(objective_sense)

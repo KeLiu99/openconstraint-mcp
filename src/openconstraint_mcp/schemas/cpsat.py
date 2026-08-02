@@ -234,9 +234,9 @@ class CpsatPythonCheckedResult(CpsatPythonResult):
 
     The top-level ``diagnostic`` composes the run and baseline checker: a run
     timeout wins, else a failed checker overrides, else the run's own diagnostic.
-    The self-test remains informational because its mutations are not
-    known-invalid. An ``optimal`` run the checker rejects surfaces a
-    ``checker_failed`` diagnostic.
+    The self-test never contributes one — see ``CpsatCheckerTestReport`` for
+    why. An ``optimal`` run the checker rejects surfaces a ``checker_failed``
+    diagnostic.
     """
 
     checker: CpsatCheckerReport | None = None

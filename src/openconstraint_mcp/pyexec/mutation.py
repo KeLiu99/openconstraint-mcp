@@ -113,34 +113,73 @@ def _element_duplicated(
     return SolutionMutation(name=ELEMENT_DUPLICATED, solution=mutated, objective=objective)
 
 
-def _numeric_field_perturbed(
-    solution: dict, objective: float | int | None, list_key: str | None
-) -> SolutionMutation:
-    # Search the selected list's head before the top level, but exhaust integer
-    # candidates before using a boolean fallback anywhere.
+@dataclass(frozen=True)
+class _NumericTarget:
+    """Where ``_apply_numeric_target`` should mutate.
+
+    ``list_key=None`` addresses the top-level solution and ``field`` is one of
+    its own keys. Otherwise ``field`` is a dict key of ``solution[list_key][0]``
+    when that element is a dict, or the literal index ``0`` into the list
+    itself when the element is a bare scalar — the list then doubles as its
+    own single-item container, so ``container[field]`` reaches the element
+    either way without a separate scalar-vs-dict case at the call site.
+    """
+
+    list_key: str | None
+    field: object
+
+
+def _find_numeric_target(
+    solution: dict, list_key: str | None, *, want_bool: bool
+) -> _NumericTarget | None:
+    """Search the list head before the top level for a matching field.
+
+    Looks for a plain int unless ``want_bool``, in which case it looks for a
+    bool instead; ``_numeric_field_perturbed`` always exhausts the int search
+    (both candidates) before trying a bool one, so a solution with any int
+    anywhere is never perturbed by flipping an unrelated bool.
+    """
     candidates: list[tuple[object, str | None]] = [(solution, None)]
     if list_key is not None:
         candidates.insert(0, (solution[list_key][0], list_key))
 
-    for booleans in (False, True):
-        for candidate, candidate_list_key in candidates:
-            values = candidate.items() if isinstance(candidate, dict) else ((0, candidate),)
-            for field, value in values:
-                if isinstance(value, bool) if booleans else _is_plain_int(value):
-                    mutated = copy.deepcopy(solution)
-                    if candidate_list_key is None:
-                        target = mutated
-                    elif isinstance(candidate, dict):
-                        target = mutated[candidate_list_key][0]
-                    else:
-                        target = mutated[candidate_list_key]
-                    if booleans:
-                        target[field] = not target[field]
-                    else:
-                        target[field] += 1
-                    return SolutionMutation(
-                        name=NUMERIC_FIELD_PERTURBED, solution=mutated, objective=objective
-                    )
+    matches = (lambda value: isinstance(value, bool)) if want_bool else _is_plain_int
+    for candidate, candidate_list_key in candidates:
+        fields = candidate.items() if isinstance(candidate, dict) else ((0, candidate),)
+        for field, value in fields:
+            if matches(value):
+                return _NumericTarget(candidate_list_key, field)
+    return None
+
+
+def _apply_numeric_target(solution: dict, target: _NumericTarget, *, flip: bool) -> dict:
+    """Deep-copy ``solution`` and bump (or, if ``flip``, negate) the targeted field.
+
+    Re-resolves ``target`` against the fresh copy rather than mutating through
+    a reference captured during the search, so the caller's ``solution`` is
+    never touched.
+    """
+    mutated = copy.deepcopy(solution)
+    if target.list_key is None:
+        container = mutated
+    elif isinstance(solution[target.list_key][0], dict):
+        container = mutated[target.list_key][0]
+    else:
+        container = mutated[target.list_key]
+    container[target.field] = not container[target.field] if flip else container[target.field] + 1
+    return mutated
+
+
+def _numeric_field_perturbed(
+    solution: dict, objective: float | int | None, list_key: str | None
+) -> SolutionMutation:
+    for want_bool in (False, True):
+        target = _find_numeric_target(solution, list_key, want_bool=want_bool)
+        if target is not None:
+            mutated = _apply_numeric_target(solution, target, flip=want_bool)
+            return SolutionMutation(
+                name=NUMERIC_FIELD_PERTURBED, solution=mutated, objective=objective
+            )
 
     return SolutionMutation(
         name=NUMERIC_FIELD_PERTURBED,

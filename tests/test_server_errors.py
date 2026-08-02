@@ -528,7 +528,7 @@ async def test_tool_checked_run_budget_exposes_invalid_request(tmp_path: Path) -
         )
 
     assert str(exc_info.value).startswith("Diagnostic: invalid_request — ")
-    assert "projected checked-run budget" in str(exc_info.value)
+    assert "projected budget" in str(exc_info.value)
 
 
 @pytest.mark.asyncio

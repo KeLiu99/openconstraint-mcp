@@ -151,9 +151,9 @@ def checked_result_diagnostic(
     Precedence: a run TIMEOUT wins (the incumbent is unproven, so the checker's
     verdict on it is secondary), else a FAILED checker overrides, else the run's
     OWN diagnostic stands. A clean run with an ``accepted`` checker yields
-    ``None`` — the clean-success signal. Checker self-test mutations are not
-    known-invalid, so zero rejected mutations is inconclusive and cannot produce
-    a diagnostic.
+    ``None`` — the clean-success signal. A checker self-test never contributes
+    one here: see ``CpsatCheckerTestReport`` for why zero rejected mutations is
+    inconclusive rather than a pass/fail verdict.
 
     The explicit TIMEOUT branch exists only to jump the queue: without it a
     timeout would reach the run's-own-diagnostic branch *after* the failed
