@@ -119,10 +119,12 @@ class CpsatMutationOutcome(BaseModel):
     ``stderr`` share a 1 MiB cap and whose ``details`` is arbitrary
     checker-authored JSON. Embedding whole reports would let one tool result
     serialize several MiB of raw output into an MCP client's context, and none
-    of it answers the question this probe exists to ask. ``status`` plus
-    ``errors`` is the entire signal: whether the checker refused the mutant and
-    what it said. The baseline's raw output is still available in full on the
-    result's top-level ``checker``.
+    of it answers the question this probe exists to ask. ``status`` plus a
+    prefix of ``errors`` is the entire signal: whether the checker refused the
+    mutant and what it said. The projected errors list is capped at 8 KiB of
+    compact JSON per row, including an explicit truncation marker. The
+    baseline's raw output and complete errors remain available on the result's
+    top-level ``checker``.
 
     The dropped ``timed_out``/``truncated`` flags are derivable from what
     remains — a truncated mutant is ``error`` with ``"checker output was

@@ -169,6 +169,10 @@ _STATUS_ECHO_MAX_CHARS: int = 40
 # offending leaf key.
 _KEY_PATH_MAX_CHARS: int = 120
 
+# Four mutation rows share a client's context. Keep their useful checker signal
+# without letting parsed errors repeat most of the 1 MiB child-output allowance.
+_MUTATION_ERRORS_MAX_BYTES: int = 8 * 1024
+
 
 def validate_checker_timeout_ms(checker_timeout_ms: int | None) -> None:
     """Reject a non-positive explicit checker timeout.
@@ -787,6 +791,36 @@ def _run_checker_or_report(
         return checker_infrastructure_report(exc)
 
 
+def _compact_mutation_errors(errors: list[str]) -> list[str]:
+    """Cap a mutation row's errors to 8 KiB of compact JSON, including its marker."""
+
+    def size(values: list[str]) -> int:
+        return len(json.dumps(values, ensure_ascii=True, separators=(",", ":")).encode("utf-8"))
+
+    if size(errors) <= _MUTATION_ERRORS_MAX_BYTES:
+        return errors
+
+    compact: list[str] = []
+    for index, error in enumerate(errors):
+        marker = f"... checker errors truncated ({len(errors) - index} affected)"
+        if size([*compact, error, marker]) <= _MUTATION_ERRORS_MAX_BYTES:
+            compact.append(error)
+            continue
+
+        low, high = 0, len(error)
+        while low < high:
+            middle = (low + high + 1) // 2
+            if size([*compact, error[:middle], marker]) <= _MUTATION_ERRORS_MAX_BYTES:
+                low = middle
+            else:
+                high = middle - 1
+        if low:
+            compact.append(error[:low])
+        compact.append(marker)
+        return compact
+    return compact
+
+
 def _run_checker_test(
     checker_path: Path,
     run_result: CpsatPythonResult,
@@ -810,9 +844,11 @@ def _run_checker_test(
     ``CpsatMutationOutcome`` and its raw output discarded; the accepted baseline
     is not repeated here at all. The caller already returns that one report in
     full as ``checker``, and up to four more — each able to carry a MiB of
-    checker stdout/stderr plus arbitrary ``details`` JSON — would make one tool
-    result several MiB of context for a diagnostic that only asks whether the
-    checker refused a corrupted payload.
+    checker stdout/stderr plus arbitrary ``details`` JSON and a parsed copy of
+    most of that output in ``errors`` — would make one tool result several MiB
+    of context for a diagnostic that only asks whether the checker refused a
+    corrupted payload. The retained errors prefix, including its truncation
+    marker, is capped at 8 KiB of compact JSON per row.
 
     A fault while building or recording one mutant becomes that row's
     ``skipped_reason``, so it cannot suppress the other mutation rows. A
@@ -864,7 +900,7 @@ def _run_checker_test(
                     # here, so a `checker_failed` diagnostic would invert that
                     # category's meaning for every client that branches on it.
                     status=report.status,
-                    errors=report.errors,
+                    errors=_compact_mutation_errors(report.errors),
                     duration_ms=report.duration_ms,
                 )
             )

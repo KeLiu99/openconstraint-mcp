@@ -14,6 +14,7 @@ import pytest
 
 from openconstraint_mcp.pyexec.core import (
     _KEY_PATH_MAX_CHARS,
+    _MUTATION_ERRORS_MAX_BYTES,
     _envelope_violation,
     effective_checker_timeout_ms,
     run_cpsat_python,
@@ -1963,6 +1964,37 @@ def test_a_graded_row_projects_the_mutant_verdict_without_its_raw_output(
     assert [(m.name, m.errors, m.duration_ms) for m in rejected] == [
         ("element_dropped", ["nope"], 1)
     ]
+
+
+def test_a_graded_row_caps_oversized_checker_errors(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    script, checker = _checked_pair(tmp_path)
+    baseline = _checked_result("optimal", solution=_MUTABLE_SOLUTION)
+    oversized_errors = ["x" * (_MUTATION_ERRORS_MAX_BYTES + 1), "second error"]
+    monkeypatch.setattr("openconstraint_mcp.pyexec.core.MAX_CPSAT_SYNC_WALL_CLOCK_MS", 10**9)
+    monkeypatch.setattr(
+        "openconstraint_mcp.pyexec.core.run_cpsat_python_file", lambda script, **kw: baseline
+    )
+
+    def _checker(_path: Path, result: CpsatPythonResult, **kw: Any) -> CpsatCheckerReport:
+        if (result.solution, result.objective) == (_MUTABLE_SOLUTION, 10):
+            return _checker_report("accepted")
+        report = _checker_report("rejected")
+        report.errors = oversized_errors
+        return report
+
+    monkeypatch.setattr("openconstraint_mcp.pyexec.core.run_checker_file", _checker)
+
+    result = run_cpsat_python_file_checked(script, checker, test_checker=True)
+
+    assert result.checker_test is not None
+    errors = result.checker_test.mutations[0].errors
+    assert (
+        len(json.dumps(errors, ensure_ascii=True, separators=(",", ":")).encode("utf-8"))
+        <= _MUTATION_ERRORS_MAX_BYTES
+    )
+    assert errors[-1] == "... checker errors truncated (2 affected)"
 
 
 def test_the_report_does_not_repeat_the_baseline_report(
