@@ -1687,22 +1687,6 @@ def test_one_checker_child_runs_per_applied_mutation(
     assert len(seen) == 5
 
 
-def test_a_checker_that_accepts_every_mutant_reports_zero_rejections(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    script, checker = _checked_pair(tmp_path)
-    _patch_checker_test(
-        monkeypatch,
-        _checked_result("optimal", solution=_MUTABLE_SOLUTION),
-        _accept_everything,
-    )
-
-    result = run_cpsat_python_file_checked(script, checker, test_checker=True)
-
-    assert result.checker_test is not None
-    assert result.checker_test.rejected_count == 0
-
-
 def test_every_mutation_is_reported_as_its_own_row_in_a_fixed_order(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -1924,7 +1908,10 @@ def test_the_number_of_mutations_graded_reflects_the_solution_shape(
     # `_accept_everything` grades every mutation it receives as "accepted", so
     # `accepted_count` here doubles as "how many mutations this solution shape
     # produced" — a flat `{"x": 1}` supports only the objective and numeric
-    # mutations, not the two element mutations (no list to target).
+    # mutations, not the two element mutations (no list to target). One shape is
+    # enough at THIS layer: what each shape yields is `mutation.py`'s contract,
+    # covered per shape in `tests/pyexec/test_mutation.py`; what the orchestrator
+    # owes is that the shape's mutation count reaches the checker unaltered.
     script, checker = _checked_pair(tmp_path)
     _patch_checker_test(
         monkeypatch, _checked_result("optimal", solution={"x": 1}), _accept_everything
@@ -1955,61 +1942,6 @@ def test_a_solution_with_nothing_to_mutate_reports_zero_of_zero(
     assert result.checker_test is not None
     assert (result.checker_test.rejected_count, result.checker_test.accepted_count) == (0, 0)
     assert all(m.skipped_reason is not None for m in result.checker_test.mutations)
-
-
-def test_a_solution_shaped_as_a_flat_value_list_is_still_mutable(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    # A list of bare ints — a very common CP-SAT output shape — must reach the
-    # checker as mutations rather than skip rows.
-    script, checker = _checked_pair(tmp_path)
-    _patch_checker_test(
-        monkeypatch,
-        _checked_result("optimal", solution={"assign": [3, 1, 2]}, objective=None),
-        _accept_everything,
-    )
-
-    result = run_cpsat_python_file_checked(script, checker, test_checker=True)
-
-    assert result.checker_test is not None
-    assert result.checker_test.accepted_count == 3
-
-
-def test_a_flat_satisfaction_solution_gets_a_numeric_checker_probe(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    solution = {"x": 1}
-    script, checker = _checked_pair(tmp_path)
-    _patch_checker_test(
-        monkeypatch,
-        _checked_result("optimal", solution=solution, objective=None),
-        lambda result: "accepted" if result.solution == solution else "rejected",
-    )
-
-    result = run_cpsat_python_file_checked(script, checker, test_checker=True)
-
-    assert result.checker_test is not None
-    assert result.checker_test.rejected_count == 1
-
-
-def test_a_flat_boolean_solution_gets_one_checker_probe(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    script, checker = _checked_pair(tmp_path)
-    _patch_checker_test(
-        monkeypatch,
-        _checked_result(
-            "optimal",
-            solution={"x1": True, "x2": False, "x3": True},
-            objective=None,
-        ),
-        _accept_everything,
-    )
-
-    result = run_cpsat_python_file_checked(script, checker, test_checker=True)
-
-    assert result.checker_test is not None
-    assert result.checker_test.accepted_count == 1
 
 
 def test_a_graded_row_projects_the_mutant_verdict_without_its_raw_output(
@@ -2050,15 +1982,19 @@ def test_the_report_does_not_repeat_the_baseline_report(
     assert "baseline" not in result.model_dump()["checker_test"]
 
 
-def test_a_rejected_baseline_produces_no_report(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+@pytest.mark.parametrize("baseline_verdict", ["rejected", "error", "timeout"])
+def test_a_non_accepted_baseline_produces_no_report(
+    baseline_verdict: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    # There is nothing to test the checker against when the real solution was rejected.
+    # A non-accepted verdict of ANY kind leaves nothing to test the checker
+    # against: `rejected` graded the real solution and failed it, `error` and
+    # `timeout` reached no verdict at all. In every case the mutants' verdicts
+    # would be evidence about a checker that never worked on the real answer.
     script, checker = _checked_pair(tmp_path)
     _patch_checker_test(
         monkeypatch,
         _checked_result("optimal", solution=_MUTABLE_SOLUTION),
-        lambda result: "rejected",
+        lambda result: baseline_verdict,
     )
 
     result = run_cpsat_python_file_checked(script, checker, test_checker=True)
@@ -2079,41 +2015,6 @@ def test_a_rejected_baseline_spawns_no_mutant_child(
     run_cpsat_python_file_checked(script, checker, test_checker=True)
 
     assert len(seen) == 1
-
-
-def test_an_errored_baseline_produces_no_report(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    # A non-accepted verdict of ANY kind leaves nothing to test the checker
-    # against: an errored baseline graded nothing, so its verdicts on corrupted
-    # copies would be evidence about a checker that never worked.
-    script, checker = _checked_pair(tmp_path)
-    _patch_checker_test(
-        monkeypatch,
-        _checked_result("optimal", solution=_MUTABLE_SOLUTION),
-        lambda result: "error",
-    )
-
-    result = run_cpsat_python_file_checked(script, checker, test_checker=True)
-
-    assert result.checker_test is None
-
-
-def test_a_timed_out_baseline_produces_no_report(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    # Same rule for a checker that ran out of time on the real solution: it
-    # reached no verdict, so there is nothing for the mutants to be tested against.
-    script, checker = _checked_pair(tmp_path)
-    _patch_checker_test(
-        monkeypatch,
-        _checked_result("optimal", solution=_MUTABLE_SOLUTION),
-        lambda result: "timeout",
-    )
-
-    result = run_cpsat_python_file_checked(script, checker, test_checker=True)
-
-    assert result.checker_test is None
 
 
 def test_a_checker_that_never_ran_produces_no_report(
@@ -2253,7 +2154,7 @@ def test_zero_rejected_generic_mutations_are_inconclusive(
     # The mutations are domain-agnostic and not known-invalid, so a checker that
     # tolerates all of them may still be correct: the run stays diagnostic-free.
     # That this setup yields zero rejections is
-    # test_a_checker_that_accepts_every_mutant_reports_zero_rejections.
+    # test_a_checker_that_swallows_every_mutation_reports_them_as_tolerated.
     script, checker = _checked_pair(tmp_path)
     _patch_checker_test(
         monkeypatch,

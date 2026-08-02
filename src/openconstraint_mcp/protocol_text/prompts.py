@@ -68,11 +68,11 @@ checker must be able to grade:
 # the server runs, supplies, or invokes one — that claim is only true in the
 # full profile, and the head reaches core verbatim.
 #
-# The checker MANDATES (`_CPSAT_CHECKER_MANDATES_FULL`) are bound by the same
-# rule and are therefore spliced into the FULL variant only. They are claims
-# about a checker the server RUNS, and every checker-capable CP-SAT tool is
-# full-only, so moving them up into the shared head would advertise to the core
-# profile a capability it does not have.
+# For the same reason the checker MANDATES live in the CP-SAT workflow prompt's
+# checker-gate step (7c), which the full profile alone registers — not here. This
+# fragment is spliced into `solve_constraint_problem`, which BOTH profiles serve
+# and which routes to no checker-taking tool, so a checker mandate here would be
+# dead weight in one prompt and a false promise in the other.
 _CPSAT_CONTRACT_ROLE_FULL = """\
 - You generate and repair the script; the server only executes it and runs the
   checker you supply.
@@ -84,8 +84,8 @@ _CPSAT_CONTRACT_ROLE_CORE = """\
 
 # Shared tail of the execution-role bullet: true in both profiles, so it stays
 # one string rather than being duplicated into each variant. Its two-space indent
-# makes it a CONTINUATION of that bullet, and it must stay the LAST thing in that
-# bullet — anything appended after it renders as new top-level bullets, outside
+# makes it a CONTINUATION of that bullet, so it must stay the LAST thing in the
+# fragment — anything appended after it renders as new top-level bullets, outside
 # what "this guidance" refers to.
 _CPSAT_CONTRACT_ADVISORY = """\
   This guidance is advisory — the deterministic guarantee starts only when an
@@ -93,51 +93,8 @@ _CPSAT_CONTRACT_ADVISORY = """\
   run carries no server guarantee at all.
 """
 
-# FULL-ONLY, and deliberately spliced AFTER the advisory rather than before it.
-# These are MANDATES, and the advisory is an indented continuation of the
-# execution-role bullet: placed ahead of it, "This guidance is advisory" reads as
-# a hedge on the three MUSTs and hands the generating model a licence to
-# downgrade them under cost pressure. Appended after, the advisory keeps scoping
-# the execution-role bullet alone and the mandates render unhedged.
-_CPSAT_CHECKER_MANDATES_FULL = """\
-- A CHECKER IS A PREDICATE, NOT A SOLVER. It MUST grade the `solution` it is
-  handed against the problem instance, and MUST NOT search for an answer of its
-  own: a checker that imports `ortools` and re-solves can fail exactly the way
-  the model does, and a bug the two share is invisible to both.
-- A CHECKER MUST VALIDATE INSTANCE CARDINALITY rather than reject or accept an
-  instance based on emptiness alone. It MUST verify that the keys it grades are
-  present, that domain cardinalities agree with supplied data, and that every
-  constraint required by the instance was evaluated. A consistent
-  zero-cardinality domain may have a valid empty solution; missing or
-  inconsistent instance data MUST produce `error`.
-- A CHECKER MUST USE THE `error` VERSUS `rejected` SPLIT, because they name
-  different broken artifacts. `error` means UNGRADEABLE — a missing key, an
-  unparseable payload, a solution that describes the answer instead of
-  containing it; the SCRIPT's output is at fault. `rejected` means GRADED AND
-  WRONG — the solution was readable and violates the problem; the MODEL is at
-  fault. Reporting `rejected` for an ungradeable payload sends the caller to
-  repair the constraints when the bug is in the print statement.
-"""
-
-# Detailed self-test interpretation is fetched on demand with the full prompt;
-# the full-profile tool description keeps only the compact call-time contract.
-_CPSAT_CHECKER_SELF_TEST_GUIDANCE_FULL = """\
-- OPTIONAL CHECKER SELF-TEST: `run_cpsat_python_file_checked(...,
-  test_checker=true)` reruns the checker only after its baseline accepts, using
-  four generic mutations. Read `checker_test.mutations`, not just
-  `rejected_count`/`accepted_count`: `rejected_count: 0, accepted_count: 0`
-  can mean no mutation applied or that every probe errored, timed out, or was
-  skipped. A rejection shows non-vacuity, not completeness; zero rejections is
-  inconclusive because generic mutations can remain feasible. For stronger
-  evidence, also test a problem-specific known-invalid payload.
-"""
-
 CPSAT_OUTPUT_CONTRACT_GUIDANCE = (
-    _CPSAT_OUTPUT_CONTRACT_HEAD
-    + _CPSAT_CONTRACT_ROLE_FULL
-    + _CPSAT_CONTRACT_ADVISORY
-    + _CPSAT_CHECKER_MANDATES_FULL
-    + _CPSAT_CHECKER_SELF_TEST_GUIDANCE_FULL
+    _CPSAT_OUTPUT_CONTRACT_HEAD + _CPSAT_CONTRACT_ROLE_FULL + _CPSAT_CONTRACT_ADVISORY
 )
 
 CPSAT_OUTPUT_CONTRACT_GUIDANCE_CORE = (
@@ -813,6 +770,14 @@ User problem:
    problem has structural constraints the reported `status` alone cannot
    confirm, or when the result will be reused and higher confidence is
    valuable.
+   OPTIONAL CHECKER SELF-TEST: `run_cpsat_python_file_checked(...,
+   test_checker=true)` reruns the checker only after its baseline accepts, using
+   four generic mutations of the solution. Read `checker_test.mutations`, not
+   just `rejected_count`/`accepted_count`: `rejected_count: 0, accepted_count:
+   0` can mean no mutation applied or that every probe errored, timed out, or
+   was skipped. A rejection shows non-vacuity, not completeness; zero rejections
+   is inconclusive because generic mutations can remain feasible. For stronger
+   evidence, also test a problem-specific known-invalid payload.
 
 8. To replay a saved artifact later, read its
    `.openconstraint-model.json` manifest and call
