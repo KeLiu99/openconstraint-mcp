@@ -76,14 +76,21 @@ class _CpsatJobRequest:
         return self.script_path is not None
 
     @property
-    def effective_checker_timeout_ms(self) -> int | None:
-        """The checker child's timeout: explicit value, else the solver's; ``None`` unchecked.
+    def has_checker(self) -> bool:
+        """Whether a checker of either form was supplied — the one "is this job checked?" rule.
 
-        "Unchecked" means neither checker form was supplied — a ``checker_path``
-        job must report a real timeout, because ``_run_checker_phase`` asserts
-        on it before spawning the checker child.
+        Both the status echo (``effective_checker_timeout_ms``) and the worker's
+        checker phase branch on this, and they MUST agree: a request the phase
+        treats as checked but the timeout property calls unchecked returns
+        ``None`` into an ``assert``, and the job never finalizes. One property
+        so a third checker form cannot update one site and miss the other.
         """
-        if self.checker is None and self.checker_path is None:
+        return self.checker is not None or self.checker_path is not None
+
+    @property
+    def effective_checker_timeout_ms(self) -> int | None:
+        """The checker child's timeout: explicit value, else the solver's; ``None`` unchecked."""
+        if not self.has_checker:
             return None
         return effective_checker_timeout_ms(
             checker_timeout_ms=self.checker_timeout_ms, default_timeout_ms=self.timeout_ms
@@ -491,10 +498,10 @@ class CpsatJobRegistry:
         raises ``ValueError`` if the file vanished after admission, which is
         why its call has to stay inside it.
         """
+        if not record.request.has_checker:
+            return None, None
         checker = record.request.checker
         checker_path = record.request.checker_path
-        if checker is None and checker_path is None:
-            return None, None
         with self._lock:
             if record.cancel_requested:
                 return None, None
