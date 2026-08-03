@@ -1594,11 +1594,11 @@ core profile, so start the server with `openconstraint-mcp stdio --toolset full`
   benchmark instance stays on disk instead of being pasted into the request
   once per attempt — the duplication this option exists to remove.
 
-  `examples/flexible_job_shop/` carries the same pattern one step further: five
+  `examples/flexible_job_shop/` carries the same pattern one step further: six
   CP-SAT formulations of the *flexible* job shop problem (`model.py` canonical
   optional intervals, `model_direct_optional_intervals.py`,
   `model_pairwise_disjunctive.py`, `model_redundant_bounds.py`,
-  `model_composite.py`), each self-contained and taking
+  `model_composite.py`, `model_earliest_start_branching.py`), each self-contained and taking
   `[data_file.json] [time_limit_seconds] [results_dir]` on the command line,
   with a shared `checker.py`. Every model prints its full result on stdout, and
   the printed `solution` CONTAINS the schedule rather than describing it,
@@ -1623,6 +1623,20 @@ core profile, so start the server with `openconstraint-mcp stdio --toolset full`
   bound with that same greedy schedule as a warm start and improves on it to
   418. `model_direct_optional_intervals.py` is a size-only ablation so far —
   measured on mk01 only, with its runtime question deliberately open.
+  `model_earliest_start_branching.py` is the one *search-order* ablation: it
+  forks the direct encoding and adds a decision strategy that repeatedly branches
+  on the task able to start earliest and starts it there
+  (`CHOOSE_LOWEST_MIN`/`SELECT_MIN_VALUE` on the starts — the non-delay
+  dispatching rule), while leaving the
+  model itself byte-identical in size. On mk15 it improves the incumbent at both
+  budgets tested — 360 → 355 at 60s, and 345 → 339 at 1200s, where it also
+  proves a stronger lower bound (333, against the baseline's 332). Neither run
+  proves an optimum: closing mk15 needs the incumbent to come down to meet the
+  bound, and 333 happens to be the optimum only per FJSPLib, not per the run. Its
+  docstring records the configurations that lost: forcing `FIXED_SEARCH`
+  collapses the 60s incumbent to 570 because it disables the LP- and
+  pseudo-cost-guided branching, and a strategy over the presence literals is
+  inert because `AUTOMATIC_SEARCH` leaves the booleans to the SAT heuristic.
 
 #### Persisting an attempt from an experiment
 
