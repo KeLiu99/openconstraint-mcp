@@ -1612,7 +1612,7 @@ core profile, so start the server with `openconstraint-mcp stdio --toolset full`
   210s wall-clock budget, those were driven with `submit_cpsat_python_file_job`
   instead, three at a time so the compared models see identical machine load.
   Each model's docstring records its measured result; the short version is that
-  no formulation wins outright. On mk01 all five prove the optimum of 40 in
+  no formulation wins outright. On mk01 all six prove the optimum of 40 in
   ~0.1s. On mk15 the plain optional-interval encoding holds the best incumbent
   (347, against `model_composite.py`'s 349 and `model_pairwise_disjunctive.py`'s
   381). At 60 machines the split is between bounds and incumbents: the
