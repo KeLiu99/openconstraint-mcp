@@ -1,0 +1,94 @@
+Online printing shop scheduling (OPS) — due-date extension of FJSP.
+
+Problem
+-------
+
+Each order is a sequence of operations that must run in a fixed order, drawn
+from stages such as printing, laminating/coating, cutting, and binding. As in
+the flexible job shop problem in ../flexible_job_shop, an operation is not
+tied to one machine: it has one or more eligible alternatives, and each
+alternative names a machine and the processing duration on that machine.
+
+This example keeps the FJSP feasibility rules unchanged:
+
+- choose exactly one machine alternative for every operation;
+- preserve the operation order within every order;
+- prevent operations assigned to the same machine from overlapping; and
+- run each started operation to completion without interruption.
+
+What changes is the job-level data and the objective. Every order additionally
+carries:
+
+- release_time: the order is not available to start before this time;
+- due_time: the order's target completion time; and
+- priority (weight): how costly it is to finish the order late.
+
+Objective
+---------
+
+The primary objective is to minimize total weighted tardiness:
+
+    minimize  sum over orders j of  weight_j * max(0, completion_j - due_j)
+
+Makespan (the time the last operation finishes) is a secondary objective only
+— used to break ties among schedules that already minimize weighted
+tardiness, not as the primary criterion.
+
+Relation to the flexible job shop example
+------------------------------------------
+
+This is the smallest valuable increment on top of ../flexible_job_shop: same
+machine-alternative structure and feasibility rules, plus release_time,
+due_time, and priority at the job level, plus an objective swap from
+"minimize makespan" to "minimize weighted tardeness, makespan secondary".
+../flexible_job_shop/problem.txt already forward-references this problem
+under "Models, literature, and public benchmarks" as a documented real
+industrial extension of FJSP.
+
+Scope: grow one layer at a time
+--------------------------------
+
+The first future model here should implement only the problem above. The
+following real-world features of the published OPS problem are deliberately
+deferred, matching the same "one layer at a time" approach used for the FJSP
+example:
+
+- sequence-dependent setup and changeover times (e.g. ink/color changes on
+  printing machines);
+- machine unavailability, planned maintenance windows, and calendars;
+- fixed (pre-scheduled, non-movable) operations;
+- partial overlap between consecutive operations of the same order;
+- operators, tools, molds, and other secondary resources;
+- preemption and batching; and
+- multi-objective optimization beyond the weighted-tardiness/makespan pair
+  above.
+
+These are not assumptions about real print shops. They are the boundary of
+the smallest useful due-date-scheduling example, with a clear path to add the
+deferred features later, one at a time.
+
+Sourcing and provenance
+------------------------
+
+The online printing shop scheduling problem is a documented real industrial
+problem, not an invented benchmark:
+
+- Lunardi, Birgin, Ronconi, and Voos, "Mixed integer linear programming and
+  constraint programming models for the online printing shop scheduling
+  problem," Computers & Operations Research, 2020:
+  https://doi.org/10.1016/j.cor.2020.105020
+  Also circulated as an arXiv preprint of the same problem definition:
+  https://arxiv.org/abs/2006.13064
+
+- Instance repository: https://github.com/Willtl/online-printing-shop
+
+The instance repository's homepage does not clearly state a license for the
+benchmark data. Until a license is confirmed, do not copy its instances
+verbatim into this directory. Any data file added under
+examples/online_printing_shop/ must either be explicitly marked synthetic (and
+kept small), or carry a confirmed license and attribution, matching the
+provenance discipline already used for the fjsp-instances data in
+../flexible_job_shop (see ../../LICENSES/fjsp-instances.txt).
+
+No model or data file exists yet in this directory — this problem.txt is the
+first step.
