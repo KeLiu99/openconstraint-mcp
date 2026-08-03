@@ -31,7 +31,7 @@ from ..schemas.diagnostics import Diagnostic, wrapper_job_diagnostic
 from ..schemas.job_state import RESULT_BEARING_STATES, TERMINAL_STATES, JobState
 from ..shared.job_errors import JobRejectedError, exception_summary, now_ms
 from ..shared.proc import terminate_process_tree as _terminate_process_tree
-from .checker import checker_infrastructure_report, run_checker
+from .checker import checker_infrastructure_report, run_checker, run_checker_file
 from .core import (
     DEFAULT_PYEXEC_TIMEOUT_MS,
     effective_checker_timeout_ms,
@@ -49,9 +49,12 @@ from .script_path import validate_script_args, validate_script_path
 class _CpsatJobRequest:
     """Immutable per-job parameters; kind discriminates source vs. file path.
 
-    ``problem``/``checker``/``checker_timeout_ms`` are the optional diagnostic
-    checker inputs (same contract as the save/experiment tools); all three are
-    ``None`` for an unchecked job.
+    ``problem``/``checker``/``checker_path``/``checker_timeout_ms`` are the
+    optional diagnostic checker inputs (same contract as the save/experiment
+    tools); all four are ``None`` for an unchecked job. ``checker`` (inline
+    source) and ``checker_path`` (an on-disk checker, file jobs only) are
+    mutually exclusive; ``checker_path`` is resolved at admission so a later
+    ``cd`` or symlink swap cannot change what runs.
 
     ``args`` (file jobs only) is the child's ``sys.argv[1:]``. It is a ``tuple``
     rather than a ``list`` because ``frozen=True`` blocks rebinding but not
@@ -64,6 +67,7 @@ class _CpsatJobRequest:
     timeout_ms: int
     problem: str | None = None
     checker: str | None = None
+    checker_path: Path | None = None
     checker_timeout_ms: int | None = None
     args: tuple[str, ...] | None = None
 
@@ -73,8 +77,13 @@ class _CpsatJobRequest:
 
     @property
     def effective_checker_timeout_ms(self) -> int | None:
-        """The checker child's timeout: explicit value, else the solver's; ``None`` unchecked."""
-        if self.checker is None:
+        """The checker child's timeout: explicit value, else the solver's; ``None`` unchecked.
+
+        "Unchecked" means neither checker form was supplied — a ``checker_path``
+        job must report a real timeout, because ``_run_checker_phase`` asserts
+        on it before spawning the checker child.
+        """
+        if self.checker is None and self.checker_path is None:
             return None
         return effective_checker_timeout_ms(
             checker_timeout_ms=self.checker_timeout_ms, default_timeout_ms=self.timeout_ms
@@ -184,6 +193,7 @@ class CpsatJobRegistry:
         args: list[str] | None = None,
         problem: str | None = None,
         checker: str | None = None,
+        checker_path: Path | None = None,
         checker_timeout_ms: int | None = None,
     ) -> str:
         """Admit a CP-SAT script file as a background job; return ``job_id``.
@@ -199,11 +209,25 @@ class CpsatJobRegistry:
         ``args`` becomes the child's ``sys.argv[1:]``; it is snapshotted here at
         admission, so mutating the caller's list while the job sits queued
         cannot change what runs.
+
+        ``checker_path`` names an on-disk checker run IN PLACE (``cwd`` is its
+        own parent directory), so a checker that reads a relative sibling data
+        file resolves — unlike an inline ``checker``, which runs from a temp
+        directory. It is validated and resolved here for the same reason
+        ``script_path`` is; a file deleted between admission and the checker
+        phase surfaces as a ``status="error"`` checker report, not a rejection.
         """
         if timeout_ms <= 0:
             raise ValueError("timeout_ms must be positive")
-        validate_checker_args(checker=checker, checker_timeout_ms=checker_timeout_ms)
+        validate_checker_args(
+            checker=checker, checker_timeout_ms=checker_timeout_ms, checker_path=checker_path
+        )
         resolved = validate_script_path(script_path)
+        resolved_checker = (
+            validate_script_path(checker_path, parameter="checker_path")
+            if checker_path is not None
+            else None
+        )
         validate_script_args(args)
         request = _CpsatJobRequest(
             source=None,
@@ -211,6 +235,7 @@ class CpsatJobRegistry:
             timeout_ms=timeout_ms,
             problem=problem,
             checker=checker,
+            checker_path=resolved_checker,
             checker_timeout_ms=checker_timeout_ms,
             args=tuple(args) if args is not None else None,
         )
@@ -460,9 +485,15 @@ class CpsatJobRegistry:
         already requested (the caller's final cancel check finalizes it). A
         checker infrastructure exception becomes a ``status="error"`` report:
         it must never discard the completed solver result by failing the job.
+        This method runs OUTSIDE the worker's own try/except, so the ``except``
+        below is the only handler between a checker fault and a job that never
+        finalizes — ``run_checker_file`` re-validates ``checker_path`` and
+        raises ``ValueError`` if the file vanished after admission, which is
+        why its call has to stay inside it.
         """
         checker = record.request.checker
-        if checker is None:
+        checker_path = record.request.checker_path
+        if checker is None and checker_path is None:
             return None, None
         with self._lock:
             if record.cancel_requested:
@@ -471,16 +502,30 @@ class CpsatJobRegistry:
         if not eligible:
             return None, reject_reason
         timeout = record.request.effective_checker_timeout_ms
-        assert timeout is not None  # checker is not None ⇒ effective timeout is set
+        assert timeout is not None  # a checker of either form ⇒ effective timeout is set
         try:
-            report = run_checker(
-                checker,
-                result,
-                problem=record.request.problem,
-                timeout_ms=timeout,
-                tracker=None,
-                on_start=lambda proc: self._on_start(job_id, proc),
-            )
+            # `on_start` on BOTH branches: it is what points `record.handle` at
+            # the checker child so `cancel()` terminates the process actually
+            # running, not the finished solver one.
+            if checker_path is not None:
+                report = run_checker_file(
+                    checker_path,
+                    result,
+                    problem=record.request.problem,
+                    timeout_ms=timeout,
+                    tracker=None,
+                    on_start=lambda proc: self._on_start(job_id, proc),
+                )
+            else:
+                assert checker is not None
+                report = run_checker(
+                    checker,
+                    result,
+                    problem=record.request.problem,
+                    timeout_ms=timeout,
+                    tracker=None,
+                    on_start=lambda proc: self._on_start(job_id, proc),
+                )
         except Exception as exc:  # noqa: BLE001 - checker fault must not void the solver result
             report = checker_infrastructure_report(exc)
         return report, None
