@@ -639,6 +639,10 @@ def _patch_run_checker(monkeypatch: pytest.MonkeyPatch, fake: Any) -> None:
     monkeypatch.setattr("openconstraint_mcp.pyexec.jobs.run_checker", fake)
 
 
+def _patch_run_checker_file(monkeypatch: pytest.MonkeyPatch, fake: Any) -> None:
+    monkeypatch.setattr("openconstraint_mcp.pyexec.jobs.run_checker_file", fake)
+
+
 def _run_checked_job(
     monkeypatch: pytest.MonkeyPatch,
     *,
@@ -833,6 +837,163 @@ def test_submit_file_rejects_non_positive_checker_timeout(tmp_path: Path) -> Non
         with pytest.raises(ValueError, match="positive"):
             registry.submit_file(script, checker=_CHECKER, checker_timeout_ms=0)
         assert registry.list() == []
+    finally:
+        registry.shutdown()
+
+
+# --- checker_path (on-disk checker, file jobs only) --------------------------
+
+
+def _checker_pair(tmp_path: Path) -> tuple[Path, Path]:
+    """A valid solver script and a valid on-disk checker beside it."""
+    script = tmp_path / "sol.py"
+    script.write_text("print('x')", encoding="utf-8")
+    checker = tmp_path / "checker.py"
+    checker.write_text(_CHECKER, encoding="utf-8")
+    return script, checker
+
+
+def test_submit_file_rejects_both_checker_forms_before_creating_job(tmp_path: Path) -> None:
+    script, checker = _checker_pair(tmp_path)
+    registry = CpsatJobRegistry()
+    try:
+        with pytest.raises(ValueError, match="mutually exclusive"):
+            registry.submit_file(script, checker=_CHECKER, checker_path=checker)
+        assert registry.list() == []
+    finally:
+        registry.shutdown()
+
+
+def test_submit_file_rejects_missing_checker_path_before_creating_job(tmp_path: Path) -> None:
+    script, _ = _checker_pair(tmp_path)
+    registry = CpsatJobRegistry()
+    try:
+        with pytest.raises(ValueError, match="checker_path does not exist"):
+            registry.submit_file(script, checker_path=tmp_path / "nope.py")
+        assert registry.list() == []
+    finally:
+        registry.shutdown()
+
+
+def test_submit_file_rejects_non_file_checker_path_before_creating_job(tmp_path: Path) -> None:
+    script, _ = _checker_pair(tmp_path)
+    directory = tmp_path / "checkers"
+    directory.mkdir()
+    registry = CpsatJobRegistry()
+    try:
+        with pytest.raises(ValueError, match="checker_path is not a file"):
+            registry.submit_file(script, checker_path=directory)
+        assert registry.list() == []
+    finally:
+        registry.shutdown()
+
+
+def test_submit_file_rejects_empty_checker_path_before_creating_job(tmp_path: Path) -> None:
+    script, checker = _checker_pair(tmp_path)
+    checker.write_text("   \n", encoding="utf-8")
+    registry = CpsatJobRegistry()
+    try:
+        with pytest.raises(ValueError, match="checker_path file is empty"):
+            registry.submit_file(script, checker_path=checker)
+        assert registry.list() == []
+    finally:
+        registry.shutdown()
+
+
+def test_submit_file_rejects_non_utf8_checker_path_before_creating_job(tmp_path: Path) -> None:
+    script, checker = _checker_pair(tmp_path)
+    checker.write_bytes(b"print('\xff\xfe')")
+    registry = CpsatJobRegistry()
+    try:
+        with pytest.raises(ValueError, match="checker_path is not valid UTF-8"):
+            registry.submit_file(script, checker_path=checker)
+        assert registry.list() == []
+    finally:
+        registry.shutdown()
+
+
+def test_submit_file_snapshots_the_resolved_checker_path(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A relative checker_path is resolved at admission, so a cwd change while
+    the job is still solving cannot redirect which file the checker runs."""
+    script, checker = _checker_pair(tmp_path)
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    release = threading.Event()
+    seen: list[Path] = []
+
+    def _blocking_run(path: Path, *, on_start: Any, **kw: object) -> CpsatPythonResult:
+        release.wait(3.0)
+        return _cpsat_result()
+
+    def _spy(checker_path: Path, result: CpsatPythonResult, **kw: Any) -> CpsatCheckerReport:
+        seen.append(checker_path)
+        return _checker_report()
+
+    _patch_run_file(monkeypatch, _blocking_run)
+    _patch_run_checker_file(monkeypatch, _spy)
+    monkeypatch.chdir(tmp_path)
+    registry = CpsatJobRegistry()
+    try:
+        job_id = registry.submit_file(script, checker_path=Path("checker.py"))
+        monkeypatch.chdir(elsewhere)
+        release.set()
+        _wait_until_terminal(registry, job_id)
+        assert seen == [checker.resolve()]
+    finally:
+        release.set()
+        registry.shutdown()
+
+
+def test_checker_path_job_echoes_a_non_none_effective_checker_timeout(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Regression guard: `effective_checker_timeout_ms` must treat a
+    checker_path job as checked, or `_run_checker_phase`'s assertion fires and
+    the job never finalizes."""
+    script, checker = _checker_pair(tmp_path)
+    _patch_run_file(monkeypatch, lambda path, *, on_start, **kw: _cpsat_result())
+    _patch_run_checker_file(monkeypatch, lambda *a, **kw: _checker_report())
+    registry = CpsatJobRegistry()
+    try:
+        job_id = registry.submit_file(script, checker_path=checker, timeout_ms=45000)
+        _wait_until_terminal(registry, job_id)
+        assert registry.get(job_id).checker_timeout_ms == 45000
+    finally:
+        registry.shutdown()
+
+
+def test_checker_path_job_attaches_the_checker_report(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    script, checker = _checker_pair(tmp_path)
+    _patch_run_file(monkeypatch, lambda path, *, on_start, **kw: _cpsat_result())
+    _patch_run_checker_file(monkeypatch, lambda *a, **kw: _checker_report("rejected"))
+    registry = CpsatJobRegistry()
+    try:
+        job_id = registry.submit_file(script, checker_path=checker)
+        _wait_until_terminal(registry, job_id)
+        status = registry.get(job_id)
+        assert status.checker is not None
+        assert status.checker.status == "rejected"
+    finally:
+        registry.shutdown()
+
+
+def test_checker_path_job_skips_the_checker_for_an_ineligible_result(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The eligibility/skip rule is the same for both checker forms."""
+    script, checker = _checker_pair(tmp_path)
+    _patch_run_file(monkeypatch, lambda path, *, on_start, **kw: _cpsat_result("infeasible"))
+    _patch_run_checker_file(monkeypatch, lambda *a, **kw: _checker_report())
+    registry = CpsatJobRegistry()
+    try:
+        job_id = registry.submit_file(script, checker_path=checker)
+        _wait_until_terminal(registry, job_id)
+        status = registry.get(job_id)
+        assert status.checker_skipped_reason == "status='infeasible'"
     finally:
         registry.shutdown()
 

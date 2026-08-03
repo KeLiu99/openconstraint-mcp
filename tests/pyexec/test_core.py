@@ -176,6 +176,17 @@ def test_validate_checker_args_rejects_timeout_without_checker() -> None:
         validate_checker_args(checker=None, checker_timeout_ms=100)
 
 
+def test_validate_checker_args_rejects_both_checker_forms() -> None:
+    with pytest.raises(ValueError, match="mutually exclusive"):
+        validate_checker_args(
+            checker="print('ok')", checker_timeout_ms=None, checker_path=Path("checker.py")
+        )
+
+
+def test_validate_checker_args_accepts_timeout_with_only_a_checker_path() -> None:
+    validate_checker_args(checker=None, checker_timeout_ms=100, checker_path=Path("checker.py"))
+
+
 def test_validate_checker_args_rejects_non_positive_timeout() -> None:
     with pytest.raises(ValueError, match="checker_timeout_ms must be positive"):
         validate_checker_args(checker="print('ok')", checker_timeout_ms=0)
@@ -1510,9 +1521,9 @@ def test_checked_run_rejects_an_over_budget_self_test_before_the_model_runs(
 def test_checked_run_without_a_self_test_has_no_wall_clock_ceiling(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    # A plain checked run is two children and its only unbounded fallback,
-    # `submit_cpsat_python_file_job`, cannot resolve a checker's sibling file —
-    # so capping `timeout_ms` here would leave a file-based checker no path.
+    # A plain checked run is two children and keeps its historical freedom to
+    # ask for the solve time the problem needs; capping the synchronous path is
+    # a separate decision that has not been taken.
     script, checker = _checked_pair(tmp_path)
     _patch_checked(
         monkeypatch, _checked_result("optimal", solution={"x": 1}), _checker_report("accepted")

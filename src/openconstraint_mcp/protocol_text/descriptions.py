@@ -921,8 +921,9 @@ RUN_CPSAT_PYTHON_FILE_CHECKED_DESCRIPTION = (
     "evidence, while zero rejections is inconclusive. Self-testing is "
     "synchronous-only and has a projected 120 s cap. Without `test_checker`, "
     "`timeout_ms` has no upper bound. For a longer run, use "
-    "`submit_cpsat_python_file_job`; its inline-source checker cannot read a "
-    "relative sibling file and it offers no self-test. "
+    "`submit_cpsat_python_file_job`, which takes the same path-based "
+    "`checker_path` (so a sibling-file checker still resolves) but offers no "
+    "self-test. "
     "The checker is a correctness gate against an INCORRECT script, not a "
     "security boundary against a hostile one: it is a second unsandboxed local "
     "child with exactly the same posture as the model script. " + _CPSAT_CHILD_POSTURE
@@ -1234,6 +1235,22 @@ SUBMIT_CPSAT_PYTHON_FILE_JOB_DESCRIPTION = (
     + _CPSAT_ARGS_LIMITS
     + "That rejection happens at admission too, so no job record is created. "
     + _CPSAT_JOB_CHECKER_NOTE
+    + "This tool ALSO accepts `checker_path` (a local path to an on-disk "
+    "checker script) as an alternative to the inline `checker` string; the two "
+    "are MUTUALLY EXCLUSIVE — pass at most one, supplying both is rejected at "
+    "admission with no job created. A `checker_path` checker runs IN PLACE, "
+    "with its working directory set to its own parent directory, so a checker "
+    "that opens a relative sibling file finds it — which means `problem` can be "
+    "a bare data filename next to the checker instead of a large instance "
+    "inlined into every submit. That bare-filename `problem` form is specific "
+    "to this path-based checker run: `save_verified_cpsat_python` has no "
+    "`checker_path` and runs its inline checker from a temp copy, so saving "
+    "this result later means inlining the instance again. It is validated at "
+    "admission exactly like "
+    "`script_path` and the resolved path is recorded, so the job runs the file "
+    "named on submit; a checker file deleted before the checker phase runs "
+    "surfaces as a `status=\"error\"` checker report on the finished job, not a "
+    "failed job. "
     + _REGISTRY_NOTE
     + " "
     + _returns_immediately_note("get_cpsat_python_job")

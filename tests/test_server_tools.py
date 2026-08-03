@@ -3649,6 +3649,56 @@ async def test_submit_cpsat_python_file_job_accepts_checker_inputs(
     assert result["checker_timeout_ms"] == result["timeout_ms"]
 
 
+@pytest.mark.asyncio
+async def test_submit_cpsat_python_file_job_forwards_checker_path(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    script = tmp_path / "sol.py"
+    script.write_text("print('x')", encoding="utf-8")
+    checker = tmp_path / "checker.py"
+    checker.write_text('print(\'{"status":"accepted","errors":[]}\')', encoding="utf-8")
+    seen: dict[str, object] = {}
+    monkeypatch.setattr(
+        "openconstraint_mcp.pyexec.jobs.run_cpsat_python_file",
+        lambda path, *, on_start, **kw: _fake_cpsat_result(),
+    )
+
+    def _spy(checker_path: Path, result: Any, **kw: object) -> Any:
+        seen["checker_path"] = checker_path
+        return _fake_checker_report()
+
+    monkeypatch.setattr("openconstraint_mcp.pyexec.jobs.run_checker_file", _spy)
+    mcp = create_mcp_server()
+    submitted = _structured(
+        await mcp.call_tool(
+            "submit_cpsat_python_file_job",
+            {"script_path": str(script), "checker_path": str(checker)},
+        )
+    )
+    await _poll_job_status(mcp, submitted["job_id"], get_tool="get_cpsat_python_job")
+    assert seen["checker_path"] == checker.resolve()
+
+
+@pytest.mark.asyncio
+async def test_submit_cpsat_python_file_job_rejects_both_checker_forms(tmp_path: Path) -> None:
+    script = tmp_path / "sol.py"
+    script.write_text("print('x')", encoding="utf-8")
+    checker = tmp_path / "checker.py"
+    checker.write_text('print(\'{"status":"accepted","errors":[]}\')', encoding="utf-8")
+    mcp = create_mcp_server()
+    with pytest.raises(Exception, match="mutually exclusive"):
+        await mcp.call_tool(
+            "submit_cpsat_python_file_job",
+            {
+                "script_path": str(script),
+                "checker": 'print(\'{"status":"accepted","errors":[]}\')',
+                "checker_path": str(checker),
+            },
+        )
+    list_data = _structured(await mcp.call_tool("list_cpsat_python_jobs", {}))["result"]
+    assert list_data == []
+
+
 # --- save_verified_cpsat_python tool -----------------------------------------
 
 

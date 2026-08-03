@@ -193,9 +193,25 @@ def validate_checker_timeout_ms(checker_timeout_ms: int | None) -> None:
         raise ValueError("checker_timeout_ms must be positive")
 
 
-def validate_checker_args(*, checker: str | None, checker_timeout_ms: int | None) -> None:
-    """Validate shared optional-checker arguments for CP-SAT Python tools."""
-    if checker_timeout_ms is not None and checker is None:
+def validate_checker_args(
+    *,
+    checker: str | None,
+    checker_timeout_ms: int | None,
+    checker_path: Path | None = None,
+) -> None:
+    """Validate shared optional-checker arguments for CP-SAT Python tools.
+
+    ``checker`` (inline source) and ``checker_path`` (an on-disk checker run in
+    place) are MUTUALLY EXCLUSIVE — exactly one, or neither. Supplying both is
+    rejected rather than resolved by a precedence rule, mirroring the
+    experiment tool's ``source``/``script_path`` pairing. A checker of either
+    form satisfies the "``checker_timeout_ms`` needs a checker" rule.
+    """
+    if checker is not None and checker_path is not None:
+        raise ValueError(
+            "checker and checker_path are mutually exclusive: supply at most one of them"
+        )
+    if checker_timeout_ms is not None and checker is None and checker_path is None:
         raise ValueError("checker_timeout_ms supplied without checker: no checker will run")
     validate_checker_timeout_ms(checker_timeout_ms)
     if checker is not None and not checker.strip():
@@ -218,10 +234,9 @@ def _resolve_checked_checker_timeout_ms(*, timeout_ms: int, checker_timeout_ms: 
     Enforced only for ``test_checker=True``, which is what turns one checker
     child into ``1 + len(CPSAT_MUTATION_NAMES)`` sequential ones. A plain
     checked run is two children and keeps its historical freedom to ask for the
-    solve time the problem needs — it has ``submit_cpsat_python_file_job`` as an
-    unbounded fallback only when the checker needs no sibling file, so capping
-    it would leave a file-based checker with no path at all. Self-testing is
-    new and opt-in, so a ceiling on it strands no existing caller.
+    solve time the problem needs: capping the synchronous path is a separate
+    decision that has not been taken. Self-testing is new and opt-in, so a
+    ceiling on it strands no existing caller.
 
     An omitted ``checker_timeout_ms`` is DERIVED from what the ceiling leaves,
     down to ``_MIN_SELF_TEST_CHECKER_TIMEOUT_MS``; below that the call rejects

@@ -1041,6 +1041,7 @@ def create_mcp_server(toolset: str = "full") -> MCPServer:
         args: list[str] | None = None,
         problem: ProblemText = None,
         checker: str | None = None,
+        checker_path: str | None = None,
         checker_timeout_ms: int | None = None,
     ) -> CpsatPythonJobStatus:
         job_id = cpsat_registry.submit_file(
@@ -1049,6 +1050,7 @@ def create_mcp_server(toolset: str = "full") -> MCPServer:
             args=args,
             problem=problem,
             checker=checker,
+            checker_path=Path(checker_path) if checker_path is not None else None,
             checker_timeout_ms=checker_timeout_ms,
         )
         return cpsat_registry.get(job_id)

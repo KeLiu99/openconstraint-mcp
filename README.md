@@ -1369,10 +1369,9 @@ core profile, so start the server with `openconstraint-mcp stdio --toolset full`
   (Codex's `tool_timeout_sec = 900`) leaves room for a long solve without
   wedging the client indefinitely. For a solve longer than a synchronous MCP
   call can hold, use `submit_cpsat_python_file_job`, which is path-native for
-  the *script* and is not bound by a synchronous timeout — but its `checker` is
-  **inline source**, run from a temp directory rather than the checker's own
-  directory, so a checker that reads a relative sibling file will not find it
-  there.
+  both the *script* and (via `checker_path`) the *checker*, and is not bound by
+  a synchronous timeout — a checker that reads a relative sibling file resolves
+  it there too. What that tool does not offer is `test_checker`.
 
   **Posture.** The checker is a **second unsandboxed local child** with exactly
   the same posture as the model script: it is a correctness gate against an
@@ -1611,6 +1610,14 @@ core profile, so start the server with `openconstraint-mcp stdio --toolset full`
   larger instances exceed `run_cpsat_python_experiment`'s non-overridable
   210s wall-clock budget, those were driven with `submit_cpsat_python_file_job`
   instead, three at a time so the compared models see identical machine load.
+  Such a run can carry `checker_path=examples/flexible_job_shop/checker.py`
+  with `problem` set to the bare instance filename (`data_mk01.json`): the
+  checker runs in its own directory, so it resolves the data file beside
+  itself rather than needing the whole instance inlined into every submit.
+  That bare filename is specific to the path-based checker run, though:
+  `save_verified_cpsat_python` has no `checker_path` and runs its inline
+  checker from a temp copy, so saving such a result later means inlining the
+  instance again.
   Each model's docstring records its measured result; the short version is that
   no formulation wins outright. On mk01 all six prove the optimum of 40 in
   ~0.1s. On mk15 the plain optional-interval encoding holds the best incumbent
@@ -1758,14 +1765,27 @@ CP-SAT analogue of the MiniZinc `submit_solve_job` / `get_solve_job` pair:
   see the checked-jobs note below.
 - **`submit_cpsat_python_file_job(script_path: str, timeout_ms: int = 30000,
   args: list[str] | None = None, problem: str | None = None, checker: str |
-  None = None, checker_timeout_ms: int | None = None)`** — submit a local
+  None = None, checker_path: str | None = None, checker_timeout_ms: int | None
+  = None)`** — submit a local
   script file as a background job. The
   path is validated before admission (missing / non-file / empty / non-UTF-8 →
   MCP error, no job created). The script runs in its own directory so relative
   imports and data-file opens resolve. `args` becomes the script's
   `sys.argv[1:]`, as in `run_cpsat_python_file`, and is recorded at admission,
   so a job that waits in the queue still runs the values supplied on submit.
-  Takes the same optional checker inputs as `submit_cpsat_python_job`.
+  Takes the same optional checker inputs as `submit_cpsat_python_job`, plus
+  `checker_path` — a local path to an **on-disk** checker, the path-based
+  counterpart of the inline `checker` string. The two are **mutually
+  exclusive**: pass at most one, and supplying both is rejected at admission
+  with no job created. A `checker_path` checker runs **in place**, with its
+  working directory set to its own parent directory (as
+  `run_cpsat_python_file_checked` does), so a checker that opens a relative
+  sibling file finds it — which means `problem` can be a bare data filename
+  next to the checker instead of a large instance inlined into every submit.
+  It is validated and resolved at admission exactly like `script_path`, so a
+  job that waits in the queue still runs the file named on submit; a checker
+  file deleted before the checker phase runs surfaces as a `status="error"`
+  checker report on the finished job, not a failed job.
 - **`get_cpsat_python_job(job_id: str)`** — poll a job by `job_id` (works
   for both inline and file submits). Returns a `CpsatPythonJobStatus`: `state`
   (`"queued"`, `"running"`, `"succeeded"`, `"failed"`, `"timeout"`,
@@ -1790,7 +1810,9 @@ CP-SAT analogue of the MiniZinc `submit_solve_job` / `get_solve_job` pair:
 #### Checked background jobs (diagnostic only)
 
 Submitting a job with `checker` (a Python checker script source string, same
-protocol as `save_verified_cpsat_python`'s checker gate) runs the checker as a
+protocol as `save_verified_cpsat_python`'s checker gate) — or, for
+`submit_cpsat_python_file_job`, with `checker_path` (the same protocol, but an
+on-disk checker run in its own directory) — runs the checker as a
 second bounded child after the solver child finishes — but only when the
 result carries a usable incumbent (`status` of `optimal`, `feasible`, or
 `timeout` with a non-empty `solution`). While the checker runs, the job stays
@@ -1829,8 +1851,9 @@ On a result-bearing terminal state the job status carries at most one of:
 The checker result is **diagnostic, not a save gate**: a checked `"timeout"`
 job stays `"timeout"` and its recovered incumbent stays unsavable, and saving
 always re-runs verification through `save_verified_cpsat_python`. Bad checker
-arguments (`checker_timeout_ms` without `checker`, a non-positive timeout, an
-empty checker) are rejected before a job is admitted.
+arguments (`checker_timeout_ms` without a checker of either form, a
+non-positive timeout, an empty checker, `checker` and `checker_path` together,
+an invalid `checker_path`) are rejected before a job is admitted.
 
 #### Configuring CP-SAT registry bounds
 
