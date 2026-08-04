@@ -1,71 +1,94 @@
-Online printing shop scheduling (OPS) — due-date extension of FJSP.
+Online printing shop scheduling (OPS) — sequence-flexible FJSP core.
 
 Problem
 -------
 
-Each order is a sequence of operations that must run in a fixed order, drawn
-from stages such as printing, laminating/coating, cutting, and binding. As in
-the flexible job shop problem in ../flexible_job_shop, an operation is not
-tied to one machine: it has one or more eligible alternatives, and each
-alternative names a machine and the processing duration on that machine.
+The published online printing shop scheduling (OPS) problem is a real industrial
+extension of the flexible job shop scheduling problem (FJSP). Here, "online"
+refers to print orders placed through an online shop; it does not mean an online
+algorithm that must commit to decisions as jobs arrive.
 
-This example keeps the FJSP feasibility rules unchanged:
+As in the flexible job shop problem in ../flexible_job_shop, every operation has
+one or more eligible machine alternatives, and each alternative specifies a
+machine and the processing duration on that machine.
 
-- choose exactly one machine alternative for every operation;
-- preserve the operation order within every order;
-- prevent operations assigned to the same machine from overlapping; and
-- run each started operation to completion without interruption.
+The first defining extension is sequence flexibility. A job is not necessarily
+a single fixed sequence of operations. Instead, its precedence constraints form
+a directed acyclic graph (DAG). This allows independent branches to run in
+parallel and later split or join. For example, a ganged printing operation may
+be followed by cutting and then split into several independent product routes;
+book covers and pages may also be produced in parallel before binding.
 
-What changes is the job-level data and the objective. Every order additionally
-carries:
+This initial example implements the smallest useful OPS core:
 
-- release_time: the order is not available to start before this time;
-- due_time: the order's target completion time; and
-- priority (weight): how costly it is to finish the order late.
+- choose exactly one eligible machine alternative for every operation;
+- preserve every precedence edge in each job's DAG;
+- prevent operations assigned to the same machine from overlapping;
+- run each operation without interruption in this initial model; and
+- minimize makespan, i.e. the completion time of the last operation.
 
 Objective
 ---------
 
-The primary objective is to minimize total weighted tardiness:
+The objective is to minimize makespan:
 
-    minimize  sum over orders j of  weight_j * max(0, completion_j - due_j)
+    minimize  max over operations i of completion_i
 
-Makespan (the time the last operation finishes) is a secondary objective only
-— used to break ties among schedules that already minimize weighted
-tardiness, not as the primary criterion.
+This matches the objective studied by Lunardi et al. The published formulation
+does not use due dates, priorities, or total weighted tardiness as its objective.
+A due-date or weighted-tardiness FJSP variant may be useful as a separate
+example, but it should not be presented as the OPS formulation from that paper.
 
 Relation to the flexible job shop example
 ------------------------------------------
 
-This is the smallest valuable increment on top of ../flexible_job_shop: same
-machine-alternative structure and feasibility rules, plus release_time,
-due_time, and priority at the job level, plus an objective swap from
-"minimize makespan" to "minimize weighted tardeness, makespan secondary".
-../flexible_job_shop/problem.txt already forward-references this problem
-under "Models, literature, and public benchmarks" as a documented real
-industrial extension of FJSP.
+This is the smallest structural increment on top of ../flexible_job_shop:
+
+- the machine-alternative structure is unchanged (routing flexibility);
+- the linear operation sequence of each job is replaced by an arbitrary DAG
+  (sequence flexibility); and
+- the objective remains makespan minimization.
+
+A classical FJSP job such as
+
+    print -> cut -> bind
+
+is therefore a special case. An OPS-style job may instead contain parallel,
+splitting, and joining branches, for example:
+
+    cover_print -----> cover_finish --+
+                                      +--> bind
+    page_print ------> page_fold -----+
 
 Scope: grow one layer at a time
 --------------------------------
 
-The first future model here should implement only the problem above. The
-following real-world features of the published OPS problem are deliberately
-deferred, matching the same "one layer at a time" approach used for the FJSP
-example:
+The full OPS problem in the cited publication contains several additional
+features. They are deliberately deferred from the first model so that each new
+model adds one independently testable layer:
 
-- sequence-dependent setup and changeover times (e.g. ink/color changes on
-  printing machines);
-- machine unavailability, planned maintenance windows, and calendars;
-- fixed (pre-scheduled, non-movable) operations;
-- partial overlap between consecutive operations of the same order;
-- operators, tools, molds, and other secondary resources;
-- preemption and batching; and
-- multi-objective optimization beyond the weighted-tardiness/makespan pair
-  above.
+- release times for individual operations;
+- sequence-dependent setup times;
+- planned machine-unavailability periods;
+- resumable processing across machine-unavailability periods (not arbitrary
+  preemption: the operation remains assigned to the same machine and resumes as
+  soon as that machine becomes available);
+- fixed operations with preassigned machine and starting time; and
+- partial overlap between operations connected by a precedence edge.
 
-These are not assumptions about real print shops. They are the boundary of
-the smallest useful due-date-scheduling example, with a clear path to add the
-deferred features later, one at a time.
+When setup times and machine calendars are added, the full paper also requires
+setups to be non-interruptible and to finish immediately before the associated
+operation starts.
+
+The publication explains ganging as an upstream cutting-stock decision that
+merges printing operations from several customer orders. The resulting merged
+structure is then given to the scheduling problem as a job; this initial example
+does not optimize the cutting-stock or ganging decision itself.
+
+Possible extensions such as due dates, weighted tardiness, operators, tools,
+secondary resources, or alternative process plans may be valuable, but they are
+beyond the formal OPS problem defined in the cited paper and should be labelled
+separately rather than attributed to it.
 
 Sourcing and provenance
 ------------------------
@@ -73,22 +96,23 @@ Sourcing and provenance
 The online printing shop scheduling problem is a documented real industrial
 problem, not an invented benchmark:
 
-- Lunardi, Birgin, Ronconi, and Voos, "Mixed integer linear programming and
-  constraint programming models for the online printing shop scheduling
-  problem," Computers & Operations Research, 2020:
+- Lunardi, Birgin, Laborie, Ronconi, and Voos, "Mixed Integer Linear
+  Programming and Constraint Programming Models for the Online Printing Shop
+  Scheduling Problem," Computers & Operations Research, 2020:
   https://doi.org/10.1016/j.cor.2020.105020
-  Also circulated as an arXiv preprint of the same problem definition:
+  Preprint:
   https://arxiv.org/abs/2006.13064
 
-- Instance repository: https://github.com/Willtl/online-printing-shop
+- Authors' model and instance repository:
+  https://github.com/Willtl/online-printing-shop
 
-The instance repository's homepage does not clearly state a license for the
-benchmark data. Until a license is confirmed, do not copy its instances
-verbatim into this directory. Any data file added under
-examples/online_printing_shop/ must either be explicitly marked synthetic (and
-kept small), or carry a confirmed license and attribution, matching the
-provenance discipline already used for the fjsp-instances data in
-../flexible_job_shop (see ../../LICENSES/fjsp-instances.txt).
+The repository homepage does not clearly state a license for the benchmark data.
+Until a license is confirmed, do not copy its instances verbatim into this
+directory. Any data file added under examples/online_printing_shop/ must either
+be explicitly marked synthetic and kept small, or carry a confirmed license and
+attribution, matching the provenance discipline already used for the
+fjsp-instances data in ../flexible_job_shop (see
+../../LICENSES/fjsp-instances.txt).
 
-No model or data file exists yet in this directory — this problem.txt is the
+No model or data file exists yet in this directory; this problem.txt is the
 first step.
