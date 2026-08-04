@@ -154,8 +154,18 @@ MCP_SERVER_INSTRUCTIONS = (
     "contents — the path-based tools run from the model's directory, so a "
     "relative `include` resolves. Validate solutions by passing a checker to "
     "the solve tools (`checker` inline, `checker_path` for file solves).\n"
+    # The no-stdin rule below is deliberately a second copy of _CPSAT_NO_STDIN_FULL,
+    # which carries the same rule on the CP-SAT tool descriptions; both copies are
+    # pinned by test, so edit them together.
     "- CP-SAT: write a conforming script and run it with run_cpsat_python "
-    "(bounded child process: timeout, 1 MB output cap, tree-kill).\n"
+    "(bounded child process: timeout, 1 MB output cap, tree-kill). Give the "
+    "script one ordered spine — `read_input`, `parse_input`, `solve`, "
+    "`serialize_solution`, `write_output`, called in that order by `main` — "
+    "and keep the boundary typed: `parse_input` hands `solve` a typed instance "
+    "record and `solve` hands `serialize_solution` a typed solution record, "
+    "never loose dicts. The child has NO stdin, so never call `input()` or "
+    "read `sys.stdin`: embed the instance in the script, or pass a data file "
+    "with run_cpsat_python_file(script_path=…, args=[…]).\n"
     "\n"
     "CP-SAT OUTPUT: `json.dumps` only builds a string that `print` sends to "
     "stdout — it writes no file, and the result is not saved anywhere. "
@@ -738,12 +748,27 @@ _RUN_CPSAT_PYTHON_TAIL = (
     "leak in. " + _CPSAT_CHILD_POSTURE
 )
 
+# FULL-ONLY, and deliberately a second copy of the no-stdin rule the full server
+# `instructions` CP-SAT bullet also states — the same reasoning as
+# _CP_PROBLEM_DOMAINS above: tool descriptions and instructions are separate
+# advertised fields a host may consume, truncate, or rank independently, and a
+# script that reads stdin fails the whole run rather than merely reading oddly.
+# Keep it OUT of _CPSAT_CHILD_POSTURE and the shared _HEAD/_MID/_TAIL fragments:
+# those reach both profiles, and core metadata has no headroom to spend on it.
+_CPSAT_NO_STDIN_FULL = (
+    "The child runs with NO stdin: a script that calls `input()` or reads "
+    "`sys.stdin` hits an immediate EOF, prints no envelope, and the run comes "
+    "back as an error."
+)
+
 RUN_CPSAT_PYTHON_DESCRIPTION = (
     _RUN_CPSAT_PYTHON_HEAD
     + _RUN_CPSAT_PYTHON_PROMPT_REF
     + _RUN_CPSAT_PYTHON_MID
     + _RUN_CPSAT_PYTHON_PORTFOLIO_REF
     + _RUN_CPSAT_PYTHON_TAIL
+    + " "
+    + _CPSAT_NO_STDIN_FULL
 )
 RUN_CPSAT_PYTHON_DESCRIPTION_CORE = (
     _RUN_CPSAT_PYTHON_HEAD + _RUN_CPSAT_PYTHON_MID + _RUN_CPSAT_PYTHON_TAIL
@@ -851,6 +876,8 @@ RUN_CPSAT_PYTHON_FILE_DESCRIPTION = (
     + _RUN_CPSAT_PYTHON_FILE_ARGS
     + _RUN_CPSAT_PYTHON_FILE_CHECKED_REPLAY_FULL
     + _CPSAT_CHILD_POSTURE
+    + " "
+    + _CPSAT_NO_STDIN_FULL
 )
 RUN_CPSAT_PYTHON_FILE_DESCRIPTION_CORE = (
     _RUN_CPSAT_PYTHON_FILE_HEAD

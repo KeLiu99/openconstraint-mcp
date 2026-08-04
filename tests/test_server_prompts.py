@@ -279,6 +279,16 @@ async def test_cpsat_prompt_carries_the_shared_output_contract_fragment() -> Non
     assert CPSAT_OUTPUT_CONTRACT_GUIDANCE in text
 
 
+@pytest.mark.asyncio
+async def test_auto_tune_prompt_carries_the_shared_output_contract_fragment() -> None:
+    # The third CP-SAT generation route: it drafts candidates and rewrites them
+    # per tier, so it needs the same stdout envelope contract as the other two.
+    # Full variant, because this prompt registers in the full profile only.
+    text = await _get_prompt_text("auto_tune_constraint_problem", {"problem": SAMPLE_PROBLEM})
+
+    assert CPSAT_OUTPUT_CONTRACT_GUIDANCE in text
+
+
 def test_output_contract_fragment_is_brace_free_for_str_format() -> None:
     # Both host prompts are `str.format`ted with the user's problem text, so a brace
     # in the spliced fragment would surface as an unrelated-looking KeyError.
@@ -444,6 +454,31 @@ def test_script_structure_fragment_names_no_full_only_tool() -> None:
 @pytest.mark.asyncio
 async def test_cpsat_prompt_carries_the_script_structure_fragment() -> None:
     text = await _get_prompt_text("cpsat_python_solution_workflow", {"problem": SAMPLE_PROBLEM})
+
+    assert CPSAT_SCRIPT_STRUCTURE_GUIDANCE in text
+
+
+@pytest.mark.asyncio
+async def test_backend_neutral_prompt_carries_the_script_structure_fragment() -> None:
+    text = await _get_core_prompt_text("solve_constraint_problem", {"problem": SAMPLE_PROBLEM})
+
+    assert CPSAT_SCRIPT_STRUCTURE_GUIDANCE in text
+
+
+@pytest.mark.asyncio
+async def test_full_backend_neutral_prompt_carries_the_script_structure_fragment() -> None:
+    # One constant, both profiles: the fragment names no full-only tool, so
+    # unlike the output-contract fragment it needs no profile-dependent variant.
+    text = await _get_prompt_text("solve_constraint_problem", {"problem": SAMPLE_PROBLEM})
+
+    assert CPSAT_SCRIPT_STRUCTURE_GUIDANCE in text
+
+
+@pytest.mark.asyncio
+async def test_auto_tune_prompt_carries_the_script_structure_fragment() -> None:
+    # Auto-tune drafts CP-SAT candidates and REWRITES each one at the tuning and
+    # full-instance stages, so its rewrites must follow the same layout.
+    text = await _get_prompt_text("auto_tune_constraint_problem", {"problem": SAMPLE_PROBLEM})
 
     assert CPSAT_SCRIPT_STRUCTURE_GUIDANCE in text
 

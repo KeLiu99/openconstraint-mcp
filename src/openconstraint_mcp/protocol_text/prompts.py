@@ -217,11 +217,17 @@ _SOLVE_CONSTRAINT_PROBLEM_TAIL = """
 # differs; full's wording is unchanged (the advisory sentence re-wrapped onto
 # its own line when it became a shared fragment, which is prose layout only).
 SOLVE_CONSTRAINT_PROBLEM_PROMPT = (
-    _SOLVE_CONSTRAINT_PROBLEM_HEAD + CPSAT_OUTPUT_CONTRACT_GUIDANCE + _SOLVE_CONSTRAINT_PROBLEM_TAIL
+    _SOLVE_CONSTRAINT_PROBLEM_HEAD
+    + CPSAT_SCRIPT_STRUCTURE_GUIDANCE
+    + "\n"
+    + CPSAT_OUTPUT_CONTRACT_GUIDANCE
+    + _SOLVE_CONSTRAINT_PROBLEM_TAIL
 )
 
 SOLVE_CONSTRAINT_PROBLEM_PROMPT_CORE = (
     _SOLVE_CONSTRAINT_PROBLEM_HEAD
+    + CPSAT_SCRIPT_STRUCTURE_GUIDANCE
+    + "\n"
     + CPSAT_OUTPUT_CONTRACT_GUIDANCE_CORE
     + _SOLVE_CONSTRAINT_PROBLEM_TAIL
 )
@@ -1007,7 +1013,8 @@ Boundaries:
 """
 )
 
-AUTO_TUNE_CONSTRAINT_PROBLEM_PROMPT = """\
+AUTO_TUNE_CONSTRAINT_PROBLEM_PROMPT = (
+    """\
 You are the MCP client's reasoning model. Compare several MiniZinc and/or
 OR-Tools CP-SAT formulations, then present one full-instance result.
 
@@ -1074,6 +1081,17 @@ save-tool provenance.
      network access, no file writes or deletes, and no subprocesses unless the
      user explicitly requested it.
 
+"""
+    # Spliced at TOP LEVEL between steps 3 and 4, verbatim and unindented: this
+    # prompt drafts CP-SAT candidates in step 3 and REWRITES them per tier in
+    # steps 6 and 11, so every one of those rewrites needs the same layout and
+    # the same stdout envelope the other two CP-SAT routes teach. The full
+    # output-contract variant is correct here because this prompt registers in
+    # the full profile only.
+    + CPSAT_SCRIPT_STRUCTURE_GUIDANCE
+    + "\n"
+    + CPSAT_OUTPUT_CONTRACT_GUIDANCE
+    + """
 4. Create a tiny smoke instance and use it ONLY to reject structurally broken
    candidates: `inspect_minizinc_model` then `check_minizinc_model` for each
    MiniZinc candidate, and one short `run_cpsat_python` per CP-SAT candidate.
@@ -1295,3 +1313,4 @@ Boundaries: openconstraint-mcp calls no LLM, runs no agent loop, and makes no
 hidden network calls. Solving stays local; CP-SAT children are unsandboxed, so
 generate no network or file-mutating code unless the user explicitly asks.
 """
+)

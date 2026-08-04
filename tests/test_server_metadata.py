@@ -558,6 +558,33 @@ async def test_run_cpsat_python_advertises_the_required_envelope_vocabulary(tool
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("tool_name", ["run_cpsat_python", "run_cpsat_python_file"])
+async def test_full_cpsat_tool_description_states_the_no_stdin_rule(tool_name: str) -> None:
+    # The missing stdin is a property of the child these very tools create, and
+    # `tools/list` is the payload no client truncates at 512 bytes — so the one
+    # rule whose loss is a failed run rather than an unlovely script gets a
+    # second, durable home beside the server instructions' copy.
+    tools = await _tools_by_name("full")
+    description = tools[tool_name].description or ""
+
+    assert "NO stdin" in description
+    assert "`input()`" in description
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("tool_name", ["run_cpsat_python", "run_cpsat_python_file"])
+async def test_core_cpsat_tool_description_omits_the_no_stdin_rule(tool_name: str) -> None:
+    # Pins the profile split deliberately: core metadata has ~260 bytes of
+    # headroom, which two copies of this sentence would consume exactly. Moving
+    # it into a shared description fragment must fail HERE, loudly, rather than
+    # silently eating core's last bytes.
+    tools = await _tools_by_name("core")
+    description = tools[tool_name].description or ""
+
+    assert "stdin" not in description
+
+
+@pytest.mark.asyncio
 async def test_core_metadata_is_within_budget() -> None:
     tools = await create_mcp_server("core").list_tools()
     total = len(_serialize_tools(tools).encode("utf-8"))
@@ -727,6 +754,66 @@ def test_full_instructions_lead_with_routing_then_posture() -> None:
         f"full instructions head is {head_bytes} bytes, over the "
         f"{TRUNCATION_HEAD_BUDGET_BYTES} truncation-head budget"
     )
+
+
+def _full_instructions_cpsat_bullet() -> str:
+    """The `WITHOUT PROMPTS:` CP-SAT bullet of the FULL server instructions.
+
+    The script-layout rules are asserted against this bullet rather than the
+    whole string, so none of them can be satisfied by unrelated prose elsewhere
+    in the instructions.
+    """
+    (bullet,) = [
+        line for line in MCP_SERVER_INSTRUCTIONS.splitlines() if line.startswith("- CP-SAT:")
+    ]
+    return bullet
+
+
+def test_full_instructions_cpsat_bullet_forbids_reading_stdin() -> None:
+    # `read_input` is a name that INVITES reading stdin, while the child is
+    # launched with stdin=DEVNULL: a script that calls `input()` gets an
+    # immediate EOF, prints no envelope, and the run comes back as an error. The
+    # bullet must also never offer an input source its named tool cannot supply:
+    # naming the file tool is not enough, because run_cpsat_python_file only
+    # supplies a data file when `args` carries it, and the inline tool only when
+    # the instance is embedded in the script.
+    bullet = _full_instructions_cpsat_bullet()
+
+    assert "stdin" in bullet
+    assert "never call `input()`" in bullet
+    if "sys.argv" in bullet or "data file" in bullet:
+        assert "run_cpsat_python_file" in bullet
+        assert "args=[" in bullet
+        assert "embed the instance in the script" in bullet
+
+
+def test_full_instructions_cpsat_bullet_states_the_typed_solve_boundary() -> None:
+    # The spine names alone are satisfied by a pass-through pipeline of untyped
+    # dicts, which is not the convention: a typed record has to cross `solve` in
+    # both directions.
+    bullet = _full_instructions_cpsat_bullet()
+
+    assert "`parse_input` hands `solve` a typed instance record" in bullet
+    assert "`solve` hands `serialize_solution` a typed solution record" in bullet
+
+
+def test_full_instructions_cpsat_bullet_names_the_spine_in_order() -> None:
+    # The layout is an ORDER, not a set of names, so assert ascending positions
+    # rather than membership.
+    bullet = _full_instructions_cpsat_bullet()
+
+    positions = [
+        bullet.index(f"`{name}`")
+        for name in (
+            "read_input",
+            "parse_input",
+            "solve",
+            "serialize_solution",
+            "write_output",
+            "main",
+        )
+    ]
+    assert positions == sorted(positions)
 
 
 async def _forbidden_full_only_names() -> set[str]:
