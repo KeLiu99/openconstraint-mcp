@@ -16,6 +16,7 @@ from openconstraint_mcp.protocol_text.descriptions import (
 from openconstraint_mcp.protocol_text.prompts import (
     CPSAT_OUTPUT_CONTRACT_GUIDANCE,
     CPSAT_OUTPUT_CONTRACT_GUIDANCE_CORE,
+    CPSAT_SCRIPT_STRUCTURE_GUIDANCE,
     MINIZINC_SOLUTION_WORKFLOW_PROMPT,
     SOLVE_CPSAT_PYTHON_PROMPT,
 )
@@ -375,6 +376,76 @@ def test_output_contract_fragment_frames_prompt_text_as_advisory() -> None:
 
     assert "You generate and repair the script; the server only executes it" in normalized
     assert "the deterministic guarantee starts only when an MCP execution tool" in normalized
+
+
+def test_script_structure_fragment_names_the_spine_in_order() -> None:
+    # The layout is an ORDER, not a set of names, so assert ascending positions
+    # rather than membership.
+    normalized = " ".join(CPSAT_SCRIPT_STRUCTURE_GUIDANCE.split())
+
+    positions = [
+        normalized.index(f"`{name}()`")
+        for name in (
+            "read_input",
+            "parse_input",
+            "solve",
+            "serialize_solution",
+            "write_output",
+            "main",
+        )
+    ]
+    assert positions == sorted(positions)
+
+
+def test_script_structure_fragment_requires_a_typed_boundary() -> None:
+    normalized = " ".join(CPSAT_SCRIPT_STRUCTURE_GUIDANCE.split())
+
+    assert "`parse_input()` hands `solve()` a typed instance record" in normalized
+    assert "`solve()` hands `serialize_solution()` a typed solution record" in normalized
+
+
+def test_script_structure_fragment_forbids_reading_stdin() -> None:
+    # A script that reads stdin gets an immediate EOF (the child runs with
+    # stdin=DEVNULL), prints no envelope, and the whole run returns `error`.
+    normalized = " ".join(CPSAT_SCRIPT_STRUCTURE_GUIDANCE.split())
+
+    assert "NEVER read stdin." in normalized
+    assert "calls `input()` or reads `sys.stdin` gets an immediate EOF" in normalized
+
+
+def test_script_structure_fragment_binds_each_input_source_to_its_tool() -> None:
+    # sys.argv and a relative open() are not available under the inline tool,
+    # so the sources must never read as interchangeable.
+    normalized = " ".join(CPSAT_SCRIPT_STRUCTURE_GUIDANCE.split())
+
+    assert "INLINE execution embeds the instance in the script itself" in normalized
+    assert (
+        "ARGV or RELATIVE-FILE input requires `run_cpsat_python_file` with "
+        "`script_path` and `args`" in normalized
+    )
+
+
+def test_script_structure_fragment_is_brace_free_for_str_format() -> None:
+    # Every host prompt is `str.format`ted with the user's problem text, so a
+    # brace in the spliced fragment would surface as an unrelated-looking
+    # KeyError.
+    assert "{" not in CPSAT_SCRIPT_STRUCTURE_GUIDANCE
+    assert "}" not in CPSAT_SCRIPT_STRUCTURE_GUIDANCE
+
+
+def test_script_structure_fragment_names_no_full_only_tool() -> None:
+    # The fragment is written to be spliced into routes the CORE profile also
+    # serves, where the checked variant does not exist. The positive check
+    # above cannot catch this: `in` is a substring match and
+    # "run_cpsat_python_file" is a prefix of "run_cpsat_python_file_checked".
+    assert "run_cpsat_python_file_checked" not in CPSAT_SCRIPT_STRUCTURE_GUIDANCE
+
+
+@pytest.mark.asyncio
+async def test_cpsat_prompt_carries_the_script_structure_fragment() -> None:
+    text = await _get_prompt_text("cpsat_python_solution_workflow", {"problem": SAMPLE_PROBLEM})
+
+    assert CPSAT_SCRIPT_STRUCTURE_GUIDANCE in text
 
 
 def test_full_instructions_state_the_cpsat_output_contract_after_the_head() -> None:
