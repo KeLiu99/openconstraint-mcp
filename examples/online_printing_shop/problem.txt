@@ -76,6 +76,10 @@ model adds one independently testable layer:
 - fixed operations with preassigned machine and starting time; and
 - partial overlap between operations connected by a precedence edge.
 
+When release times are added, each operation must not start before its own
+release time; this is a start-time lower bound to enforce, not just extra
+data to carry alongside the operation.
+
 When setup times and machine calendars are added, the full paper also requires
 setups to be non-interruptible and to finish immediately before the associated
 operation starts.
