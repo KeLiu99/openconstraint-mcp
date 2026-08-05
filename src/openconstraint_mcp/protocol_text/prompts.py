@@ -101,40 +101,57 @@ CPSAT_OUTPUT_CONTRACT_GUIDANCE_CORE = (
     _CPSAT_OUTPUT_CONTRACT_HEAD + _CPSAT_CONTRACT_ROLE_CORE + _CPSAT_CONTRACT_ADVISORY
 )
 
-# The single CP-SAT SCRIPT STRUCTURE block: one layout, taught once, so every
-# route that teaches a layout teaches the same one. It is written to be spliced
-# VERBATIM at column 0, never re-indented, so presence assertions can stay plain
-# `in` checks wherever it lands.
+# The CP-SAT SCRIPT STRUCTURE block, split by CONCERN into the two fragments
+# below: the script's own SHAPE (`CPSAT_SCRIPT_SPINE_GUIDANCE`) and where its
+# PROBLEM INSTANCE comes from (`CPSAT_SCRIPT_INPUT_GUIDANCE`). The split is not
+# a profile split — unlike the output-contract fragments above, no clause here
+# varies by profile, and every route takes both halves through the composed
+# `CPSAT_SCRIPT_STRUCTURE_GUIDANCE`. Each half is public rather than `_`-private
+# because either one is coherent spliced alone, which a profile *half* of the
+# output contract is not.
 #
-# Two constraints it shares with the output-contract fragment above. It is
+# One layout, taught once, so every route that teaches a layout teaches the same
+# one. Both halves are written to be spliced VERBATIM at column 0, never
+# re-indented, so presence assertions can stay plain `in` checks wherever they
+# land, and they concatenate into ONE contiguous bullet list — neither half may
+# open or close with a blank line.
+#
+# Two constraints they share with the output-contract fragment above. They are
 # brace-free, because every host prompt is `str.format`ted with the user's
 # problem text and a stray brace surfaces as an unrelated-looking `KeyError`.
-# And it names no full-only tool — `run_cpsat_python_file`, never
+# And they name no full-only tool — `run_cpsat_python_file`, never
 # `run_cpsat_python_file_checked` — because a route both profiles serve renders
 # this text in core, where the checked variant does not exist.
 #
-# It is also PROSE ONLY, with no code fence: the CP-SAT workflow prompt's two
+# They are also PROSE ONLY, with no code fence: the CP-SAT workflow prompt's two
 # fences are its copyable examples, and the example tests both count them and
 # reject placeholders inside them.
-CPSAT_SCRIPT_STRUCTURE_GUIDANCE = """\
+CPSAT_SCRIPT_SPINE_GUIDANCE = """\
 CP-SAT SCRIPT STRUCTURE — the default layout for a generated script, unless
 the user asks for a different one:
 - Give the script one ordered spine: `read_input()` returns the raw problem
   instance, `parse_input()` turns it into a typed instance record, `solve()`
   builds and solves the model and returns a typed solution record,
   `serialize_solution()` maps that record onto the stdout envelope, and
-  `write_output()` prints it. `main()` calls them in that order, and the
-  script runs `main()` only under the standard module-name guard.
+  `write_output()` prints it. `main()` calls them in that order, and an
+  `if __name__ == "__main__":` guard is the only thing that calls `main()`.
 - Keep the boundary TYPED: `parse_input()` hands `solve()` a typed instance
   record, `solve()` hands `serialize_solution()` a typed solution record —
-  never loose dicts threaded from step to step. Every value field of that
-  solution record is either a real value or absent (`None`), because `solve()`
-  applies the status guards BEFORE it builds the record, so no fabricated
-  number and no placeholder collection is ever stored.
+  never loose dicts threaded from step to step. `solve()` applies the status
+  guards BEFORE it builds the record, so every value field of that solution
+  record is either a real value or absent (`None`).
 - `serialize_solution()` produces the FINAL stdout JSON object the CP-SAT
   output contract requires: it renames the record's fields, maps an absent
   PROBLEM-SPECIFIC field to an empty JSON object, and passes an absent number
-  through as null. It re-derives no status and repeats no guard.
+  through as null. Envelope shaping is its whole job: the `status` it prints
+  is the one `solve()` already decided.
+"""
+
+# The INPUT half: what `read_input()` is allowed to reach for. This is a
+# property of the TOOL that runs the script, not of the script's shape, which is
+# why it is its own fragment — the spine above is the same under every execution
+# tool, while these two bullets are the part that changes with the tool.
+CPSAT_SCRIPT_INPUT_GUIDANCE = """\
 - NEVER read stdin. The child process runs with stdin closed, so a script that
   calls `input()` or reads `sys.stdin` gets an immediate EOF, prints no
   envelope, and the whole run comes back as an error.
@@ -146,6 +163,8 @@ the user asks for a different one:
   ARGV or RELATIVE-FILE input requires `run_cpsat_python_file` with
   `script_path` and `args`, which runs the script from its own directory.
 """
+
+CPSAT_SCRIPT_STRUCTURE_GUIDANCE = CPSAT_SCRIPT_SPINE_GUIDANCE + CPSAT_SCRIPT_INPUT_GUIDANCE
 
 _SOLVE_CONSTRAINT_PROBLEM_HEAD = """\
 You are the MCP client's reasoning model, helping the user solve a constraint

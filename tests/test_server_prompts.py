@@ -16,6 +16,8 @@ from openconstraint_mcp.protocol_text.descriptions import (
 from openconstraint_mcp.protocol_text.prompts import (
     CPSAT_OUTPUT_CONTRACT_GUIDANCE,
     CPSAT_OUTPUT_CONTRACT_GUIDANCE_CORE,
+    CPSAT_SCRIPT_INPUT_GUIDANCE,
+    CPSAT_SCRIPT_SPINE_GUIDANCE,
     CPSAT_SCRIPT_STRUCTURE_GUIDANCE,
     MINIZINC_SOLUTION_WORKFLOW_PROMPT,
     SOLVE_CPSAT_PYTHON_PROMPT,
@@ -388,10 +390,10 @@ def test_output_contract_fragment_frames_prompt_text_as_advisory() -> None:
     assert "the deterministic guarantee starts only when an MCP execution tool" in normalized
 
 
-def test_script_structure_fragment_names_the_spine_in_order() -> None:
+def test_spine_fragment_names_the_spine_in_order() -> None:
     # The layout is an ORDER, not a set of names, so assert ascending positions
     # rather than membership.
-    normalized = " ".join(CPSAT_SCRIPT_STRUCTURE_GUIDANCE.split())
+    normalized = " ".join(CPSAT_SCRIPT_SPINE_GUIDANCE.split())
 
     positions = [
         normalized.index(f"`{name}()`")
@@ -407,32 +409,60 @@ def test_script_structure_fragment_names_the_spine_in_order() -> None:
     assert positions == sorted(positions)
 
 
-def test_script_structure_fragment_requires_a_typed_boundary() -> None:
-    normalized = " ".join(CPSAT_SCRIPT_STRUCTURE_GUIDANCE.split())
+def test_spine_fragment_keeps_status_logic_out_of_the_serializer() -> None:
+    # "`solve()` owns the guards, the serializer only shapes" is a design split,
+    # not a restatement of the guard bullet: a serializer-side guard would move
+    # every OR-Tools read in front of its guard, and `objective_value` returns a
+    # fabricated `0.0` rather than raising on an infeasible run.
+    normalized = " ".join(CPSAT_SCRIPT_SPINE_GUIDANCE.split())
+
+    assert "the `status` it prints is the one `solve()` already decided" in normalized
+
+
+def test_spine_fragment_spells_out_the_entrypoint_guard() -> None:
+    # "the standard module-name guard" is jargon a weaker model can miss; the
+    # literal form is also what the workflow prompt's own example already ships,
+    # so prose and example teach the same line. It carries no brace, so it is
+    # still safe under the host prompt's `str.format`.
+    normalized = " ".join(CPSAT_SCRIPT_SPINE_GUIDANCE.split())
+
+    assert '`if __name__ == "__main__":` guard' in normalized
+
+
+def test_spine_fragment_requires_a_typed_boundary() -> None:
+    normalized = " ".join(CPSAT_SCRIPT_SPINE_GUIDANCE.split())
 
     assert "`parse_input()` hands `solve()` a typed instance record" in normalized
     assert "`solve()` hands `serialize_solution()` a typed solution record" in normalized
 
 
-def test_script_structure_fragment_forbids_reading_stdin() -> None:
+def test_input_fragment_forbids_reading_stdin() -> None:
     # A script that reads stdin gets an immediate EOF (the child runs with
     # stdin=DEVNULL), prints no envelope, and the whole run returns `error`.
-    normalized = " ".join(CPSAT_SCRIPT_STRUCTURE_GUIDANCE.split())
+    normalized = " ".join(CPSAT_SCRIPT_INPUT_GUIDANCE.split())
 
     assert "NEVER read stdin." in normalized
     assert "calls `input()` or reads `sys.stdin` gets an immediate EOF" in normalized
 
 
-def test_script_structure_fragment_binds_each_input_source_to_its_tool() -> None:
+def test_input_fragment_binds_each_input_source_to_its_tool() -> None:
     # sys.argv and a relative open() are not available under the inline tool,
     # so the sources must never read as interchangeable.
-    normalized = " ".join(CPSAT_SCRIPT_STRUCTURE_GUIDANCE.split())
+    normalized = " ".join(CPSAT_SCRIPT_INPUT_GUIDANCE.split())
 
     assert "INLINE execution embeds the instance in the script itself" in normalized
     assert (
         "ARGV or RELATIVE-FILE input requires `run_cpsat_python_file` with "
         "`script_path` and `args`" in normalized
     )
+
+
+def test_script_structure_halves_join_into_one_contiguous_bullet_list() -> None:
+    # The spine and input halves are separate constants but ONE rendered block:
+    # a blank line at the seam would split the prompt's bullet list in two, and
+    # a missing newline would fuse the last spine bullet onto the stdin bullet.
+    assert "\n\n" not in CPSAT_SCRIPT_STRUCTURE_GUIDANCE
+    assert CPSAT_SCRIPT_STRUCTURE_GUIDANCE.count("\n- NEVER read stdin.") == 1
 
 
 def test_script_structure_fragment_is_brace_free_for_str_format() -> None:
