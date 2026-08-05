@@ -1097,10 +1097,16 @@ inline `run_cpsat_python`, or pass a data file through
 `run_cpsat_python_file(script_path=…, args=[…])`, which runs the script from its
 own directory.
 
-This is scoped to scripts generated fresh for one problem. The shipped
-`examples/` scripts — including `examples/flexible_job_shop/`'s six flat,
-module-level `model*.py` formulations described below — keep their existing
-shape; the recommendation does not apply to them.
+This is the recommendation for a script generated fresh for one problem. Two
+of the shipped `examples/` directories follow it internally: `examples/job_shop/`
+and `examples/flexible_job_shop/` (the latter's six self-contained `model*.py`
+formulations described below) follow the same
+`read_input`/`parse_input`/`solve`/`serialize_solution`/`write_output` spine,
+but `read_input()` resolves its instance from `sys.argv` (the ARGV or
+RELATIVE-FILE input mode `CPSAT_SCRIPT_INPUT_GUIDANCE` documents) rather than
+hardcoding one — which is what keeps `args=["data_ft10.json"]`-style instance
+switching working. `examples/nonogram/` and `examples/social_golfers/` predate
+this spine and keep their original flat, single-function shape.
 
 ### Delivering several script variants
 
