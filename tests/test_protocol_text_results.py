@@ -14,7 +14,7 @@ from openconstraint_mcp.schemas.cpsat import (
     CpsatPythonResult,
 )
 from openconstraint_mcp.schemas.diagnostics import Diagnostic
-from openconstraint_mcp.schemas.minizinc import SolveResult
+from openconstraint_mcp.schemas.minizinc import CheckerReport, SolveResult
 from openconstraint_mcp.schemas.tabular import TabularData
 
 
@@ -42,6 +42,22 @@ def test_solve_text_clean_success_has_no_diagnostic_line() -> None:
     text = format_solve_result_content(_solve("satisfied", None))
     assert not text.startswith("Diagnostic:")
     assert text.startswith("Status: satisfied")
+
+
+def test_checked_solve_text_carries_the_whole_non_adjudication_rule() -> None:
+    # These two clauses used to be stated a second time in the solve tool
+    # descriptions. They are not, so this in-band note is now their ONLY
+    # carrier: a client that reads a `CORRECT` line as a server verdict, or an
+    # unflagged checker as a proof of optimality, draws the wrong conclusion.
+    result = _solve("satisfied", None)
+    result.checker = CheckerReport(status="completed", checks=[], transcript="")
+
+    text = format_solve_result_content(result)
+
+    assert "NOT interpreted by the server" in text
+    assert "only a nested UNSATISFIABLE" in text
+    assert "Only `solve.status` proves" in text
+    assert "completeness/optimality" in text
 
 
 def test_experiment_text_leads_with_no_winner_diagnostic() -> None:

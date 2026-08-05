@@ -654,6 +654,53 @@ def test_mcp_server_instructions_route_num_solutions_and_multiple_optima() -> No
     assert "objective fixed" in MCP_SERVER_INSTRUCTIONS
 
 
+def test_full_instructions_route_long_runs_to_background_jobs() -> None:
+    # Deciding whether to go async is a CROSS-tool call no single tool
+    # description can make: the sync default is 30 s, and a client that just
+    # raises `timeout_ms` hits its own tool-call limit instead, orphaning the
+    # child. Every submit tool is named so no backend is left on the sync path.
+    normalized = " ".join(MCP_SERVER_INSTRUCTIONS.split())
+
+    assert "LONG RUNS:" in normalized
+    for tool in (
+        "submit_solve_job",
+        "submit_portfolio_job",
+        "submit_cpsat_python_job",
+        "submit_cpsat_python_file_job",
+    ):
+        assert tool in normalized, f"instructions do not route long runs to {tool}"
+    assert "poll the matching get_* tool" in normalized
+
+
+def test_full_instructions_route_unsatisfiable_to_the_unsat_core_tools() -> None:
+    # "unsatisfiable" is the most common now-what branch, and the untaught
+    # reflex is to rewrite the model blind rather than compute a MUS first.
+    normalized = " ".join(MCP_SERVER_INSTRUCTIONS.split())
+
+    assert "find_unsat_core" in normalized
+    assert "find_unsat_core_files" in normalized
+    assert "before rewriting the model" in normalized
+
+
+def test_full_instructions_route_a_missing_runtime_to_install_or_cpsat() -> None:
+    # The core profile has always carried this recovery path; the full profile
+    # must not offer LESS guidance on the most common first-run failure.
+    normalized = " ".join(MCP_SERVER_INSTRUCTIONS.split())
+
+    assert "check_runtime" in normalized
+    assert "openconstraint-mcp install-runtime" in normalized
+    assert "zero-install CP-SAT backend" in normalized
+
+
+def test_full_instructions_route_spreadsheet_data_to_the_tabular_tools() -> None:
+    # Without this the client reads the spreadsheet itself and retypes numbers
+    # into the model, which is where transcription errors enter.
+    normalized = " ".join(MCP_SERVER_INSTRUCTIONS.split())
+
+    assert "load_tabular_data" in normalized
+    assert "write_tabular_result" in normalized
+
+
 @pytest.mark.asyncio
 async def test_minizinc_solution_workflow_prompt_does_not_recommend_bare_path_minizinc() -> None:
     text = await _get_prompt_text("minizinc_solution_workflow", {"problem": SAMPLE_PROBLEM})

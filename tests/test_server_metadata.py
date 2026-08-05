@@ -746,6 +746,36 @@ def test_core_instructions_are_within_budget() -> None:
     )
 
 
+def test_core_instructions_carry_the_no_stdin_rule() -> None:
+    # `_CPSAT_NO_STDIN_FULL` is deliberately full-only on the tool descriptions
+    # (it fans out to two tools, and core metadata has no headroom), so these
+    # instructions are the ONLY channel that reaches a core client which does
+    # not use prompts. A script that reads stdin fails the entire run.
+    normalized = " ".join(MCP_SERVER_INSTRUCTIONS_CORE.split())
+
+    assert "NO stdin" in normalized
+    assert "never call `input()` or read `sys.stdin`" in normalized
+
+
+def test_core_instructions_state_what_the_solution_object_must_carry() -> None:
+    # `_CPSAT_JSON_CONTRACT` carries the TYPE contract to both profiles and
+    # delegates the SEMANTIC requirement to the prompts and these instructions
+    # — so core must state it, or a prompt-less core client is told the shape
+    # of `solution` and never what belongs in it.
+    normalized = " ".join(MCP_SERVER_INSTRUCTIONS_CORE.split())
+
+    assert "must carry the COMPLETE answer" in normalized
+    assert "never prose or a file path" in normalized
+
+
+def test_core_instructions_route_a_missing_runtime_to_install_or_cpsat() -> None:
+    normalized = " ".join(MCP_SERVER_INSTRUCTIONS_CORE.split())
+
+    assert "check_runtime" in normalized
+    assert "`openconstraint-mcp install-runtime`" in normalized
+    assert "use CP-SAT, which needs none" in normalized
+
+
 def test_full_instructions_lead_with_routing_then_posture() -> None:
     # POSTURE (the safety disclosure) must be paragraph two in the full
     # profile, so it survives truncation alongside the routing paragraph.
@@ -788,6 +818,17 @@ def test_full_instructions_cpsat_bullet_forbids_reading_stdin() -> None:
         assert "run_cpsat_python_file" in bullet
         assert "args=[" in bullet
         assert "embed the instance in the script" in bullet
+
+
+def test_full_instructions_cpsat_bullet_names_its_verification_surface() -> None:
+    # The MiniZinc bullet has always named its checker surface; the CP-SAT
+    # bullet must name its own, or "LLM proposes, server verifies" reaches the
+    # client for one backend only — and the experiment tool is otherwise
+    # reachable only through a prompt, which the WITHOUT PROMPTS path lacks.
+    bullet = _full_instructions_cpsat_bullet()
+
+    assert "run_cpsat_python_file_checked" in bullet
+    assert "run_cpsat_python_experiment" in bullet
 
 
 def test_full_instructions_cpsat_bullet_states_the_typed_solve_boundary() -> None:

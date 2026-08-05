@@ -1335,6 +1335,20 @@ def test_run_cpsat_python_experiment_warnings_only_reproducibility_when_no_num_w
     assert result.warnings == [experiment._REPRODUCIBILITY_WARNING]
 
 
+def test_reproducibility_warning_states_the_cause_and_the_remedy() -> None:
+    # The tool description used to restate all of this; it now points here
+    # instead, so this warning is the only carrier. Identity assertions above
+    # prove it is ATTACHED — this one proves it still says something a client
+    # can act on: why a winner may not replay, and what to set for a stronger
+    # one.
+    warning = experiment._REPRODUCIBILITY_WARNING
+
+    assert "one observed run, not a reproducibility guarantee" in warning
+    assert "save_verified_cpsat_python re-runs this script fresh" in warning
+    assert "random_seed" in warning
+    assert "num_workers = 1" in warning
+
+
 def test_run_cpsat_python_experiment_warnings_empty_when_no_winner(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
