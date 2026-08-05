@@ -2,11 +2,14 @@ from __future__ import annotations
 
 import json
 import sys
+from collections.abc import Callable
+from contextlib import AbstractAsyncContextManager
 from importlib import metadata
 from pathlib import Path
 from typing import Any
 
 import pytest
+from mcp.server.mcpserver import MCPServer
 from pydantic import ValidationError
 
 from openconstraint_mcp.jobs.registry import JobRegistry
@@ -34,7 +37,7 @@ from openconstraint_mcp.shared.childproc import ChildProcessTracker
 from openconstraint_mcp.shared.proc import popen_process_group
 
 
-def _boot_lifespan() -> object:
+def _boot_lifespan() -> Callable[[MCPServer[Any]], AbstractAsyncContextManager[None]]:
     """A wired lifespan over fresh server-owned registries (boot tests)."""
     return _make_lifespan(JobRegistry(), CpsatJobRegistry(), ChildProcessTracker())
 
