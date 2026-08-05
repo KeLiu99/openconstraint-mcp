@@ -1170,8 +1170,7 @@ SAVE_VERIFIED_CPSAT_PYTHON_DESCRIPTION = (
     "that gate was not evaluated), `checker`, and `verification_level` — the highest "
     "gate that passed. A failed gate returns a non-null `reason` and writes NOTHING; "
     "a run that passes every gate returns `reason=null` and writes files only when "
-    "it was not `verify_only`. "
-    + _CPSAT_CHILD_POSTURE
+    "it was not `verify_only`. " + _CPSAT_CHILD_POSTURE
 )
 
 CPSAT_PYTHON_SOLUTION_WORKFLOW_PROMPT_DESCRIPTION = (
