@@ -16,6 +16,9 @@ from openconstraint_mcp.protocol_text.descriptions import (
 from openconstraint_mcp.protocol_text.prompts import (
     CPSAT_OUTPUT_CONTRACT_GUIDANCE,
     CPSAT_OUTPUT_CONTRACT_GUIDANCE_CORE,
+    CPSAT_SCRIPT_INPUT_GUIDANCE,
+    CPSAT_SCRIPT_SPINE_GUIDANCE,
+    CPSAT_SCRIPT_STRUCTURE_GUIDANCE,
     MINIZINC_SOLUTION_WORKFLOW_PROMPT,
     SOLVE_CPSAT_PYTHON_PROMPT,
 )
@@ -278,6 +281,16 @@ async def test_cpsat_prompt_carries_the_shared_output_contract_fragment() -> Non
     assert CPSAT_OUTPUT_CONTRACT_GUIDANCE in text
 
 
+@pytest.mark.asyncio
+async def test_auto_tune_prompt_carries_the_shared_output_contract_fragment() -> None:
+    # The third CP-SAT generation route: it drafts candidates and rewrites them
+    # per tier, so it needs the same stdout envelope contract as the other two.
+    # Full variant, because this prompt registers in the full profile only.
+    text = await _get_prompt_text("auto_tune_constraint_problem", {"problem": SAMPLE_PROBLEM})
+
+    assert CPSAT_OUTPUT_CONTRACT_GUIDANCE in text
+
+
 def test_output_contract_fragment_is_brace_free_for_str_format() -> None:
     # Both host prompts are `str.format`ted with the user's problem text, so a brace
     # in the spliced fragment would surface as an unrelated-looking KeyError.
@@ -375,6 +388,129 @@ def test_output_contract_fragment_frames_prompt_text_as_advisory() -> None:
 
     assert "You generate and repair the script; the server only executes it" in normalized
     assert "the deterministic guarantee starts only when an MCP execution tool" in normalized
+
+
+def test_spine_fragment_names_the_spine_in_order() -> None:
+    # The layout is an ORDER, not a set of names, so assert ascending positions
+    # rather than membership.
+    normalized = " ".join(CPSAT_SCRIPT_SPINE_GUIDANCE.split())
+
+    positions = [
+        normalized.index(f"`{name}()`")
+        for name in (
+            "read_input",
+            "parse_input",
+            "solve",
+            "serialize_solution",
+            "write_output",
+            "main",
+        )
+    ]
+    assert positions == sorted(positions)
+
+
+def test_spine_fragment_keeps_status_logic_out_of_the_serializer() -> None:
+    # "`solve()` owns the guards, the serializer only shapes" is a design split,
+    # not a restatement of the guard bullet: a serializer-side guard would move
+    # every OR-Tools read in front of its guard, and `objective_value` returns a
+    # fabricated `0.0` rather than raising on an infeasible run.
+    normalized = " ".join(CPSAT_SCRIPT_SPINE_GUIDANCE.split())
+
+    assert "the `status` it prints is the one `solve()` already decided" in normalized
+
+
+def test_spine_fragment_spells_out_the_entrypoint_guard() -> None:
+    # "the standard module-name guard" is jargon a weaker model can miss; the
+    # literal form is also what the workflow prompt's own example already ships,
+    # so prose and example teach the same line. It carries no brace, so it is
+    # still safe under the host prompt's `str.format`.
+    normalized = " ".join(CPSAT_SCRIPT_SPINE_GUIDANCE.split())
+
+    assert '`if __name__ == "__main__":` guard' in normalized
+
+
+def test_spine_fragment_requires_a_typed_boundary() -> None:
+    normalized = " ".join(CPSAT_SCRIPT_SPINE_GUIDANCE.split())
+
+    assert "`parse_input()` hands `solve()` a typed instance record" in normalized
+    assert "`solve()` hands `serialize_solution()` a typed solution record" in normalized
+
+
+def test_input_fragment_forbids_reading_stdin() -> None:
+    # A script that reads stdin gets an immediate EOF (the child runs with
+    # stdin=DEVNULL), prints no envelope, and the whole run returns `error`.
+    normalized = " ".join(CPSAT_SCRIPT_INPUT_GUIDANCE.split())
+
+    assert "NEVER read stdin." in normalized
+    assert "calls `input()` or reads `sys.stdin` gets an immediate EOF" in normalized
+
+
+def test_input_fragment_binds_each_input_source_to_its_tool() -> None:
+    # sys.argv and a relative open() are not available under the inline tool,
+    # so the sources must never read as interchangeable.
+    normalized = " ".join(CPSAT_SCRIPT_INPUT_GUIDANCE.split())
+
+    assert "INLINE execution embeds the instance in the script itself" in normalized
+    assert (
+        "ARGV or RELATIVE-FILE input requires `run_cpsat_python_file` with "
+        "`script_path` and `args`" in normalized
+    )
+
+
+def test_script_structure_halves_join_into_one_contiguous_bullet_list() -> None:
+    # The spine and input halves are separate constants but ONE rendered block:
+    # a blank line at the seam would split the prompt's bullet list in two, and
+    # a missing newline would fuse the last spine bullet onto the stdin bullet.
+    assert "\n\n" not in CPSAT_SCRIPT_STRUCTURE_GUIDANCE
+    assert CPSAT_SCRIPT_STRUCTURE_GUIDANCE.count("\n- NEVER read stdin.") == 1
+
+
+def test_script_structure_fragment_is_brace_free_for_str_format() -> None:
+    # Every host prompt is `str.format`ted with the user's problem text, so a
+    # brace in the spliced fragment would surface as an unrelated-looking
+    # KeyError.
+    assert "{" not in CPSAT_SCRIPT_STRUCTURE_GUIDANCE
+    assert "}" not in CPSAT_SCRIPT_STRUCTURE_GUIDANCE
+
+
+def test_script_structure_fragment_names_no_full_only_tool() -> None:
+    # The fragment is written to be spliced into routes the CORE profile also
+    # serves, where the checked variant does not exist. The positive check
+    # above cannot catch this: `in` is a substring match and
+    # "run_cpsat_python_file" is a prefix of "run_cpsat_python_file_checked".
+    assert "run_cpsat_python_file_checked" not in CPSAT_SCRIPT_STRUCTURE_GUIDANCE
+
+
+@pytest.mark.asyncio
+async def test_cpsat_prompt_carries_the_script_structure_fragment() -> None:
+    text = await _get_prompt_text("cpsat_python_solution_workflow", {"problem": SAMPLE_PROBLEM})
+
+    assert CPSAT_SCRIPT_STRUCTURE_GUIDANCE in text
+
+
+@pytest.mark.asyncio
+async def test_backend_neutral_prompt_carries_the_script_structure_fragment() -> None:
+    text = await _get_core_prompt_text("solve_constraint_problem", {"problem": SAMPLE_PROBLEM})
+
+    assert CPSAT_SCRIPT_STRUCTURE_GUIDANCE in text
+
+
+@pytest.mark.asyncio
+async def test_full_backend_neutral_prompt_carries_the_script_structure_fragment() -> None:
+    # One constant, both profiles: the fragment names no full-only tool, so
+    # unlike the output-contract fragment it needs no profile-dependent variant.
+    text = await _get_prompt_text("solve_constraint_problem", {"problem": SAMPLE_PROBLEM})
+
+    assert CPSAT_SCRIPT_STRUCTURE_GUIDANCE in text
+
+
+@pytest.mark.asyncio
+async def test_auto_tune_prompt_carries_the_script_structure_fragment() -> None:
+    # Auto-tune drafts CP-SAT candidates and REWRITES each one at the tuning and
+    # full-instance stages, so its rewrites must follow the same layout.
+    text = await _get_prompt_text("auto_tune_constraint_problem", {"problem": SAMPLE_PROBLEM})
+
+    assert CPSAT_SCRIPT_STRUCTURE_GUIDANCE in text
 
 
 def test_full_instructions_state_the_cpsat_output_contract_after_the_head() -> None:
@@ -516,6 +652,53 @@ def test_mcp_server_instructions_route_num_solutions_and_multiple_optima() -> No
     assert "not the default `cp-sat`" in MCP_SERVER_INSTRUCTIONS
     assert "multiple optimal solutions" in MCP_SERVER_INSTRUCTIONS
     assert "objective fixed" in MCP_SERVER_INSTRUCTIONS
+
+
+def test_full_instructions_route_long_runs_to_background_jobs() -> None:
+    # Deciding whether to go async is a CROSS-tool call no single tool
+    # description can make: the sync default is 30 s, and a client that just
+    # raises `timeout_ms` hits its own tool-call limit instead, orphaning the
+    # child. Every submit tool is named so no backend is left on the sync path.
+    normalized = " ".join(MCP_SERVER_INSTRUCTIONS.split())
+
+    assert "LONG RUNS:" in normalized
+    for tool in (
+        "submit_solve_job",
+        "submit_portfolio_job",
+        "submit_cpsat_python_job",
+        "submit_cpsat_python_file_job",
+    ):
+        assert tool in normalized, f"instructions do not route long runs to {tool}"
+    assert "poll the matching get_* tool" in normalized
+
+
+def test_full_instructions_route_unsatisfiable_to_the_unsat_core_tools() -> None:
+    # "unsatisfiable" is the most common now-what branch, and the untaught
+    # reflex is to rewrite the model blind rather than compute a MUS first.
+    normalized = " ".join(MCP_SERVER_INSTRUCTIONS.split())
+
+    assert "find_unsat_core" in normalized
+    assert "find_unsat_core_files" in normalized
+    assert "before rewriting the model" in normalized
+
+
+def test_full_instructions_route_a_missing_runtime_to_install_or_cpsat() -> None:
+    # The core profile has always carried this recovery path; the full profile
+    # must not offer LESS guidance on the most common first-run failure.
+    normalized = " ".join(MCP_SERVER_INSTRUCTIONS.split())
+
+    assert "check_runtime" in normalized
+    assert "openconstraint-mcp install-runtime" in normalized
+    assert "zero-install CP-SAT backend" in normalized
+
+
+def test_full_instructions_route_spreadsheet_data_to_the_tabular_tools() -> None:
+    # Without this the client reads the spreadsheet itself and retypes numbers
+    # into the model, which is where transcription errors enter.
+    normalized = " ".join(MCP_SERVER_INSTRUCTIONS.split())
+
+    assert "load_tabular_data" in normalized
+    assert "write_tabular_result" in normalized
 
 
 @pytest.mark.asyncio

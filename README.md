@@ -1074,6 +1074,34 @@ and never invokes an execution tool has no server guarantee at all. And an
 validates feasibility and consistency, and does **not** by itself prove a
 `status="optimal"` claim is globally optimal.
 
+### Recommended generated-script layout
+
+The stdout JSON envelope (specified under **Tools** below) is **enforced** — the
+executor parses it and rejects a malformed one. A script's internal layout is
+**advisory**: it is what the CP-SAT prompts (`cpsat_python_solution_workflow`,
+`solve_constraint_problem`, `auto_tune_constraint_problem`) and the full
+profile's server instructions recommend to the client's LLM, not something the
+server checks or every client receives.
+
+For a newly generated one-off script, that recommendation is a single ordered
+spine — `read_input`, `parse_input`, `solve`, `serialize_solution`,
+`write_output`, called in that order by `main` — with a typed boundary across
+`solve()`: a typed instance record in, a typed solution record out, rather than
+loose dicts threaded from step to step. Only `serialize_solution()` maps that
+record onto the stdout envelope.
+
+The child process runs with **no stdin**, so a generated script must never call
+`input()` or read `sys.stdin`: it gets an immediate EOF, prints no envelope, and
+the whole run comes back as an error. Embed the instance in the script for
+inline `run_cpsat_python`, or pass a data file through
+`run_cpsat_python_file(script_path=…, args=[…])`, which runs the script from its
+own directory.
+
+This is scoped to scripts generated fresh for one problem. The shipped
+`examples/` scripts — including `examples/flexible_job_shop/`'s six flat,
+module-level `model*.py` formulations described below — keep their existing
+shape; the recommendation does not apply to them.
+
 ### Delivering several script variants
 
 When the user asks for several working scripts (rather than "give me the best

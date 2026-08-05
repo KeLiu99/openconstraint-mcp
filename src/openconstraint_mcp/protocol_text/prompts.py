@@ -101,6 +101,71 @@ CPSAT_OUTPUT_CONTRACT_GUIDANCE_CORE = (
     _CPSAT_OUTPUT_CONTRACT_HEAD + _CPSAT_CONTRACT_ROLE_CORE + _CPSAT_CONTRACT_ADVISORY
 )
 
+# The CP-SAT SCRIPT STRUCTURE block, split by CONCERN into the two fragments
+# below: the script's own SHAPE (`CPSAT_SCRIPT_SPINE_GUIDANCE`) and where its
+# PROBLEM INSTANCE comes from (`CPSAT_SCRIPT_INPUT_GUIDANCE`). The split is not
+# a profile split — unlike the output-contract fragments above, no clause here
+# varies by profile, and every route takes both halves through the composed
+# `CPSAT_SCRIPT_STRUCTURE_GUIDANCE`. Each half is public rather than `_`-private
+# because either one is coherent spliced alone, which a profile *half* of the
+# output contract is not.
+#
+# One layout, taught once, so every route that teaches a layout teaches the same
+# one. Both halves are written to be spliced VERBATIM at column 0, never
+# re-indented, so presence assertions can stay plain `in` checks wherever they
+# land, and they concatenate into ONE contiguous bullet list — neither half may
+# open or close with a blank line.
+#
+# Two constraints they share with the output-contract fragment above. They are
+# brace-free, because every host prompt is `str.format`ted with the user's
+# problem text and a stray brace surfaces as an unrelated-looking `KeyError`.
+# And they name no full-only tool — `run_cpsat_python_file`, never
+# `run_cpsat_python_file_checked` — because a route both profiles serve renders
+# this text in core, where the checked variant does not exist.
+#
+# They are also PROSE ONLY, with no code fence: the CP-SAT workflow prompt's two
+# fences are its copyable examples, and the example tests both count them and
+# reject placeholders inside them.
+CPSAT_SCRIPT_SPINE_GUIDANCE = """\
+CP-SAT SCRIPT STRUCTURE — the default layout for a generated script, unless
+the user asks for a different one:
+- Give the script one ordered spine: `read_input()` returns the raw problem
+  instance, `parse_input()` turns it into a typed instance record, `solve()`
+  builds and solves the model and returns a typed solution record,
+  `serialize_solution()` maps that record onto the stdout envelope, and
+  `write_output()` prints it. `main()` calls them in that order, and an
+  `if __name__ == "__main__":` guard is the only thing that calls `main()`.
+- Keep the boundary TYPED: `parse_input()` hands `solve()` a typed instance
+  record, `solve()` hands `serialize_solution()` a typed solution record —
+  never loose dicts threaded from step to step. `solve()` applies the status
+  guards BEFORE it builds the record, so every value field of that solution
+  record is either a real value or absent (`None`).
+- `serialize_solution()` produces the FINAL stdout JSON object the CP-SAT
+  output contract requires: it renames the record's fields, maps an absent
+  PROBLEM-SPECIFIC field to an empty JSON object, and passes an absent number
+  through as null. Envelope shaping is its whole job: the `status` it prints
+  is the one `solve()` already decided.
+"""
+
+# The INPUT half: what `read_input()` is allowed to reach for. This is a
+# property of the TOOL that runs the script, not of the script's shape, which is
+# why it is its own fragment — the spine above is the same under every execution
+# tool, while these two bullets are the part that changes with the tool.
+CPSAT_SCRIPT_INPUT_GUIDANCE = """\
+- NEVER read stdin. The child process runs with stdin closed, so a script that
+  calls `input()` or reads `sys.stdin` gets an immediate EOF, prints no
+  envelope, and the whole run comes back as an error.
+- `read_input()` supplies the PROBLEM INSTANCE only, and which sources it may
+  read depends on the tool that runs the script. INLINE execution embeds the
+  instance in the script itself: `run_cpsat_python` passes no arguments and
+  runs from a fresh temporary directory holding nothing but the script, so
+  `sys.argv` carries no entry to read and a relative `open()` finds no file.
+  ARGV or RELATIVE-FILE input requires `run_cpsat_python_file` with
+  `script_path` and `args`, which runs the script from its own directory.
+"""
+
+CPSAT_SCRIPT_STRUCTURE_GUIDANCE = CPSAT_SCRIPT_SPINE_GUIDANCE + CPSAT_SCRIPT_INPUT_GUIDANCE
+
 _SOLVE_CONSTRAINT_PROBLEM_HEAD = """\
 You are the MCP client's reasoning model, helping the user solve a constraint
 or discrete-optimization problem with openconstraint-mcp. The server calls no
@@ -171,11 +236,17 @@ _SOLVE_CONSTRAINT_PROBLEM_TAIL = """
 # differs; full's wording is unchanged (the advisory sentence re-wrapped onto
 # its own line when it became a shared fragment, which is prose layout only).
 SOLVE_CONSTRAINT_PROBLEM_PROMPT = (
-    _SOLVE_CONSTRAINT_PROBLEM_HEAD + CPSAT_OUTPUT_CONTRACT_GUIDANCE + _SOLVE_CONSTRAINT_PROBLEM_TAIL
+    _SOLVE_CONSTRAINT_PROBLEM_HEAD
+    + CPSAT_SCRIPT_STRUCTURE_GUIDANCE
+    + "\n"
+    + CPSAT_OUTPUT_CONTRACT_GUIDANCE
+    + _SOLVE_CONSTRAINT_PROBLEM_TAIL
 )
 
 SOLVE_CONSTRAINT_PROBLEM_PROMPT_CORE = (
     _SOLVE_CONSTRAINT_PROBLEM_HEAD
+    + CPSAT_SCRIPT_STRUCTURE_GUIDANCE
+    + "\n"
     + CPSAT_OUTPUT_CONTRACT_GUIDANCE_CORE
     + _SOLVE_CONSTRAINT_PROBLEM_TAIL
 )
@@ -427,47 +498,125 @@ User problem:
      ```
      import json
      import os
+     from dataclasses import dataclass
 
      from ortools.sat.python import cp_model
 
-     model = cp_model.CpModel()
-     x = model.new_int_var(0, 10, "x")
-     y = model.new_int_var(0, 10, "y")
-     model.add(x + y <= 12)
-     model.maximize(x + 2 * y)
 
-     solver = cp_model.CpSolver()
-     solver.parameters.random_seed = int(
-         os.environ.get("OPENCONSTRAINT_MCP_CPSAT_SEED", "42")
-     )
-     solver.parameters.num_workers = 1
-     status_code = solver.solve(model)
+     @dataclass(frozen=True)
+     class Item:
+         name: str
+         weight: int
+         value: int
 
-     status_map = {{
-         cp_model.OPTIMAL: "optimal",
-         cp_model.FEASIBLE: "feasible",
-         cp_model.INFEASIBLE: "infeasible",
-         cp_model.UNKNOWN: "unknown",
-     }}
-     has_solution = status_code in (cp_model.OPTIMAL, cp_model.FEASIBLE)
-     solution = {{}}
-     if has_solution:
-         solution = {{"x": solver.value(x), "y": solver.value(y)}}
-     bound_states = (cp_model.OPTIMAL, cp_model.FEASIBLE, cp_model.UNKNOWN)
-     print(json.dumps({{
-         "status": status_map.get(status_code, "error"),
-         "objective": (
-             float(solver.objective_value)
-             if model.has_objective() and has_solution
-             else None
-         ),
-         "solution": solution,
-         "best_objective_bound": (
-             float(solver.best_objective_bound)
-             if model.has_objective() and status_code in bound_states
-             else None
-         ),
-     }}))
+
+     @dataclass(frozen=True)
+     class ProblemInstance:
+         items: list[Item]
+         capacity: int
+         min_items: int
+
+
+     @dataclass(frozen=True)
+     class Solution:
+         status: str
+         selected: list[str] | None = None
+         objective: float | None = None
+         best_objective_bound: float | None = None
+
+
+     def read_input() -> dict:
+         return {{
+             "items": [
+                 {{"name": "radio", "weight": 3, "value": 5}},
+                 {{"name": "lamp", "weight": 4, "value": 7}},
+                 {{"name": "kettle", "weight": 5, "value": 9}},
+                 {{"name": "clock", "weight": 2, "value": 3}},
+             ],
+             "capacity": 9,
+             "min_items": 3,
+         }}
+
+
+     def parse_input(raw: dict) -> ProblemInstance:
+         items = [
+             Item(str(row["name"]), int(row["weight"]), int(row["value"]))
+             for row in raw["items"]
+         ]
+         if not items:
+             raise ValueError("the instance carries no items")
+         min_items = int(raw["min_items"])
+         if not 0 <= min_items <= len(items):
+             raise ValueError("min_items is outside the available item count")
+         return ProblemInstance(items, int(raw["capacity"]), min_items)
+
+
+     def solve(instance: ProblemInstance) -> Solution:
+         model = cp_model.CpModel()
+         take = [model.new_bool_var(item.name) for item in instance.items]
+         pairs = list(zip(instance.items, take))
+         model.add(sum(item.weight * v for item, v in pairs) <= instance.capacity)
+         model.add(sum(take) >= instance.min_items)
+         total_value = sum(item.value * v for item, v in pairs)
+         model.maximize(total_value)
+
+         solver = cp_model.CpSolver()
+         solver.parameters.random_seed = int(
+             os.environ.get("OPENCONSTRAINT_MCP_CPSAT_SEED", "42")
+         )
+         solver.parameters.num_workers = 1
+         status_code = solver.solve(model)
+
+         status_map = {{
+             cp_model.OPTIMAL: "optimal",
+             cp_model.FEASIBLE: "feasible",
+             cp_model.INFEASIBLE: "infeasible",
+             cp_model.UNKNOWN: "unknown",
+         }}
+         has_solution = status_code in (cp_model.OPTIMAL, cp_model.FEASIBLE)
+         bound_states = (cp_model.OPTIMAL, cp_model.FEASIBLE, cp_model.UNKNOWN)
+         return Solution(
+             status=status_map.get(status_code, "error"),
+             selected=(
+                 [item.name for item, v in pairs if solver.value(v)]
+                 if has_solution
+                 else None
+             ),
+             objective=(
+                 float(solver.objective_value)
+                 if model.has_objective() and has_solution
+                 else None
+             ),
+             best_objective_bound=(
+                 float(solver.best_objective_bound)
+                 if model.has_objective() and status_code in bound_states
+                 else None
+             ),
+         )
+
+
+     def serialize_solution(solution: Solution) -> dict:
+         values: dict = {{}}
+         if solution.selected is not None:
+             values = {{"selected": solution.selected}}
+         return {{
+             "status": solution.status,
+             "objective": solution.objective,
+             "solution": values,
+             "best_objective_bound": solution.best_objective_bound,
+         }}
+
+
+     def write_output(payload: dict) -> None:
+         print(json.dumps(payload))
+
+
+     def main() -> None:
+         write_output(serialize_solution(solve(parse_input(read_input()))))
+
+
+     if __name__ == "__main__":
+         main()
      ```
      `best_objective_bound` (OR-Tools' `solver.best_objective_bound` — a
      PROPERTY, not a method) is a diagnostic bound, not a proven objective.
@@ -480,33 +629,87 @@ User problem:
      `model.has_objective()` is `False`), and for an optimization run that
      ends `infeasible` or `unknown` with no solution.
      `solver.best_objective_bound` is meaningless for a pure feasibility
-     problem and for `infeasible`/`error`, but on `unknown` it is genuine
-     search progress. Never drop the example's guards: emit `objective`
-     only for a solution-bearing status (`optimal`/`feasible`), emit
-     `best_objective_bound` only for `optimal`/`feasible`/`unknown`, and
-     emit `null`, not a fabricated number, in every other case.
+     problem and for `infeasible`/`error`, but on an `unknown` that actually
+     searched it is genuine search progress; a run stopped before search
+     started reports the uninitialized `0.0` instead. Never drop the
+     example's guards: emit `objective` only for a solution-bearing status
+     (`optimal`/`feasible`), emit `best_objective_bound` only for
+     `optimal`/`feasible`/`unknown`, and emit `null`, not a fabricated
+     number, in every other case.
    - For a long or optimization run that may hit `timeout_ms`, ALSO emit an
      intermediate JSON object of the SAME shape on each improved solution,
-     from a `cp_model.CpSolverSolutionCallback`. Replace the example's plain
-     `status_code = solver.solve(model)` line with:
+     from a `cp_model.CpSolverSolutionCallback`. Replace the example's WHOLE
+     `solve()` function with the one below, which reuses the same
+     `Solution` record, `serialize_solution()`, and `write_output()`:
      ```
-     class _Best(cp_model.CpSolverSolutionCallback):
-         def __init__(self, variables, has_objective):
-             super().__init__()
-             self._variables = variables
-             self._has_objective = has_objective
+     def solve(instance: ProblemInstance) -> Solution:
+         model = cp_model.CpModel()
+         take = [model.new_bool_var(item.name) for item in instance.items]
+         pairs = list(zip(instance.items, take))
+         model.add(sum(item.weight * v for item, v in pairs) <= instance.capacity)
+         model.add(sum(take) >= instance.min_items)
+         total_value = sum(item.value * v for item, v in pairs)
+         model.maximize(total_value)
 
-         def on_solution_callback(self):
-             print(json.dumps({{
-                 "status": "feasible",
-                 "objective": self.objective_value if self._has_objective else None,
-                 "solution": {{name: self.value(v) for name, v in self._variables.items()}},
-                 "best_objective_bound": (
-                     self.best_objective_bound if self._has_objective else None
-                 ),
-             }}))
+         class _Best(cp_model.CpSolverSolutionCallback):
+             def __init__(self, names, variables, has_objective):
+                 super().__init__()
+                 self._names = names
+                 self._variables = variables
+                 self._has_objective = has_objective
 
-     status_code = solver.solve(model, _Best({{"x": x, "y": y}}, model.has_objective()))
+             def on_solution_callback(self):
+                 write_output(serialize_solution(Solution(
+                     status="feasible",
+                     selected=[
+                         name
+                         for name, v in zip(self._names, self._variables)
+                         if self.value(v)
+                     ],
+                     objective=(
+                         float(self.objective_value) if self._has_objective else None
+                     ),
+                     best_objective_bound=(
+                         float(self.best_objective_bound)
+                         if self._has_objective
+                         else None
+                     ),
+                 )))
+
+         solver = cp_model.CpSolver()
+         solver.parameters.random_seed = int(
+             os.environ.get("OPENCONSTRAINT_MCP_CPSAT_SEED", "42")
+         )
+         solver.parameters.num_workers = 1
+         names = [item.name for item in instance.items]
+         status_code = solver.solve(model, _Best(names, take, model.has_objective()))
+
+         status_map = {{
+             cp_model.OPTIMAL: "optimal",
+             cp_model.FEASIBLE: "feasible",
+             cp_model.INFEASIBLE: "infeasible",
+             cp_model.UNKNOWN: "unknown",
+         }}
+         has_solution = status_code in (cp_model.OPTIMAL, cp_model.FEASIBLE)
+         bound_states = (cp_model.OPTIMAL, cp_model.FEASIBLE, cp_model.UNKNOWN)
+         return Solution(
+             status=status_map.get(status_code, "error"),
+             selected=(
+                 [item.name for item, v in pairs if solver.value(v)]
+                 if has_solution
+                 else None
+             ),
+             objective=(
+                 float(solver.objective_value)
+                 if model.has_objective() and has_solution
+                 else None
+             ),
+             best_objective_bound=(
+                 float(solver.best_objective_bound)
+                 if model.has_objective() and status_code in bound_states
+                 else None
+             ),
+         )
      ```
      Pass `model.has_objective()` into the callback so the same
      `0.0`-vs-`null` guard applies there too — a feasibility problem's
@@ -520,6 +723,8 @@ User problem:
      child process and does not sandbox it.
 
 """
+    + CPSAT_SCRIPT_STRUCTURE_GUIDANCE
+    + "\n"
     + CPSAT_OUTPUT_CONTRACT_GUIDANCE
     + """
 4. Call `run_cpsat_python(source=<complete script>,
@@ -827,7 +1032,8 @@ Boundaries:
 """
 )
 
-AUTO_TUNE_CONSTRAINT_PROBLEM_PROMPT = """\
+AUTO_TUNE_CONSTRAINT_PROBLEM_PROMPT = (
+    """\
 You are the MCP client's reasoning model. Compare several MiniZinc and/or
 OR-Tools CP-SAT formulations, then present one full-instance result.
 
@@ -894,6 +1100,17 @@ save-tool provenance.
      network access, no file writes or deletes, and no subprocesses unless the
      user explicitly requested it.
 
+"""
+    # Spliced at TOP LEVEL between steps 3 and 4, verbatim and unindented: this
+    # prompt drafts CP-SAT candidates in step 3 and REWRITES them per tier in
+    # steps 6 and 11, so every one of those rewrites needs the same layout and
+    # the same stdout envelope the other two CP-SAT routes teach. The full
+    # output-contract variant is correct here because this prompt registers in
+    # the full profile only.
+    + CPSAT_SCRIPT_STRUCTURE_GUIDANCE
+    + "\n"
+    + CPSAT_OUTPUT_CONTRACT_GUIDANCE
+    + """
 4. Create a tiny smoke instance and use it ONLY to reject structurally broken
    candidates: `inspect_minizinc_model` then `check_minizinc_model` for each
    MiniZinc candidate, and one short `run_cpsat_python` per CP-SAT candidate.
@@ -1115,3 +1332,4 @@ Boundaries: openconstraint-mcp calls no LLM, runs no agent loop, and makes no
 hidden network calls. Solving stays local; CP-SAT children are unsandboxed, so
 generate no network or file-mutating code unless the user explicitly asks.
 """
+)

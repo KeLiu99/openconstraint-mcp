@@ -2,11 +2,14 @@ from __future__ import annotations
 
 import json
 import sys
+from collections.abc import Callable
+from contextlib import AbstractAsyncContextManager
 from importlib import metadata
 from pathlib import Path
 from typing import Any
 
 import pytest
+from mcp.server.mcpserver import MCPServer
 from pydantic import ValidationError
 
 from openconstraint_mcp.jobs.registry import JobRegistry
@@ -34,7 +37,7 @@ from openconstraint_mcp.shared.childproc import ChildProcessTracker
 from openconstraint_mcp.shared.proc import popen_process_group
 
 
-def _boot_lifespan() -> object:
+def _boot_lifespan() -> Callable[[MCPServer[Any]], AbstractAsyncContextManager[None]]:
     """A wired lifespan over fresh server-owned registries (boot tests)."""
     return _make_lifespan(JobRegistry(), CpsatJobRegistry(), ChildProcessTracker())
 
@@ -558,6 +561,33 @@ async def test_run_cpsat_python_advertises_the_required_envelope_vocabulary(tool
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("tool_name", ["run_cpsat_python", "run_cpsat_python_file"])
+async def test_full_cpsat_tool_description_states_the_no_stdin_rule(tool_name: str) -> None:
+    # The missing stdin is a property of the child these very tools create, and
+    # `tools/list` is the payload no client truncates at 512 bytes — so the one
+    # rule whose loss is a failed run rather than an unlovely script gets a
+    # second, durable home beside the server instructions' copy.
+    tools = await _tools_by_name("full")
+    description = tools[tool_name].description or ""
+
+    assert "NO stdin" in description
+    assert "`input()`" in description
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("tool_name", ["run_cpsat_python", "run_cpsat_python_file"])
+async def test_core_cpsat_tool_description_omits_the_no_stdin_rule(tool_name: str) -> None:
+    # Pins the profile split deliberately: core metadata has ~260 bytes of
+    # headroom, which two copies of this sentence would consume exactly. Moving
+    # it into a shared description fragment must fail HERE, loudly, rather than
+    # silently eating core's last bytes.
+    tools = await _tools_by_name("core")
+    description = tools[tool_name].description or ""
+
+    assert "stdin" not in description
+
+
+@pytest.mark.asyncio
 async def test_core_metadata_is_within_budget() -> None:
     tools = await create_mcp_server("core").list_tools()
     total = len(_serialize_tools(tools).encode("utf-8"))
@@ -716,6 +746,36 @@ def test_core_instructions_are_within_budget() -> None:
     )
 
 
+def test_core_instructions_carry_the_no_stdin_rule() -> None:
+    # `_CPSAT_NO_STDIN_FULL` is deliberately full-only on the tool descriptions
+    # (it fans out to two tools, and core metadata has no headroom), so these
+    # instructions are the ONLY channel that reaches a core client which does
+    # not use prompts. A script that reads stdin fails the entire run.
+    normalized = " ".join(MCP_SERVER_INSTRUCTIONS_CORE.split())
+
+    assert "NO stdin" in normalized
+    assert "never call `input()` or read `sys.stdin`" in normalized
+
+
+def test_core_instructions_state_what_the_solution_object_must_carry() -> None:
+    # `_CPSAT_JSON_CONTRACT` carries the TYPE contract to both profiles and
+    # delegates the SEMANTIC requirement to the prompts and these instructions
+    # — so core must state it, or a prompt-less core client is told the shape
+    # of `solution` and never what belongs in it.
+    normalized = " ".join(MCP_SERVER_INSTRUCTIONS_CORE.split())
+
+    assert "must carry the COMPLETE answer" in normalized
+    assert "never prose or a file path" in normalized
+
+
+def test_core_instructions_route_a_missing_runtime_to_install_or_cpsat() -> None:
+    normalized = " ".join(MCP_SERVER_INSTRUCTIONS_CORE.split())
+
+    assert "check_runtime" in normalized
+    assert "`openconstraint-mcp install-runtime`" in normalized
+    assert "use CP-SAT, which needs none" in normalized
+
+
 def test_full_instructions_lead_with_routing_then_posture() -> None:
     # POSTURE (the safety disclosure) must be paragraph two in the full
     # profile, so it survives truncation alongside the routing paragraph.
@@ -727,6 +787,77 @@ def test_full_instructions_lead_with_routing_then_posture() -> None:
         f"full instructions head is {head_bytes} bytes, over the "
         f"{TRUNCATION_HEAD_BUDGET_BYTES} truncation-head budget"
     )
+
+
+def _full_instructions_cpsat_bullet() -> str:
+    """The `WITHOUT PROMPTS:` CP-SAT bullet of the FULL server instructions.
+
+    The script-layout rules are asserted against this bullet rather than the
+    whole string, so none of them can be satisfied by unrelated prose elsewhere
+    in the instructions.
+    """
+    (bullet,) = [
+        line for line in MCP_SERVER_INSTRUCTIONS.splitlines() if line.startswith("- CP-SAT:")
+    ]
+    return bullet
+
+
+def test_full_instructions_cpsat_bullet_forbids_reading_stdin() -> None:
+    # `read_input` is a name that INVITES reading stdin, while the child is
+    # launched with stdin=DEVNULL: a script that calls `input()` gets an
+    # immediate EOF, prints no envelope, and the run comes back as an error. The
+    # bullet must also never offer an input source its named tool cannot supply:
+    # naming the file tool is not enough, because run_cpsat_python_file only
+    # supplies a data file when `args` carries it, and the inline tool only when
+    # the instance is embedded in the script.
+    bullet = _full_instructions_cpsat_bullet()
+
+    assert "stdin" in bullet
+    assert "never call `input()`" in bullet
+    if "sys.argv" in bullet or "data file" in bullet:
+        assert "run_cpsat_python_file" in bullet
+        assert "args=[" in bullet
+        assert "embed the instance in the script" in bullet
+
+
+def test_full_instructions_cpsat_bullet_names_its_verification_surface() -> None:
+    # The MiniZinc bullet has always named its checker surface; the CP-SAT
+    # bullet must name its own, or "LLM proposes, server verifies" reaches the
+    # client for one backend only — and the experiment tool is otherwise
+    # reachable only through a prompt, which the WITHOUT PROMPTS path lacks.
+    bullet = _full_instructions_cpsat_bullet()
+
+    assert "run_cpsat_python_file_checked" in bullet
+    assert "run_cpsat_python_experiment" in bullet
+
+
+def test_full_instructions_cpsat_bullet_states_the_typed_solve_boundary() -> None:
+    # The spine names alone are satisfied by a pass-through pipeline of untyped
+    # dicts, which is not the convention: a typed record has to cross `solve` in
+    # both directions.
+    bullet = _full_instructions_cpsat_bullet()
+
+    assert "`parse_input` hands `solve` a typed instance record" in bullet
+    assert "`solve` hands `serialize_solution` a typed solution record" in bullet
+
+
+def test_full_instructions_cpsat_bullet_names_the_spine_in_order() -> None:
+    # The layout is an ORDER, not a set of names, so assert ascending positions
+    # rather than membership.
+    bullet = _full_instructions_cpsat_bullet()
+
+    positions = [
+        bullet.index(f"`{name}`")
+        for name in (
+            "read_input",
+            "parse_input",
+            "solve",
+            "serialize_solution",
+            "write_output",
+            "main",
+        )
+    ]
+    assert positions == sorted(positions)
 
 
 async def _forbidden_full_only_names() -> set[str]:
