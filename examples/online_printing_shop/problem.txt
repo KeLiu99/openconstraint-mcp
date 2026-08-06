@@ -1,122 +1,196 @@
-Online printing shop scheduling (OPS) — sequence-flexible FJSP core.
+Online printing shop scheduling (OPS).
 
 Problem
 -------
 
-The published online printing shop scheduling (OPS) problem is a real industrial
-extension of the flexible job shop scheduling problem (FJSP). Here, "online"
-refers to print orders placed through an online shop; it does not mean an online
-algorithm that must commit to decisions as jobs arrive.
+The OPS problem defined by Lunardi et al. is a real industrial extension of
+flexible job shop scheduling. Here, "online" describes orders placed through an
+online print shop. It does not mean dynamic or online scheduling in which a
+solver must commit to decisions before future jobs are known.
 
-As in the flexible job shop problem in ../flexible_job_shop, every operation has
-one or more eligible machine alternatives, and each alternative specifies a
-machine and the processing duration on that machine.
+Before scheduling, a cutting-stock decision may gang printing operations from
+several customer orders onto one sheet. The orders joined by that ganging
+operation then form one scheduling job. The OPS scheduling model receives this
+job structure as input; it does not decide which orders to gang.
 
-The first defining extension is sequence flexibility. A job is not necessarily
-a single fixed sequence of operations. Instead, its precedence constraints form
-a directed acyclic graph (DAG). This allows independent branches to run in
-parallel and later split or join. For example, a ganged printing operation may
-be followed by cutting and then split into several independent product routes;
-book covers and pages may also be produced in parallel before binding.
+A job contains mandatory operations linked by an arbitrary directed acyclic
+graph (DAG). Different jobs have no precedence edges between them. Once all job
+DAGs have been combined, jobs are only a grouping concept and their number does
+not otherwise enter the paper's formulation. The DAG gives sequence
+flexibility: unrelated branches may run in parallel when machine capacity
+permits, and branches may split or join. It does not provide alternative
+process plans or make operations optional.
 
-This initial example implements the smallest useful OPS core:
+For every operation i, the input gives:
 
-- choose exactly one eligible machine alternative for every operation;
-- preserve every precedence edge in each job's DAG;
-- prevent operations assigned to the same machine from overlapping;
-- run each operation without interruption in this initial model; and
-- minimize makespan, i.e. the completion time of the last operation.
+- a non-empty set F(i) of eligible machines and a processing time p(i,k) for
+  every k in F(i);
+- an operation-level release time r(i);
+- a fraction theta(i) in (0, 1] that controls partial overlap with every direct
+  successor; and
+- for a fixed operation, a preassigned machine and starting time. In the
+  paper, the machine assignment is represented by making F(i) a singleton.
+
+For every machine, the input also gives planned unavailability periods, the
+setup time for each possible first operation, and directional setup times
+between consecutive operations. Processing and setup times may therefore
+depend on the selected machine and, for setup, on the machine sequence.
+
+A feasible schedule must:
+
+- assign every operation to exactly one eligible machine;
+- start every operation no earlier than its release time and preserve every
+  fixed machine and starting-time assignment;
+- let each machine handle at most one operation or setup at a time;
+- for every precedence edge (i,j), start j only after i has completed
+  ceil(theta(i) * p(i,k)) units of actual processing on its selected machine k,
+  and also ensure that j does not complete before i;
+- under the paper's endpoint convention, never start an operation at the
+  beginning or in the interior of an unavailability period, and never complete
+  it in the interior or at the end of one. Completion at the beginning and
+  starting at the end of an unavailability period are allowed;
+- allow processing to stop only during a planned unavailability of its assigned
+  machine, keep the operation on that machine, and resume it as soon as the
+  machine is available again; and
+- keep every setup wholly outside machine-unavailability periods, run it without
+  interruption, and finish it exactly when its associated operation starts,
+  with no idle time between them.
+
+Thus "resumable" is not general preemption: the scheduler cannot pause an
+operation voluntarily, move it to another machine, or insert another operation
+before it resumes. The paper assumes rational time data and scales it to
+integers in the formulations.
 
 Objective
 ---------
 
-The objective is to minimize makespan:
+The paper minimizes makespan, the latest operation completion time:
 
-    minimize  max over operations i of completion_i
+    minimize  Cmax = max over operations i of completion(i)
 
-This matches the objective studied by Lunardi et al. The published formulation
-does not use due dates, priorities, or total weighted tardiness as its objective.
-A due-date or weighted-tardiness FJSP variant may be useful as a separate
-example, but it should not be presented as the OPS formulation from that paper.
+Due dates, priorities, and total weighted tardiness are not part of this OPS
+formulation. Workers, tools, materials, transport, and process-plan alternatives
+are also outside its formal resource model.
 
-Relation to the flexible job shop example
-------------------------------------------
+Where the optimization comes from
+---------------------------------
 
-This is the smallest structural increment on top of ../flexible_job_shop:
+The instance data are fixed, but the schedule is not. The main optimization
+choices are:
 
-- the machine-alternative structure is unchanged (routing flexibility);
-- the linear operation sequence of each job is replaced by an arbitrary DAG
-  (sequence flexibility); and
-- the objective remains makespan minimization.
+- machine assignment: an operation with several eligible machines may have a
+  different processing time, setup, and calendar on each one;
+- machine sequence: operations assigned to the same machine must be ordered,
+  and different orders can change directional setup times and delay different
+  downstream branches; and
+- timing: the solver chooses feasible start times around release times, fixed
+  operations, precedence, partial overlap, setup, and machine unavailability.
 
-A classical FJSP job such as
+These choices interact. In the teaching instance below, assigning O2 to P1
+allows the shown makespan of 13, while assigning it to P2 cannot produce a
+makespan below 14. P1 processes O2 faster, but using it also requires waiting
+for fixed operation O1, performing setup, and crossing an unavailable period.
+The solver must compare the complete schedules, not just the raw processing
+times.
 
-    print -> cut -> bind
+A fixed operation removes only its own machine and start-time choices. Other
+operations may still choose machines, compete for capacity, and be sequenced.
+Even if every eligible-machine set is a singleton, machine-order choices can
+still make this a scheduling optimization problem. Conversely, if every machine
+assignment, machine sequence, and start time is predetermined, there is no
+remaining optimization: one only checks feasibility and computes the makespan.
+With assignments and sequences fixed but start times open, most of the remaining
+work is deriving an earliest feasible schedule.
 
-is therefore a special case. An OPS-style job may instead contain parallel,
-splitting, and joining branches, for example:
+Examples in the paper
+---------------------
 
-    cover_print -----> cover_finish --+
-                                      +--> bind
-    page_print ------> page_fold -----+
+Figure 1a shows a ganged printing operation followed by cutting and a split
+into three independent product routes. Figure 1b shows a simplified book: one
+branch produces the cover (operations 1 and 3), another produces the pages
+(operations 2 and 4), and both join at binding (operation 5), followed by two
+unnamed downstream operations:
 
-Scope: grow one layer at a time
---------------------------------
+    cover:  O1 -> O3 --+
+                       +--> O5 -> O6 -> O7
+    pages:  O2 -> O4 --+
 
-The full OPS problem in the cited publication contains several additional
-features. They are deliberately deferred from the first model so that each new
-model adds one independently testable layer:
+Figure 2 shows a toy Gantt chart with 7 jobs and 9 machines and visually marks
+release times, a fixed operation, partial overlap, setup, and machine
+unavailability. The paper does not give a compact table containing all input
+values for that chart, so it cannot be reconstructed as a complete numerical
+teaching instance from the article alone.
 
-- release times for individual operations;
-- sequence-dependent setup times;
-- planned machine-unavailability periods;
-- resumable processing across machine-unavailability periods (not arbitrary
-  preemption: the operation remains assigned to the same machine and resumes as
-  soon as that machine becomes available);
-- fixed operations with preassigned machine and starting time; and
-- partial overlap between operations connected by a precedence edge.
+Small paper-inspired teaching instance
+---------------------------------------
 
-When release times are added, each operation must not start before its own
-release time; this is a start-time lower bound to enforce, not just extra
-data to carry alongside the operation.
+The following instance keeps the book topology through binding (O1--O5) from
+Figure 1b and adds small synthetic integer values. O6 and O7 are omitted because
+the paper does not name them and a linear tail adds no new scheduling behavior.
+The numbers below are teaching data, not benchmark data copied from the paper.
 
-When setup times and machine calendars are added, the full paper also requires
-setups to be non-interruptible and to finish immediately before the associated
-operation starts.
+Machines are two printers P1 and P2, one finisher F, and one binder B:
 
-The publication explains ganging as an upstream cutting-stock decision that
-merges printing operations from several customer orders. The resulting merged
-structure is then given to the scheduling problem as a job; this initial example
-does not optimize the cutting-stock or ganging decision itself.
+    op  role          predecessors  eligible machine: processing time  release  theta
+    O1  cover print   none          P1: 3                              0        1.0
+    O2  page print    none          P1: 5, P2: 10                      2        0.4
+    O3  cover finish  O1            F: 2                               0        1.0
+    O4  page fold     O2            F: 5                               0        1.0
+    O5  bind          O3, O4        B: 2                               0        1.0
 
-Possible extensions such as due dates, weighted tardiness, operators, tools,
-secondary resources, or alternative process plans may be valuable, but they are
-beyond the formal OPS problem defined in the cited paper and should be labelled
-separately rather than attributed to it.
+O1 is fixed on P1 at time 0. P1 is unavailable from time 6 up to time 8;
+the other machines are always available. On P1, the first setup for O1 is 0,
+the setup from O1 to O2 is 1, and the reverse setup from O2 to O1 would be 3.
+All other first and transition setup times are 0. The unequal directional
+values illustrate that setup depends on the machine sequence.
+
+One feasible schedule chooses P1 for O2:
+
+    P1: O1 process [0,3); O2 setup [3,4);
+        O2 process [4,6), suspend [6,8), resume and process [8,11)
+    F:  O3 process [3,5); O4 process [6,11)
+    B:  O5 process [11,13)
+    P2: unused
+
+This single schedule exercises the important semantics:
+
+- O2 respects release time 2 and receives one uninterrupted setup immediately
+  before processing.
+- O2 performs 5 units of work although its elapsed span is 7 units. It remains
+  on P1 during the planned stop and resumes immediately at time 8.
+- Because ceil(0.4 * 5) = 2, O4 may start at time 6 after O2 has performed two
+  units of work. O4 completes at time 11, not before O2, so both parts of the
+  paper's partial-overlap precedence rule hold.
+- O3 and O4 do not overlap on F, and binding waits for both branches.
+
+The makespan is 13. It is optimal for these teaching values: assigning O2 to P1
+cannot complete it before time 11 because of O1, setup, and unavailability;
+assigning it to P2 cannot complete it before time 12. O4 cannot complete before
+O2, and O5 then needs 2 more time units.
+
+A model that instead sets every theta to 1, every release time and setup to 0,
+and has no fixed operations or unavailable periods is a useful DAG-FJSP teaching
+subset. It should be labelled as a simplified subset, not as the full OPS
+problem defined in the paper.
 
 Sourcing and provenance
-------------------------
-
-The online printing shop scheduling problem is a documented real industrial
-problem, not an invented benchmark:
+-----------------------
 
 - Lunardi, Birgin, Laborie, Ronconi, and Voos, "Mixed Integer Linear
   Programming and Constraint Programming Models for the Online Printing Shop
-  Scheduling Problem," Computers & Operations Research, 2020:
+  Scheduling Problem," Computers & Operations Research 123 (2020), 105020:
   https://doi.org/10.1016/j.cor.2020.105020
-  Preprint:
+  Open preprint (v2):
   https://arxiv.org/abs/2006.13064
 
 - Authors' model and instance repository:
   https://github.com/Willtl/online-printing-shop
 
-The repository homepage does not clearly state a license for the benchmark data.
-Until a license is confirmed, do not copy its instances verbatim into this
-directory. Any data file added under examples/online_printing_shop/ must either
-be explicitly marked synthetic and kept small, or carry a confirmed license and
-attribution, matching the provenance discipline already used for the
-fjsp-instances data in ../flexible_job_shop (see
-../../LICENSES/fjsp-instances.txt).
+The repository homepage does not state a license for its benchmark data. Until
+a license is confirmed, do not copy those instances into this directory. Any
+future data file here must either be explicitly marked synthetic and kept small,
+or carry a confirmed license and attribution, matching the provenance practice
+for ../flexible_job_shop and ../../LICENSES/fjsp-instances.txt.
 
-No model or data file exists yet in this directory; this problem.txt is the
-first step.
+No model or data file exists yet in this directory; problem.txt is currently
+the complete example artifact.
