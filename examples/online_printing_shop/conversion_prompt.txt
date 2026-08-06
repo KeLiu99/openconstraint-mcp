@@ -1,0 +1,36 @@
+Convert one Willtl Online Printing Shop instance to this repository's canonical
+openconstraint.ops.instance JSON format.
+
+Work from the repository root and follow AGENTS.md. Run `just --list` before
+other project commands.
+
+Inputs:
+
+- Upstream URL: <UPSTREAM_GITHUB_URL>
+- Local upstream checkout file: <UPSTREAM_JSON>
+- Output file: <OUTPUT_JSON>
+
+Create exactly <OUTPUT_JSON>.
+
+First inspect the existing data_*.json files in
+examples/online_printing_shop, plus models.py and audit_instance.py, to learn
+the existing conversion. Reuse the exact mapping and formatting; do not add a
+converter, abstraction, or unrelated changes. Preserve all existing
+working-tree changes.
+
+Requirements:
+
+- Pin the provenance URL to the resolved upstream commit, not a branch name.
+- Keep `license` as `NOASSERTION`.
+- Preserve all IDs, jobs, precedence, machine options/times, releases,
+  overlap, fixed operations, availability gaps, and calculated directional
+  setup times.
+- Preserve source ordering, two-space JSON indentation, and the trailing
+  newline used by the existing instances.
+- Verify the conversion with:
+
+  uv run python -m examples.online_printing_shop.audit_instance \
+    <UPSTREAM_JSON> \
+    <OUTPUT_JSON>
+
+Run `just check` after the audit passes.

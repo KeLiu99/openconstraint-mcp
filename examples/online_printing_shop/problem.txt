@@ -86,13 +86,6 @@ choices are:
 - timing: the solver chooses feasible start times around release times, fixed
   operations, precedence, partial overlap, setup, and machine unavailability.
 
-These choices interact. In the teaching instance below, assigning O2 to P1
-allows the shown makespan of 13, while assigning it to P2 cannot produce a
-makespan below 14. P1 processes O2 faster, but using it also requires waiting
-for fixed operation O1, performing setup, and crossing an unavailable period.
-The solver must compare the complete schedules, not just the raw processing
-times.
-
 A fixed operation removes only its own machine and start-time choices. Other
 operations may still choose machines, compete for capacity, and be sequenced.
 Even if every eligible-machine set is a singleton, machine-order choices can
@@ -121,58 +114,6 @@ unavailability. The paper does not give a compact table containing all input
 values for that chart, so it cannot be reconstructed as a complete numerical
 teaching instance from the article alone.
 
-Small paper-inspired teaching instance
----------------------------------------
-
-The following instance keeps the book topology through binding (O1--O5) from
-Figure 1b and adds small synthetic integer values. O6 and O7 are omitted because
-the paper does not name them and a linear tail adds no new scheduling behavior.
-The numbers below are teaching data, not benchmark data copied from the paper.
-
-Machines are two printers P1 and P2, one finisher F, and one binder B:
-
-    op  role          predecessors  eligible machine: processing time  release  theta
-    O1  cover print   none          P1: 3                              0        1.0
-    O2  page print    none          P1: 5, P2: 10                      2        0.4
-    O3  cover finish  O1            F: 2                               0        1.0
-    O4  page fold     O2            F: 5                               0        1.0
-    O5  bind          O3, O4        B: 2                               0        1.0
-
-O1 is fixed on P1 at time 0. P1 is unavailable from time 6 up to time 8;
-the other machines are always available. On P1, the first setup for O1 is 0,
-the setup from O1 to O2 is 1, and the reverse setup from O2 to O1 would be 3.
-All other first and transition setup times are 0. The unequal directional
-values illustrate that setup depends on the machine sequence.
-
-One feasible schedule chooses P1 for O2:
-
-    P1: O1 process [0,3); O2 setup [3,4);
-        O2 process [4,6), suspend [6,8), resume and process [8,11)
-    F:  O3 process [3,5); O4 process [6,11)
-    B:  O5 process [11,13)
-    P2: unused
-
-This single schedule exercises the important semantics:
-
-- O2 respects release time 2 and receives one uninterrupted setup immediately
-  before processing.
-- O2 performs 5 units of work although its elapsed span is 7 units. It remains
-  on P1 during the planned stop and resumes immediately at time 8.
-- Because ceil(0.4 * 5) = 2, O4 may start at time 6 after O2 has performed two
-  units of work. O4 completes at time 11, not before O2, so both parts of the
-  paper's partial-overlap precedence rule hold.
-- O3 and O4 do not overlap on F, and binding waits for both branches.
-
-The makespan is 13. It is optimal for these teaching values: assigning O2 to P1
-cannot complete it before time 11 because of O1, setup, and unavailability;
-assigning it to P2 cannot complete it before time 12. O4 cannot complete before
-O2, and O5 then needs 2 more time units.
-
-A model that instead sets every theta to 1, every release time and setup to 0,
-and has no fixed operations or unavailable periods is a useful DAG-FJSP teaching
-subset. It should be labelled as a simplified subset, not as the full OPS
-problem defined in the paper.
-
 Sourcing and provenance
 -----------------------
 
@@ -188,9 +129,130 @@ Sourcing and provenance
 
 The repository homepage does not state a license for its benchmark data. Until
 a license is confirmed, do not copy those instances into this directory. Any
-future data file here must either be explicitly marked synthetic and kept small,
-or carry a confirmed license and attribution, matching the provenance practice
-for ../flexible_job_shop and ../../LICENSES/fjsp-instances.txt.
+future benchmark data file here must carry a confirmed license and attribution,
+matching the provenance practice for ../flexible_job_shop and
+../../LICENSES/fjsp-instances.txt.
 
-No model or data file exists yet in this directory; problem.txt is currently
-the complete example artifact.
+Canonical data contract
+-----------------------
+
+models.py is the canonical Pydantic v2 contract and semantic validator.
+data_sops1.json is one complete, standalone OPS input object; a future solver can
+pass its parsed contents directly to parse_input() without an envelope or a
+legacy-format conversion step. The file does not contain a schedule, known
+optimum, or configurable objective. OPS always minimizes makespan, and results
+belong in a separate solver output.
+
+All identifiers are nonempty strings. JSON object keys provide machine and
+operation identity, so their order has no scheduling meaning. All time values
+are nonnegative integer ticks. Unknown fields are rejected.
+
+Top-level fields
+~~~~~~~~~~~~~~~~
+
+format
+    The constant "openconstraint.ops.instance". It distinguishes this contract
+    from other problem formats.
+
+format_version
+    The contract version, currently "1.0".
+
+provenance
+    Human-readable source and license status. In data_sops1.json, source pins
+    upstream instances/small/sops1.json to commit
+    31918bc04e4ad93c2106168d6cf0b393271799e7. NOASSERTION means that no license
+    has been established; it is not a license grant.
+
+machines
+    A map from machine ID to its calendar and explicit setup-time data.
+
+operations
+    A map from globally unique operation ID to the operation's job membership,
+    precedence successors, machine choices, timing data, and optional fixed
+    assignment.
+
+There is no separate jobs map. The job field on each operation is the single
+source of job membership, and successors are required to stay within that job.
+The job labels group operations; they do not impose an array order.
+
+Machine objects
+~~~~~~~~~~~~~~~
+
+unavailability
+    An ordered list of nonoverlapping {start, end} machine outages. For example,
+    machine "1" is unavailable from tick 176 until tick 221. Processing may
+    finish at 176 or start at 221, but may not start at 176 or finish at 221.
+    Processing pauses across an outage and resumes on the same machine; setup
+    may not overlap an outage.
+
+setup_times.first
+    A complete map from every operation eligible for this machine to the setup
+    duration required when that operation is first in the machine sequence.
+    For example, machines "1", "2", and "3" have first-operation setup
+    durations 15, 9, and 16 respectively in data_sops1.json.
+
+setup_times.transitions
+    A complete directional matrix for distinct eligible operations. Entry
+    transitions["1"]["4"] is the setup duration when operation "1" is followed
+    immediately by operation "4" on this machine. The reverse entry is separate
+    and may differ. A setup occupies the machine, runs without interruption,
+    and ends exactly when the target operation begins. Self-transitions are
+    omitted because an operation executes only once.
+
+The setup durations are already materialized. A solver does not need the
+upstream size, color, varnish, or machine setup coefficients used to derive
+them.
+
+Operation objects
+~~~~~~~~~~~~~~~~~
+
+job
+    The operation's job ID. For example, operations "1" through "5" carry job
+    "1". This membership does not order them.
+
+successors
+    The IDs of direct successors in the job DAG. Array order is irrelevant.
+    Operation "1" has successors "4" and "5", which means edges 1 -> 4 and
+    1 -> 5; it does not mean that operation "4" precedes operation "5".
+
+machine_options
+    A nonempty map from each eligible machine ID to its machine-dependent
+    processing_time. Exactly one option must be selected. For operation "1",
+    machine "2" takes 50 ticks, machine "1" takes 49, and machine "3" takes 22.
+    Processing time is active work only; setup and outage delays are separate.
+
+release_time
+    The earliest tick at which processing may start. Setup may occur before the
+    release time as long as processing itself does not start early.
+
+theta
+    A number in (0, 1]. A direct successor may start after the operation has
+    completed ceil(theta * processing_time) ticks of actual processing on its
+    selected machine. The successor also may not finish before this operation.
+
+fixed
+    Optional {machine, start}. When present, the operation must use that eligible
+    machine and start processing at that tick. Its start must not precede its
+    release time. Absence means that machine and start are solver decisions.
+
+Semantic validation
+~~~~~~~~~~~~~~~~~~~
+
+parse_input() rejects an instance when:
+
+- a successor or machine reference is missing;
+- a successor belongs to another job;
+- the precedence graph contains a cycle;
+- a fixed machine is not one of the operation's machine_options;
+- a fixed start precedes release_time;
+- an unavailability interval is empty, reversed, out of order, or overlapping;
+  or
+- a machine's first or directional setup entries do not exactly cover the
+  operations eligible for that machine.
+
+data_sops1.json converts the user-provided contents of the pinned upstream
+sops1 instance. Machine and operation IDs are the upstream numeric IDs written
+as JSON strings. Resource/time pairings, job membership, precedence, release
+times, overlaps, the fixed start, availability gaps, and calculated setup times
+are preserved. The legacy Willtl structure and a converter for it are outside
+this example's contract.
