@@ -133,15 +133,25 @@ future benchmark data file here must carry a confirmed license and attribution,
 matching the provenance practice for ../flexible_job_shop and
 ../../LICENSES/fjsp-instances.txt.
 
-Canonical data contract
------------------------
+Canonical data contract and solver
+----------------------------------
 
-models.py is the canonical Pydantic v2 contract and semantic validator.
-data_sops1.json is one complete, standalone OPS input object; a future solver can
-pass its parsed contents directly to parse_input() without an envelope or a
-legacy-format conversion step. The file does not contain a schedule, known
-optimum, or configurable objective. OPS always minimizes makespan, and results
-belong in a separate solver output.
+models.py is the canonical Pydantic v2 contract, semantic validator, and CP-SAT
+solver. It follows the read_input/parse_input/solve/serialize_solution/
+write_output spine, reads a sibling JSON filename from argv (defaulting to
+data_sops1.json), and prints the complete solution in-band on stdout. checker.py
+generically verifies those emitted schedules against the supplied OPS instance.
+The data file contains no schedule, known optimum, or configurable objective:
+OPS always minimizes makespan, and solver results remain separate from the
+input.
+
+Run the default instance from the repository root with:
+
+    uv run python examples/online_printing_shop/models.py
+
+Pass another sibling instance as argv, for example:
+
+    uv run python examples/online_printing_shop/models.py data_mops1.json
 
 All identifiers are nonempty strings. JSON object keys provide machine and
 operation identity, so their order has no scheduling meaning. All time values

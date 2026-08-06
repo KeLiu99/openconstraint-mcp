@@ -1,3 +1,4 @@
+import json
 from pathlib import Path
 from typing import Any
 
@@ -5,7 +6,8 @@ import pytest
 from pydantic import ValidationError
 
 from examples.online_printing_shop.audit_instance import audit_instance
-from examples.online_printing_shop.models import parse_input, read_input
+from examples.online_printing_shop.models import parse_input, read_input, solve
+from openconstraint_mcp.server import create_mcp_server
 
 ROOT = Path(__file__).parents[2]
 EXAMPLE_DIR = ROOT / "examples" / "online_printing_shop"
@@ -22,6 +24,12 @@ def test_sops1_instance_passes_semantic_validation_without_normalization() -> No
     validated = parse_input(raw)
 
     assert validated.model_dump(mode="json", exclude_none=True) == raw
+
+
+def test_sops1_model_proves_the_known_optimum() -> None:
+    result = solve(parse_input(load_instance()))
+
+    assert (result.status, result.objective) == ("optimal", 274)
 
 
 def test_missing_successor_reference_is_rejected() -> None:
@@ -122,3 +130,36 @@ def test_legacy_instance_audit_accepts_complete_materialization() -> None:
     }
 
     assert audit_instance(upstream, local) == []
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_sops1_model_and_checker_reach_the_known_optimum_through_mcp() -> None:
+    mcp = create_mcp_server("full")
+
+    call_result = await mcp.call_tool(
+        "run_cpsat_python_file_checked",
+        {
+            "script_path": str(EXAMPLE_DIR / "models.py"),
+            "checker_path": str(EXAMPLE_DIR / "checker.py"),
+            "args": ["data_sops1.json"],
+            "problem": "data_sops1.json",
+            "timeout_ms": 30_000,
+            "test_checker": True,
+        },
+    )
+    assert call_result.structured_content is not None
+    result: dict[str, Any] = call_result.structured_content
+
+    assert result["status"] == "optimal"
+    assert result["objective"] == 274
+    assert result["checker"]["status"] == "accepted", result["checker"]["errors"]
+    assert result["checker_test"]["rejected_count"] == 4
+    assert result["checker_test"]["accepted_count"] == 0
+
+    payload = json.loads(result["stdout"].strip().splitlines()[-1])
+    assert payload.keys() == {"status", "objective", "solution", "best_objective_bound"}
+    schedule = payload["solution"]["schedule"]
+    assert {entry["operation"] for entry in schedule} == set(load_instance()["operations"])
+    fixed = next(entry for entry in schedule if entry["operation"] == "6")
+    assert (fixed["machine"], fixed["start"]) == ("1", 79)
