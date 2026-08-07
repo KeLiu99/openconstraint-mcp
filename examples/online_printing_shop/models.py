@@ -14,9 +14,6 @@ from typing import Annotated, Any, Literal, Self
 from ortools.sat.python import cp_model
 from pydantic import BaseModel, ConfigDict, Field, StringConstraints, model_validator
 
-FORMAT_NAME = "openconstraint.ops.instance"
-FORMAT_VERSION = "1.0"
-
 Identifier = Annotated[str, StringConstraints(min_length=1)]
 TimeTick = Annotated[int, Field(ge=0)]
 Theta = Annotated[float, Field(gt=0, le=1)]
@@ -107,8 +104,8 @@ class Operation(ClosedModel):
 class OPSInstance(ClosedModel):
     """Versioned, solver-ready Online Printing Shop problem instance."""
 
-    format: Literal[FORMAT_NAME]
-    format_version: Literal[FORMAT_VERSION]
+    format: Literal["openconstraint.ops.instance"]
+    format_version: Literal["1.0"]
     provenance: Provenance
     machines: Annotated[dict[Identifier, Machine], Field(min_length=1)]
     operations: Annotated[dict[Identifier, Operation], Field(min_length=1)]
@@ -475,7 +472,9 @@ def solve(instance: OPSInstance) -> Solution:
     solver.parameters.random_seed = int(os.environ.get("OPENCONSTRAINT_MCP_CPSAT_SEED", "42"))
     solver.parameters.num_workers = 1
     status_code = solver.solve(model, _BestSolution())
-    status_map = {
+    status_map: dict[
+        cp_model.CpSolverStatus, Literal["optimal", "feasible", "infeasible", "unknown", "error"]
+    ] = {
         cp_model.OPTIMAL: "optimal",
         cp_model.FEASIBLE: "feasible",
         cp_model.INFEASIBLE: "infeasible",
