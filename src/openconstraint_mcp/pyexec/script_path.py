@@ -1,4 +1,4 @@
-"""Caller-supplied script path and child-argv validation for the CP-SAT path.
+"""Python source writing, script-path validation, and child-argv validation.
 
 Stdlib-only leaf: imports nothing from this project, so both the orchestrator
 (``core.py``, validating ``script_path``) and the checker leaf (``checker.py``,
@@ -30,6 +30,11 @@ from pathlib import Path
 # environment, none of which this function is given. It shrinks the spawn-failure
 # window to inputs no legitimate caller sends; it does not close it.
 MAX_CHILD_ARGV_BYTES: int = 32 * 1024
+
+
+def write_python_source(path: Path, source: str) -> None:
+    """Write UTF-8 Python source without platform newline translation."""
+    path.write_bytes(source.encode("utf-8"))
 
 
 def validate_script_path(path: Path, *, parameter: str = "script_path") -> Path:

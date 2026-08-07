@@ -119,7 +119,7 @@ from .diagnostics import (
 from .eligibility import diagnostic_incumbent_eligibility
 from .env_vars import CPSAT_CONFIG_ENV_VAR, CPSAT_SEED_ENV_VAR
 from .mutation import SolutionMutation, generate_mutations
-from .script_path import validate_script_args, validate_script_path
+from .script_path import validate_script_args, validate_script_path, write_python_source
 
 DEFAULT_PYEXEC_TIMEOUT_MS: int = 30_000
 
@@ -673,11 +673,6 @@ def _python_script_argv(script: Path, args: list[str] | None = None) -> list[str
     # Anything in `args` trails the script path, so the child sees it as
     # `sys.argv[1:]`.
     return [sys.executable, "-u", str(script), *(args or ())]
-
-
-def write_python_source(path: Path, source: str) -> None:
-    """Write UTF-8 Python source without platform newline translation."""
-    path.write_bytes(source.encode("utf-8"))
 
 
 def run_cpsat_python(

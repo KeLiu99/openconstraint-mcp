@@ -234,7 +234,10 @@ def test_run_cpsat_python_parses_valid_solution() -> None:
     assert result.truncated is False
 
 
-def test_run_cpsat_python_preserves_source_bytes(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_run_cpsat_python_preserves_source_bytes(
+    monkeypatch: pytest.MonkeyPatch,
+    windows_text_newlines: None,
+) -> None:
     source = "# café\r\nprint('x')\n"
     staged_source: bytes | None = None
 

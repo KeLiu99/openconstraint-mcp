@@ -90,6 +90,25 @@ def test_checker_accepted_returns_accepted_report(monkeypatch: pytest.MonkeyPatc
     assert report.truncated is False
 
 
+def test_checker_preserves_source_bytes(
+    monkeypatch: pytest.MonkeyPatch,
+    windows_text_newlines: None,
+) -> None:
+    source = "# café\r\nprint('x')\n"
+    staged_source: bytes | None = None
+
+    def _capture(argv: list[str], **_kwargs: Any) -> ChildExecutionResult:
+        nonlocal staged_source
+        staged_source = Path(argv[2]).read_bytes()
+        return _make_child_result()
+
+    monkeypatch.setattr("openconstraint_mcp.pyexec.checker.execute_child", _capture)
+
+    run_checker(source, _OPTIMAL_RESULT, problem=None, timeout_ms=5000, tracker=None)
+
+    assert staged_source == source.encode("utf-8")
+
+
 # --- Payload construction ----------------------------------------------------
 
 
