@@ -194,7 +194,7 @@ class ScheduledOperation(ClosedModel):
     setup_duration: TimeTick
     start: TimeTick
     processing_time: TimeTick
-    ready: TimeTick
+    theta_completion_time: TimeTick
     end: TimeTick
 
 
@@ -291,7 +291,7 @@ def solve(instance: OPSInstance) -> Solution:
     operation_ids = list(instance.operations)
 
     starts: dict[str, CpsatIntVar] = {}
-    ready_times: dict[str, CpsatIntVar] = {}
+    theta_completion_times: dict[str, CpsatIntVar] = {}
     ends: dict[str, CpsatIntVar] = {}
     setup_starts: dict[str, CpsatIntVar] = {}
     setup_durations: dict[str, CpsatIntVar] = {}
@@ -304,34 +304,36 @@ def solve(instance: OPSInstance) -> Solution:
     for operation_index, (operation_id, operation) in enumerate(instance.operations.items()):
         suffix = str(operation_index)
         start = model.new_int_var(operation.release_time, horizon, f"start_{suffix}")
-        ready = model.new_int_var(operation.release_time, horizon, f"ready_{suffix}")
+        theta_completion_time = model.new_int_var(
+            operation.release_time, horizon, f"theta_completion_time_{suffix}"
+        )
         end = model.new_int_var(operation.release_time, horizon, f"end_{suffix}")
         setup_start = model.new_int_var(0, horizon, f"setup_start_{suffix}")
         setup_duration = model.new_int_var(0, horizon, f"setup_duration_{suffix}")
         starts[operation_id] = start
-        ready_times[operation_id] = ready
+        theta_completion_times[operation_id] = theta_completion_time
         ends[operation_id] = end
         setup_starts[operation_id] = setup_start
         setup_durations[operation_id] = setup_duration
-        model.add(start <= ready)
-        model.add(ready <= end)
+        model.add(start <= theta_completion_time)
+        model.add(theta_completion_time <= end)
 
         alternatives: list[CpsatIntVar] = []
         for machine_index, (machine_id, option) in enumerate(operation.machine_options.items()):
-            assigned = model.new_bool_var(f"assigned_{suffix}_{machine_index}")
-            assignments[operation_id, machine_id] = assigned
+            is_assigned = model.new_bool_var(f"is_assigned_{suffix}_{machine_index}")
+            assignments[operation_id, machine_id] = is_assigned
             incoming_arcs[operation_id, machine_id] = []
-            alternatives.append(assigned)
+            alternatives.append(is_assigned)
 
             machine = instance.machines[machine_id]
             _add_resumable_duration(
                 model,
                 start,
-                ready,
+                theta_completion_time,
                 _required_processing(operation.theta, option.processing_time),
                 machine.unavailability,
-                assigned,
-                f"ready_{suffix}_{machine_index}",
+                is_assigned,
+                f"theta_completion_time_{suffix}_{machine_index}",
             )
             _add_resumable_duration(
                 model,
@@ -339,7 +341,7 @@ def solve(instance: OPSInstance) -> Solution:
                 end,
                 option.processing_time,
                 machine.unavailability,
-                assigned,
+                is_assigned,
                 f"end_{suffix}_{machine_index}",
             )
             machine_setup_intervals[machine_id].append(
@@ -347,7 +349,7 @@ def solve(instance: OPSInstance) -> Solution:
                     setup_start,
                     setup_duration,
                     start,
-                    assigned,
+                    is_assigned,
                     f"setup_{suffix}_{machine_index}",
                 )
             )
@@ -359,7 +361,7 @@ def solve(instance: OPSInstance) -> Solution:
 
     for operation_id, operation in instance.operations.items():
         for successor_id in operation.successors:
-            model.add(starts[successor_id] >= ready_times[operation_id])
+            model.add(starts[successor_id] >= theta_completion_times[operation_id])
             model.add(ends[successor_id] >= ends[operation_id])
 
     for machine_index, (machine_id, machine) in enumerate(instance.machines.items()):
@@ -376,9 +378,9 @@ def solve(instance: OPSInstance) -> Solution:
         arcs: list[tuple[int, int, cp_model.LiteralT]] = [(0, 0, empty)]
 
         for operation_id in eligible:
-            assigned = assignments[operation_id, machine_id]
+            is_assigned = assignments[operation_id, machine_id]
             operation_node = node[operation_id]
-            arcs.append((operation_node, operation_node, assigned.Not()))
+            arcs.append((operation_node, operation_node, is_assigned.Not()))
 
             first = model.new_bool_var(f"first_{machine_index}_{operation_node}")
             arcs.append((0, operation_node, first))
@@ -448,7 +450,7 @@ def solve(instance: OPSInstance) -> Solution:
                     setup_duration=reader.value(setup_durations[operation_id]),
                     start=reader.value(starts[operation_id]),
                     processing_time=operation.machine_options[machine_id].processing_time,
-                    ready=reader.value(ready_times[operation_id]),
+                    theta_completion_time=reader.value(theta_completion_times[operation_id]),
                     end=reader.value(ends[operation_id]),
                 )
             )

@@ -49,7 +49,7 @@ class ScheduleEntry:
     setup_duration: int
     start: int
     processing_time: int
-    ready: int
+    theta_completion_time: int
     end: int
 
 
@@ -300,7 +300,7 @@ def _load_solution(value: object) -> tuple[SolutionClaim | None, list[str]]:
         "setup_duration",
         "start",
         "processing_time",
-        "ready",
+        "theta_completion_time",
         "end",
     )
     for index, raw_entry in enumerate(raw_schedule):
@@ -328,7 +328,7 @@ def _load_solution(value: object) -> tuple[SolutionClaim | None, list[str]]:
                 setup_duration=raw_entry["setup_duration"],
                 start=raw_entry["start"],
                 processing_time=raw_entry["processing_time"],
-                ready=raw_entry["ready"],
+                theta_completion_time=raw_entry["theta_completion_time"],
                 end=raw_entry["end"],
             )
         )
@@ -458,7 +458,7 @@ def check_payload(payload: dict[str, Any]) -> dict[str, Any]:
 
     errors: list[str] = []
     entries: dict[str, ScheduleEntry] = {}
-    expected_ready: dict[str, int] = {}
+    expected_theta_completion_time: dict[str, int] = {}
     expected_end: dict[str, int] = {}
     for entry in solution.schedule:
         if entry.operation in entries:
@@ -504,22 +504,23 @@ def check_payload(payload: dict[str, Any]) -> dict[str, Any]:
                 errors.append(f"operation {entry.operation!r} setup overlaps an outage")
 
         end = _advance_active(entry.start, expected_processing, machine.outages)
-        ready_work = int(
+        theta_completion_work = int(
             (operation.theta * Decimal(expected_processing)).to_integral_value(
                 rounding=ROUND_CEILING
             )
         )
-        ready = _advance_active(entry.start, ready_work, machine.outages)
+        theta_completion_time = _advance_active(entry.start, theta_completion_work, machine.outages)
         expected_end[entry.operation] = end
-        expected_ready[entry.operation] = ready
+        expected_theta_completion_time[entry.operation] = theta_completion_time
         if entry.end != end:
             errors.append(
                 f"operation {entry.operation!r} end {entry.end} does not match active "
                 f"processing completion {end}"
             )
-        if entry.ready != ready:
+        if entry.theta_completion_time != theta_completion_time:
             errors.append(
-                f"operation {entry.operation!r} ready {entry.ready} does not match {ready}"
+                f"operation {entry.operation!r} theta_completion_time "
+                f"{entry.theta_completion_time} does not match {theta_completion_time}"
             )
 
     missing = set(instance.operations) - set(entries)
@@ -542,9 +543,11 @@ def check_payload(payload: dict[str, Any]) -> dict[str, Any]:
             successor_entry = entries.get(successor_id)
             if successor_entry is None:
                 continue
-            ready = expected_ready.get(operation_id, predecessor_entry.ready)
+            theta_completion_time = expected_theta_completion_time.get(
+                operation_id, predecessor_entry.theta_completion_time
+            )
             end = expected_end.get(operation_id, predecessor_entry.end)
-            if successor_entry.start < ready:
+            if successor_entry.start < theta_completion_time:
                 errors.append(
                     f"successor {successor_id!r} starts before operation {operation_id!r} is ready"
                 )
