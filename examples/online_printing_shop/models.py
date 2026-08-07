@@ -284,7 +284,7 @@ def _add_resumable_duration(
 
 
 def solve(instance: OPSInstance) -> Solution:
-    """Build and solve the OPS makespan model."""
+    """Build and solve the main CP-SAT model for OPS makespan minimization."""
 
     model = cp_model.CpModel()
     horizon = _horizon(instance)
