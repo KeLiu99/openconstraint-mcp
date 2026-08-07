@@ -159,22 +159,22 @@ class OPSInstance(ClosedModel):
             raise ValueError("operation precedence graph must be acyclic")
 
         for machine_id, machine in self.machines.items():
-            eligible = {
+            eligible_operation_ids = {
                 operation_id
                 for operation_id, operation in self.operations.items()
                 if machine_id in operation.machine_options
             }
-            if set(machine.setup_times.first) != eligible:
+            if set(machine.setup_times.first) != eligible_operation_ids:
                 raise ValueError(
                     f"machine {machine_id!r} first setup entries must match eligible operations"
                 )
-            expected_sources = eligible if len(eligible) > 1 else set()
+            expected_sources = eligible_operation_ids if len(eligible_operation_ids) > 1 else set()
             if set(machine.setup_times.transitions) != expected_sources:
                 raise ValueError(
                     f"machine {machine_id!r} transition sources must match eligible operations"
                 )
             for source_id, targets in machine.setup_times.transitions.items():
-                if set(targets) != eligible - {source_id}:
+                if set(targets) != eligible_operation_ids - {source_id}:
                     raise ValueError(
                         f"machine {machine_id!r} transitions from {source_id!r} must cover "
                         "every other eligible operation"
@@ -365,21 +365,26 @@ def solve(instance: OPSInstance) -> Solution:
             model.add(ends[successor_id] >= ends[operation_id])
 
     for machine_index, (machine_id, machine) in enumerate(instance.machines.items()):
-        eligible = [
+        eligible_operation_ids = [
             operation_id
             for operation_id in operation_ids
             if machine_id in instance.operations[operation_id].machine_options
         ]
-        node = {operation_id: index for index, operation_id in enumerate(eligible, start=1)}
-        machine_assignments = [assignments[operation_id, machine_id] for operation_id in eligible]
-        empty: CpsatIntVar = model.new_bool_var(f"machine_empty_{machine_index}")
-        model.add(sum(machine_assignments) == 0).only_enforce_if(empty)
-        model.add(sum(machine_assignments) >= 1).only_enforce_if(empty.Not())
-        arcs: list[tuple[int, int, cp_model.LiteralT]] = [(0, 0, empty)]
+        node_index = {
+            operation_id: index
+            for index, operation_id in enumerate(eligible_operation_ids, start=1)
+        }
+        machine_assignments = [
+            assignments[operation_id, machine_id] for operation_id in eligible_operation_ids
+        ]
+        machine_unused: CpsatIntVar = model.new_bool_var(f"machine_unused_{machine_index}")
+        model.add(sum(machine_assignments) == 0).only_enforce_if(machine_unused)
+        model.add(sum(machine_assignments) >= 1).only_enforce_if(machine_unused.Not())
+        arcs: list[tuple[int, int, cp_model.LiteralT]] = [(0, 0, machine_unused)]
 
-        for operation_id in eligible:
+        for operation_id in eligible_operation_ids:
             is_assigned = assignments[operation_id, machine_id]
-            operation_node = node[operation_id]
+            operation_node = node_index[operation_id]
             arcs.append((operation_node, operation_node, is_assigned.Not()))
 
             first: CpsatIntVar = model.new_bool_var(f"first_{machine_index}_{operation_node}")
@@ -394,14 +399,14 @@ def solve(instance: OPSInstance) -> Solution:
             last: CpsatIntVar = model.new_bool_var(f"last_{machine_index}_{operation_node}")
             arcs.append((operation_node, 0, last))
 
-        for predecessor_id in eligible:
-            for operation_id in eligible:
+        for predecessor_id in eligible_operation_ids:
+            for operation_id in eligible_operation_ids:
                 if predecessor_id == operation_id:
                     continue
                 arc: CpsatIntVar = model.new_bool_var(
-                    f"arc_{machine_index}_{node[predecessor_id]}_{node[operation_id]}"
+                    f"arc_{machine_index}_{node_index[predecessor_id]}_{node_index[operation_id]}"
                 )
-                arcs.append((node[predecessor_id], node[operation_id], arc))
+                arcs.append((node_index[predecessor_id], node_index[operation_id], arc))
                 incoming_arcs[operation_id, machine_id].append((predecessor_id, arc))
                 transition = machine.setup_times.transitions[predecessor_id][operation_id]
                 model.add(setup_durations[operation_id] == transition).only_enforce_if(arc)
