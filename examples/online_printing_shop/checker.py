@@ -13,7 +13,7 @@ import sys
 from dataclasses import dataclass
 from decimal import ROUND_CEILING, Decimal, InvalidOperation
 from pathlib import Path
-from typing import Any
+from typing import Any, TypeGuard
 
 
 @dataclass(frozen=True)
@@ -59,7 +59,7 @@ class SolutionClaim:
     schedule: list[ScheduleEntry]
 
 
-def _is_int(value: object) -> bool:
+def _is_int(value: object) -> TypeGuard[int]:
     return isinstance(value, int) and not isinstance(value, bool)
 
 
