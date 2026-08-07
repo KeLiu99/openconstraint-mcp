@@ -303,13 +303,13 @@ def solve(instance: OPSInstance) -> Solution:
 
     for operation_index, (operation_id, operation) in enumerate(instance.operations.items()):
         suffix = str(operation_index)
-        start = model.new_int_var(operation.release_time, horizon, f"start_{suffix}")
-        theta_completion_time = model.new_int_var(
+        start: CpsatIntVar = model.new_int_var(operation.release_time, horizon, f"start_{suffix}")
+        theta_completion_time: CpsatIntVar = model.new_int_var(
             operation.release_time, horizon, f"theta_completion_time_{suffix}"
         )
-        end = model.new_int_var(operation.release_time, horizon, f"end_{suffix}")
-        setup_start = model.new_int_var(0, horizon, f"setup_start_{suffix}")
-        setup_duration = model.new_int_var(0, horizon, f"setup_duration_{suffix}")
+        end: CpsatIntVar = model.new_int_var(operation.release_time, horizon, f"end_{suffix}")
+        setup_start: CpsatIntVar = model.new_int_var(0, horizon, f"setup_start_{suffix}")
+        setup_duration: CpsatIntVar = model.new_int_var(0, horizon, f"setup_duration_{suffix}")
         starts[operation_id] = start
         theta_completion_times[operation_id] = theta_completion_time
         ends[operation_id] = end
@@ -320,7 +320,7 @@ def solve(instance: OPSInstance) -> Solution:
 
         alternatives: list[CpsatIntVar] = []
         for machine_index, (machine_id, option) in enumerate(operation.machine_options.items()):
-            is_assigned = model.new_bool_var(f"is_assigned_{suffix}_{machine_index}")
+            is_assigned: CpsatIntVar = model.new_bool_var(f"is_assigned_{suffix}_{machine_index}")
             assignments[operation_id, machine_id] = is_assigned
             incoming_arcs[operation_id, machine_id] = []
             alternatives.append(is_assigned)
@@ -372,7 +372,7 @@ def solve(instance: OPSInstance) -> Solution:
         ]
         node = {operation_id: index for index, operation_id in enumerate(eligible, start=1)}
         machine_assignments = [assignments[operation_id, machine_id] for operation_id in eligible]
-        empty = model.new_bool_var(f"machine_empty_{machine_index}")
+        empty: CpsatIntVar = model.new_bool_var(f"machine_empty_{machine_index}")
         model.add(sum(machine_assignments) == 0).only_enforce_if(empty)
         model.add(sum(machine_assignments) >= 1).only_enforce_if(empty.Not())
         arcs: list[tuple[int, int, cp_model.LiteralT]] = [(0, 0, empty)]
@@ -382,7 +382,7 @@ def solve(instance: OPSInstance) -> Solution:
             operation_node = node[operation_id]
             arcs.append((operation_node, operation_node, is_assigned.Not()))
 
-            first = model.new_bool_var(f"first_{machine_index}_{operation_node}")
+            first: CpsatIntVar = model.new_bool_var(f"first_{machine_index}_{operation_node}")
             arcs.append((0, operation_node, first))
             incoming_arcs[operation_id, machine_id].append((None, first))
             first_setup = machine.setup_times.first[operation_id]
@@ -391,14 +391,14 @@ def solve(instance: OPSInstance) -> Solution:
                 setup_starts[operation_id] == starts[operation_id] - first_setup
             ).only_enforce_if(first)
 
-            last = model.new_bool_var(f"last_{machine_index}_{operation_node}")
+            last: CpsatIntVar = model.new_bool_var(f"last_{machine_index}_{operation_node}")
             arcs.append((operation_node, 0, last))
 
         for predecessor_id in eligible:
             for operation_id in eligible:
                 if predecessor_id == operation_id:
                     continue
-                arc = model.new_bool_var(
+                arc: CpsatIntVar = model.new_bool_var(
                     f"arc_{machine_index}_{node[predecessor_id]}_{node[operation_id]}"
                 )
                 arcs.append((node[predecessor_id], node[operation_id], arc))
