@@ -99,6 +99,19 @@ def test_save_verified_cpsat_python_optimal_saves_files(
     assert (target / "model.py").read_text() == _SCRIPT
 
 
+def test_save_verified_cpsat_python_preserves_model_source_bytes(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _patch_executor(monkeypatch, _OPTIMAL_RESULT)
+    source = "# café\r\nprint('x')\n"
+    target = tmp_path / "exact_source"
+
+    save_verified_cpsat_python(source, target_dir=target)
+
+    assert (target / "model.py").read_bytes() == source.encode("utf-8")
+
+
 # (a2) manifest has correct structure
 def test_save_verified_cpsat_python_manifest_structure(
     tmp_path: Path,

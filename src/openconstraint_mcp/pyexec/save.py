@@ -296,7 +296,10 @@ def _write_staged_artifacts(
     artifacts: list[SavedModelArtifact] = []
     for role, filename, text in texts:
         file_path = staging / filename
-        file_path.write_text(text, encoding="utf-8")
+        if role == "model":
+            file_path.write_bytes(text.encode("utf-8"))
+        else:
+            file_path.write_text(text, encoding="utf-8")
         artifacts.append(
             SavedModelArtifact(role=role, path=filename, sha256=path_sha256(file_path))
         )
