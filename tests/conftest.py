@@ -12,6 +12,26 @@ from openconstraint_mcp.runtime import is_runtime_installed
 
 
 @pytest.fixture
+def windows_text_newlines(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Make default text writes apply Windows newline translation on any OS."""
+    write_text = Path.write_text
+
+    def _write_text(
+        path: Path,
+        data: str,
+        encoding: str | None = None,
+        errors: str | None = None,
+        newline: str | None = None,
+    ) -> int:
+        if newline is None:
+            data = data.replace("\n", "\r\n")
+            newline = ""
+        return write_text(path, data, encoding=encoding, errors=errors, newline=newline)
+
+    monkeypatch.setattr(Path, "write_text", _write_text)
+
+
+@pytest.fixture
 def require_real_runtime() -> None:
     """Skip a real-binary integration test when no managed runtime is installed."""
     if not is_runtime_installed():

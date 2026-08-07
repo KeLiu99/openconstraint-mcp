@@ -119,7 +119,7 @@ from .diagnostics import (
 from .eligibility import diagnostic_incumbent_eligibility
 from .env_vars import CPSAT_CONFIG_ENV_VAR, CPSAT_SEED_ENV_VAR
 from .mutation import SolutionMutation, generate_mutations
-from .script_path import validate_script_args, validate_script_path
+from .script_path import validate_script_args, validate_script_path, write_python_source
 
 DEFAULT_PYEXEC_TIMEOUT_MS: int = 30_000
 
@@ -718,7 +718,7 @@ def run_cpsat_python(
     with tempfile.TemporaryDirectory() as tmp_dir:
         tmp = Path(tmp_dir)
         script = tmp / "script.py"
-        script.write_text(source, encoding="utf-8")
+        write_python_source(script, source)
         # Run from the temp dir: an inline snippet has no sibling files to find.
         try:
             child = execute_child(

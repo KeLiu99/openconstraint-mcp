@@ -39,7 +39,11 @@ from openconstraint_mcp.schemas.cpsat import (
     CpsatPythonCheckedResult,
     CpsatPythonResult,
 )
-from openconstraint_mcp.shared.childrun import MAX_OUTPUT_BYTES, ChildSpawnError
+from openconstraint_mcp.shared.childrun import (
+    MAX_OUTPUT_BYTES,
+    ChildExecutionResult,
+    ChildSpawnError,
+)
 
 _VALID_SOLUTION = {"x": 3, "y": 7}
 _VALID_STDOUT = json.dumps({"status": "optimal", "objective": 10, "solution": _VALID_SOLUTION})
@@ -228,6 +232,32 @@ def test_run_cpsat_python_parses_valid_solution() -> None:
     assert result.objective == 10
     assert result.timed_out is False
     assert result.truncated is False
+
+
+def test_run_cpsat_python_preserves_source_bytes(
+    monkeypatch: pytest.MonkeyPatch,
+    windows_text_newlines: None,
+) -> None:
+    source = "# café\r\nprint('x')\n"
+    staged_source: bytes | None = None
+
+    def _fake_execute_child(argv: list[str], **_kwargs: Any) -> ChildExecutionResult:
+        nonlocal staged_source
+        staged_source = Path(argv[2]).read_bytes()
+        return ChildExecutionResult(
+            stdout=_VALID_STDOUT,
+            stderr="",
+            return_code=0,
+            timed_out=False,
+            truncated=False,
+            duration_ms=1,
+        )
+
+    monkeypatch.setattr("openconstraint_mcp.pyexec.core.execute_child", _fake_execute_child)
+
+    run_cpsat_python(source)
+
+    assert staged_source == source.encode("utf-8")
 
 
 # (b) non-zero exit → status="error", stderr surfaced

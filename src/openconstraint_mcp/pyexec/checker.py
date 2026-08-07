@@ -44,7 +44,7 @@ from ..shared.childrun import ChildSpawnError, execute_child
 from ..shared.job_errors import exception_summary
 from .diagnostics import checker_report_diagnostic
 from .env_vars import CPSAT_CONFIG_ENV_VAR, CPSAT_SEED_ENV_VAR
-from .script_path import validate_script_path
+from .script_path import validate_script_path, write_python_source
 
 _ACCEPTED_STATUS = "accepted"
 _REJECTED_STATUS = "rejected"
@@ -278,7 +278,7 @@ def run_checker(
     with tempfile.TemporaryDirectory() as tmp_dir:
         tmp = Path(tmp_dir)
         checker_script = tmp / "checker.py"
-        checker_script.write_text(checker, encoding="utf-8")
+        write_python_source(checker_script, checker)
         payload_file = _write_payload_file(tmp, run_result, problem)
         return _execute_checker(
             checker_script,
