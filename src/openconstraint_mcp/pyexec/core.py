@@ -675,6 +675,11 @@ def _python_script_argv(script: Path, args: list[str] | None = None) -> list[str
     return [sys.executable, "-u", str(script), *(args or ())]
 
 
+def write_python_source(path: Path, source: str) -> None:
+    """Write UTF-8 Python source without platform newline translation."""
+    path.write_bytes(source.encode("utf-8"))
+
+
 def run_cpsat_python(
     source: str,
     *,
@@ -718,7 +723,7 @@ def run_cpsat_python(
     with tempfile.TemporaryDirectory() as tmp_dir:
         tmp = Path(tmp_dir)
         script = tmp / "script.py"
-        script.write_text(source, encoding="utf-8")
+        write_python_source(script, source)
         # Run from the temp dir: an inline snippet has no sibling files to find.
         try:
             child = execute_child(

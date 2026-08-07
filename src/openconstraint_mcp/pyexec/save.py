@@ -41,6 +41,7 @@ from .core import (
     run_cpsat_python,
     validate_checker_args,
     validate_cpsat_random_seed,
+    write_python_source,
 )
 from .diagnostics import save_failure_diagnostic
 from .env_vars import CPSAT_SEED_ENV_VAR
@@ -297,7 +298,7 @@ def _write_staged_artifacts(
     for role, filename, text in texts:
         file_path = staging / filename
         if role == "model":
-            file_path.write_bytes(text.encode("utf-8"))
+            write_python_source(file_path, text)
         else:
             file_path.write_text(text, encoding="utf-8")
         artifacts.append(
