@@ -17,6 +17,7 @@ from pydantic import BaseModel, ConfigDict, Field, StringConstraints, model_vali
 Identifier = Annotated[str, StringConstraints(min_length=1)]
 TimeTick = Annotated[int, Field(ge=0)]
 Theta = Annotated[float, Field(gt=0, le=1)]
+CpsatIntVar = cp_model.IntVar
 
 
 class ClosedModel(BaseModel):
@@ -254,18 +255,16 @@ def _horizon(instance: OPSInstance) -> int:
 
 
 def _required_processing(theta: float, processing_time: int) -> int:
-    return int(
-        (Decimal(str(theta)) * processing_time).to_integral_value(rounding=ROUND_CEILING)
-    )
+    return int((Decimal(str(theta)) * processing_time).to_integral_value(rounding=ROUND_CEILING))
 
 
 def _add_resumable_duration(
     model: cp_model.CpModel,
-    start: cp_model.IntVar,
-    finish: cp_model.IntVar,
+    start: CpsatIntVar,
+    finish: CpsatIntVar,
     duration: int,
     unavailability: list[UnavailabilityInterval],
-    presence: cp_model.IntVar,
+    presence: CpsatIntVar,
     name: str,
 ) -> None:
     """Bind elapsed work to a calendar-aware finish when ``presence`` is true."""
@@ -291,13 +290,13 @@ def solve(instance: OPSInstance) -> Solution:
     horizon = _horizon(instance)
     operation_ids = list(instance.operations)
 
-    starts: dict[str, cp_model.IntVar] = {}
-    ready_times: dict[str, cp_model.IntVar] = {}
-    ends: dict[str, cp_model.IntVar] = {}
-    setup_starts: dict[str, cp_model.IntVar] = {}
-    setup_durations: dict[str, cp_model.IntVar] = {}
-    assignments: dict[tuple[str, str], cp_model.IntVar] = {}
-    incoming_arcs: dict[tuple[str, str], list[tuple[str | None, cp_model.IntVar]]] = {}
+    starts: dict[str, CpsatIntVar] = {}
+    ready_times: dict[str, CpsatIntVar] = {}
+    ends: dict[str, CpsatIntVar] = {}
+    setup_starts: dict[str, CpsatIntVar] = {}
+    setup_durations: dict[str, CpsatIntVar] = {}
+    assignments: dict[tuple[str, str], CpsatIntVar] = {}
+    incoming_arcs: dict[tuple[str, str], list[tuple[str | None, CpsatIntVar]]] = {}
     machine_setup_intervals: dict[str, list[cp_model.IntervalVar]] = {
         machine_id: [] for machine_id in instance.machines
     }
@@ -317,7 +316,7 @@ def solve(instance: OPSInstance) -> Solution:
         model.add(start <= ready)
         model.add(ready <= end)
 
-        alternatives = []
+        alternatives: list[CpsatIntVar] = []
         for machine_index, (machine_id, option) in enumerate(operation.machine_options.items()):
             assigned = model.new_bool_var(f"assigned_{suffix}_{machine_index}")
             assignments[operation_id, machine_id] = assigned

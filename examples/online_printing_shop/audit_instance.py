@@ -34,9 +34,7 @@ from typing import Any
 from examples.online_printing_shop.models import parse_input, read_input
 
 
-def _setup_duration(
-    source: dict[str, Any], target: dict[str, Any], machine: dict[str, Any]
-) -> int:
+def _setup_duration(source: dict[str, Any], target: dict[str, Any], machine: dict[str, Any]) -> int:
     size_costs = machine["setup_size"]
     duration = size_costs[0] if source["size"] > target["size"] else 0
     duration += size_costs[1] if source["size"] < target["size"] else 0
@@ -95,9 +93,7 @@ def audit_instance(upstream: dict[str, Any], local: dict[str, Any]) -> list[str]
 
             successors = [str(value) for value in operation["sucessors"]]
             edges[operation_id] = successors
-            check_equal(
-                f"operations.{operation_id}.successors", target["successors"], successors
-            )
+            check_equal(f"operations.{operation_id}.successors", target["successors"], successors)
             check(
                 len(successors) == len(set(successors)),
                 f"upstream operation {operation_id!r} repeats a successor",
@@ -135,9 +131,7 @@ def audit_instance(upstream: dict[str, Any], local: dict[str, Any]) -> list[str]
                 target["release_time"],
                 operation["release"],
             )
-            check_equal(
-                f"operations.{operation_id}.theta", target["theta"], operation["overlap"]
-            )
+            check_equal(f"operations.{operation_id}.theta", target["theta"], operation["overlap"])
 
             starting = operation["starting"]
             if starting == -1:
@@ -173,10 +167,7 @@ def audit_instance(upstream: dict[str, Any], local: dict[str, Any]) -> list[str]
             f"upstream machine {machine_id!r} availability length must be even",
         )
         check(
-            all(
-                left < right
-                for left, right in zip(availability, availability[1:], strict=False)
-            ),
+            all(left < right for left, right in zip(availability, availability[1:], strict=False)),
             f"upstream machine {machine_id!r} availability must be strictly ordered",
         )
         if not availability or len(availability) % 2:
@@ -201,9 +192,7 @@ def audit_instance(upstream: dict[str, Any], local: dict[str, Any]) -> list[str]
             if machine["id"] in operation["resources"]
         }
         first_duration = (
-            max(machine["setup_size"])
-            + machine["setup_color"]
-            + machine["setup_varnish"]
+            max(machine["setup_size"]) + machine["setup_color"] + machine["setup_varnish"]
         )
         expected_setup = {
             "first": dict.fromkeys(eligible, first_duration),
@@ -247,8 +236,7 @@ def main() -> int:
         return 1
 
     print(
-        f"PASS: {len(local['machines'])} machines and "
-        f"{len(local['operations'])} operations match"
+        f"PASS: {len(local['machines'])} machines and {len(local['operations'])} operations match"
     )
     return 0
 
