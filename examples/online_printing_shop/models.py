@@ -49,8 +49,17 @@ class UnavailabilityInterval(ClosedModel):
 class SetupTimes(ClosedModel):
     """Explicit setup durations for first and ordered subsequent operations."""
 
-    first: dict[Identifier, TimeTick]
-    transitions: dict[Identifier, dict[Identifier, TimeTick]]
+    first: dict[Identifier, TimeTick] = Field(
+        description=(
+            "Setup duration for each operation when it is the first one processed on this machine."
+        )
+    )
+    transitions: dict[Identifier, dict[Identifier, TimeTick]] = Field(
+        description=(
+            "Setup duration keyed by predecessor then successor: transitions[a][b] applies when "
+            "operation b runs immediately after operation a on this machine."
+        )
+    )
 
 
 class Machine(ClosedModel):
