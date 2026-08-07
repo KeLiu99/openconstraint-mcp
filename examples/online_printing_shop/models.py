@@ -380,15 +380,15 @@ def solve(instance: OPSInstance) -> Solution:
         machine_unused: CpsatIntVar = model.new_bool_var(f"machine_unused_{machine_index}")
         model.add(sum(machine_assignments) == 0).only_enforce_if(machine_unused)
         model.add(sum(machine_assignments) >= 1).only_enforce_if(machine_unused.Not())
-        arcs: list[tuple[int, int, cp_model.LiteralT]] = [(0, 0, machine_unused)]
+        circuit_arcs: list[tuple[int, int, cp_model.LiteralT]] = [(0, 0, machine_unused)]
 
         for operation_id in eligible_operation_ids:
             is_assigned = assignments[operation_id, machine_id]
             operation_node = node_index[operation_id]
-            arcs.append((operation_node, operation_node, is_assigned.Not()))
+            circuit_arcs.append((operation_node, operation_node, is_assigned.Not()))
 
             first: CpsatIntVar = model.new_bool_var(f"first_{machine_index}_{operation_node}")
-            arcs.append((0, operation_node, first))
+            circuit_arcs.append((0, operation_node, first))
             incoming_arcs[operation_id, machine_id].append((None, first))
             first_setup = machine.setup_times.first[operation_id]
             model.add(setup_durations[operation_id] == first_setup).only_enforce_if(first)
@@ -397,7 +397,7 @@ def solve(instance: OPSInstance) -> Solution:
             ).only_enforce_if(first)
 
             last: CpsatIntVar = model.new_bool_var(f"last_{machine_index}_{operation_node}")
-            arcs.append((operation_node, 0, last))
+            circuit_arcs.append((operation_node, 0, last))
 
         for predecessor_id in eligible_operation_ids:
             for operation_id in eligible_operation_ids:
@@ -406,7 +406,7 @@ def solve(instance: OPSInstance) -> Solution:
                 arc: CpsatIntVar = model.new_bool_var(
                     f"arc_{machine_index}_{node_index[predecessor_id]}_{node_index[operation_id]}"
                 )
-                arcs.append((node_index[predecessor_id], node_index[operation_id], arc))
+                circuit_arcs.append((node_index[predecessor_id], node_index[operation_id], arc))
                 incoming_arcs[operation_id, machine_id].append((predecessor_id, arc))
                 transition = machine.setup_times.transitions[predecessor_id][operation_id]
                 model.add(setup_durations[operation_id] == transition).only_enforce_if(arc)
@@ -415,7 +415,7 @@ def solve(instance: OPSInstance) -> Solution:
                 ).only_enforce_if(arc)
                 model.add(ends[predecessor_id] <= setup_starts[operation_id]).only_enforce_if(arc)
 
-        model.add_circuit(arcs)
+        model.add_circuit(circuit_arcs)
         outage_intervals = [
             model.new_fixed_size_interval_var(
                 gap.start,
