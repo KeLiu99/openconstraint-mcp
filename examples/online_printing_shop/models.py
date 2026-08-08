@@ -18,6 +18,7 @@ Identifier = Annotated[str, StringConstraints(min_length=1)]
 TimeTick = Annotated[int, Field(ge=0)]
 Theta = Annotated[float, Field(gt=0, le=1)]
 CpsatIntVar = cp_model.IntVar
+CpsatIntervalVar = cp_model.IntervalVar
 CpsatLiteral = cp_model.LiteralT
 
 
@@ -224,7 +225,8 @@ class Solution(ClosedModel):
 def read_input(data_path: Path) -> dict[str, Any]:
     """Read one raw OPS instance object from a JSON file."""
 
-    return json.loads(data_path.read_text(encoding="utf-8"))
+    raw: dict[str, Any] = json.loads(data_path.read_text(encoding="utf-8"))
+    return raw
 
 
 def parse_input(raw: dict[str, Any]) -> OPSInstance:
@@ -313,7 +315,7 @@ def solve(instance: OPSInstance) -> Solution:
     setup_durations: dict[str, CpsatIntVar] = {}
     assignments: dict[tuple[str, str], CpsatIntVar] = {}
     incoming_arcs: dict[tuple[str, str], list[tuple[str | None, CpsatIntVar]]] = {}
-    machine_setup_intervals: dict[str, list[cp_model.IntervalVar]] = {
+    machine_setup_intervals: dict[str, list[CpsatIntervalVar]] = {
         machine_id: [] for machine_id in instance.machines
     }
 
@@ -421,7 +423,7 @@ def solve(instance: OPSInstance) -> Solution:
             first_setup: int = machine.setup_times.first[operation_id]
             model.add(setup_durations[operation_id] == first_setup).only_enforce_if(is_first)
             model.add(
-                setup_starts[operation_id] == processing_starts[operation_id] - first_setup
+                setup_starts[operation_id] + first_setup == processing_starts[operation_id]
             ).only_enforce_if(is_first)
 
             is_last: CpsatIntVar = model.new_bool_var(f"is_last_{machine_index}_{operation_node}")
@@ -437,19 +439,19 @@ def solve(instance: OPSInstance) -> Solution:
                 sequence_arcs.append(
                     (node_index[predecessor_id], node_index[operation_id], is_transition)
                 )
-                # what does this incoming arc do?
+                # what does this incoming arc do? not for CSP modeling?
                 incoming_arcs[operation_id, machine_id].append((predecessor_id, is_transition))
                 transition: int = machine.setup_times.transitions[predecessor_id][operation_id]
                 model.add(setup_durations[operation_id] == transition).only_enforce_if(is_transition)
                 model.add(
-                    setup_starts[operation_id] == processing_starts[operation_id] - transition
+                    setup_starts[operation_id] +  transition == processing_starts[operation_id]
                 ).only_enforce_if(is_transition)
                 model.add(
                     processing_ends[predecessor_id] <= setup_starts[operation_id]
                 ).only_enforce_if(is_transition)
 
         model.add_circuit(sequence_arcs)
-        outage_intervals: list[cp_model.IntervalVar] = [
+        outage_intervals: list[CpsatIntervalVar] = [
             model.new_fixed_size_interval_var(
                 gap.start,
                 gap.end - gap.start,
@@ -555,7 +557,12 @@ def write_output(payload: dict[str, Any]) -> None:
 
 
 def main() -> None:
-    write_output(serialize_solution(solve(parse_input(read_input(_data_path())))))
+    data_path: Path = _data_path()
+    raw: dict[str, Any] = read_input(data_path)
+    instance: OPSInstance = parse_input(raw)
+    solution: Solution = solve(instance)
+    payload: dict[str, Any] = serialize_solution(solution)
+    write_output(payload)
 
 
 if __name__ == "__main__":
