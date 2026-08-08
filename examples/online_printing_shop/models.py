@@ -204,6 +204,7 @@ class ScheduledOperation(ClosedModel):
     operation: Identifier
     job: Identifier
     machine: Identifier
+    # Immediate predecessor on the selected machine, not a fixed job predecessor.
     predecessor: Identifier | None
     setup_start: TimeTick
     setup_duration: TimeTick
@@ -287,6 +288,8 @@ def _add_resumable_duration(
 ) -> None:
     """Bind elapsed work to a calendar-aware finish when ``presence`` is true."""
 
+    # One expression per outage: its duration when processing crosses the
+    # entire outage, otherwise zero. Their sum extends wall-clock duration.
     skipped_time: list[cp_model.LinearExpr] = []
     for gap_index, gap in enumerate(unavailability):
         start_after: CpsatIntVar = model.new_bool_var(f"{name}_start_after_{gap_index}")
@@ -302,24 +305,49 @@ def _add_resumable_duration(
 
 
 def solve(instance: OPSInstance) -> Solution:
-    """Build and solve the main CP-SAT model for OPS makespan minimization."""
+    """Build and solve the main CP-SAT model for OPS makespan minimization.
+
+    Each operation chooses exactly one eligible machine. Processing may pause
+    during that machine's outages, while setup must occupy one uninterrupted
+    interval immediately before processing. A circuit constraint orders the
+    operations chosen for each machine; its selected arcs also choose the
+    sequence-dependent setup durations. Job successors may start after a
+    specified fraction of their predecessor is processed, and the objective is
+    the latest operation completion time.
+    """
 
     model: cp_model.CpModel = cp_model.CpModel()
     horizon: int = _horizon(instance)
     operation_ids: list[str] = list(instance.operations)
 
+    # Per-operation time variables, all keyed by operation ID. Keeping them in
+    # maps lets precedence, machine-order, objective, and output code refer to
+    # the same variables after the operation-creation loop has finished.
     processing_starts: dict[str, CpsatIntVar] = {}
     theta_completion_times: dict[str, CpsatIntVar] = {}
     processing_ends: dict[str, CpsatIntVar] = {}
     setup_starts: dict[str, CpsatIntVar] = {}
     setup_durations: dict[str, CpsatIntVar] = {}
+
+    # (operation ID, eligible machine ID) -> Boolean assignment variable.
     assignments: dict[tuple[str, str], CpsatIntVar] = {}
-    incoming_arcs: dict[tuple[str, str], list[tuple[str | None, CpsatIntVar]]] = {}
+
+    # (operation ID, eligible machine ID) -> possible incoming machine-sequence
+    # arcs. Each entry is (candidate machine predecessor ID, arc literal);
+    # predecessor None means the depot/first-operation arc. The selected entry
+    # is read back in the output.
+    machine_incoming_arcs: dict[tuple[str, str], list[tuple[str | None, CpsatIntVar]]] = {}
+
+    # Machine ID -> optional setup intervals for operations eligible there.
+    # Every eligible operation has one, but only assigned intervals are active;
+    # they later share NoOverlap with the machine's outages.
     machine_setup_intervals: dict[str, list[CpsatIntervalVar]] = {
         machine_id: [] for machine_id in instance.machines
     }
 
-    # declare variables and enforce processing order for each operation
+    # One set of times is shared by all machine alternatives for an operation.
+    # The selected alternative activates the calendar and duration constraints
+    # for its machine; the other alternatives leave those constraints inactive.
     for operation_index, (operation_id, operation) in enumerate(instance.operations.items()):
         suffix: str = str(operation_index)
         processing_start: CpsatIntVar = model.new_int_var(
@@ -338,17 +366,22 @@ def solve(instance: OPSInstance) -> Solution:
         processing_ends[operation_id] = processing_end
         setup_starts[operation_id] = setup_start
         setup_durations[operation_id] = setup_duration
+        # These timestamps are ordered landmarks in the same resumable process:
+        # processing start <= theta-fraction completion <= full completion.
         model.add(processing_start <= theta_completion_time)
         model.add(theta_completion_time <= processing_end)
 
+        # Assignment literals for this operation, consumed by AddExactlyOne.
         alternatives: list[CpsatIntVar] = []
         for machine_index, (machine_id, option) in enumerate(operation.machine_options.items()):
             is_assigned: CpsatIntVar = model.new_bool_var(f"is_assigned_{suffix}_{machine_index}")
             assignments[operation_id, machine_id] = is_assigned
-            incoming_arcs[operation_id, machine_id] = []
+            machine_incoming_arcs[operation_id, machine_id] = []
             alternatives.append(is_assigned)
 
             machine: Machine = instance.machines[machine_id]
+            # Both completion times advance through active machine time only.
+            # Outages crossed after processing starts extend elapsed time.
             _add_resumable_duration(
                 model,
                 processing_start,
@@ -368,6 +401,8 @@ def solve(instance: OPSInstance) -> Solution:
                 f"processing_end_{suffix}_{machine_index}",
             )
             machine_setup_intervals[machine_id].append(
+                # A selected operation's setup ends exactly when processing starts.
+                # Its duration is fixed later by the operation's incoming circuit arc.
                 model.new_optional_interval_var(
                     setup_start,
                     setup_duration,
@@ -376,83 +411,119 @@ def solve(instance: OPSInstance) -> Solution:
                     f"setup_{suffix}_{machine_index}",
                 )
             )
-        # make sure one and only one machine is assigned to each operation
+        # Every operation is mandatory and uses exactly one eligible machine.
         model.add_exactly_one(alternatives)
         if operation.fixed is not None:
-            # enforce the fixed machine and start time
+            # A fixed operation still participates in its machine's sequence.
             model.add(assignments[operation_id, operation.fixed.machine] == 1)
             model.add(processing_start == operation.fixed.start)
 
-    # enforce precedence constraints between operations
+    # These fixed job-precedence relations come directly from JSON successors.
+    # A successor may overlap its predecessor after the required theta fraction
+    # is processed, but may not finish before its predecessor.
     for operation_id, operation in instance.operations.items():
         for successor_id in operation.successors:
             model.add(processing_starts[successor_id] >= theta_completion_times[operation_id])
             model.add(processing_ends[successor_id] >= processing_ends[operation_id])
-    # add a comment here
+
+    # Build one optional sequence per machine. AddCircuit sees a depot (node 0)
+    # plus one node for every operation eligible for the machine. Selected
+    # operations form a single 0 -> first -> ... -> last -> 0 cycle; operations
+    # assigned to other machines are excluded from that cycle by self-loops.
     for machine_index, (machine_id, machine) in enumerate(instance.machines.items()):
-        # filter operations that are eligible to run on this machine
+        # Operation IDs that have this machine among their allowed alternatives.
         eligible_operation_ids: list[str] = [
             operation_id
             for operation_id in operation_ids
             if machine_id in instance.operations[operation_id].machine_options
         ]
-        # create a node index dictionary for the circuit constraint,
-        # key is operation_id, value is index in eligible_operation_ids
+        # Circuit node 0 is reserved for the depot, so operation nodes start at 1.
         node_index: dict[str, int] = {
             operation_id: eligible_operation_index
             for eligible_operation_index, operation_id in enumerate(eligible_operation_ids, start=1)
         }
-        # Assignment flags used to determine whether this machine remains unused.
+        # Assignment literals for all eligible operations on this machine. Their
+        # sum is the number actually assigned here, not the number merely eligible.
         machine_assignments: list[CpsatIntVar] = [
             assignments[operation_id, machine_id] for operation_id in eligible_operation_ids
         ]
         machine_unused: CpsatIntVar = model.new_bool_var(f"machine_unused_{machine_index}")
+        # Together these implications make machine_unused equivalent to
+        # "none of this machine's eligible operations was assigned here."
         model.add(sum(machine_assignments) == 0).only_enforce_if(machine_unused)
         model.add(sum(machine_assignments) >= 1).only_enforce_if(machine_unused.Not())
-        # explain the first two elements in the tuple
+        # Each arc is (tail node, head node, selected literal). If the machine is
+        # unused, the depot's 0 -> 0 self-loop is the complete circuit.
         sequence_arcs: list[tuple[int, int, CpsatLiteral]] = [(0, 0, machine_unused)]
 
         for operation_id in eligible_operation_ids:
             is_assigned = assignments[operation_id, machine_id]
             operation_node: int = node_index[operation_id]
+            # An operation not assigned to this machine takes its own self-loop,
+            # removing it from the depot cycle required by AddCircuit.
             sequence_arcs.append((operation_node, operation_node, is_assigned.Not()))
 
+            # A depot -> operation arc makes this the first assigned operation and
+            # therefore selects the machine's first-operation setup duration.
             is_first: CpsatIntVar = model.new_bool_var(f"is_first_{machine_index}_{operation_node}")
             sequence_arcs.append((0, operation_node, is_first))
-            incoming_arcs[operation_id, machine_id].append((None, is_first))
+            # Output bookkeeping only: if this arc wins, extraction prints no
+            # predecessor. The is_first literal itself still constrains the model.
+            machine_incoming_arcs[operation_id, machine_id].append((None, is_first))
             first_setup: int = machine.setup_times.first[operation_id]
             model.add(setup_durations[operation_id] == first_setup).only_enforce_if(is_first)
             model.add(
                 setup_starts[operation_id] + first_setup == processing_starts[operation_id]
             ).only_enforce_if(is_first)
 
+            # An operation -> depot arc makes this the last assigned operation.
             is_last: CpsatIntVar = model.new_bool_var(f"is_last_{machine_index}_{operation_node}")
             sequence_arcs.append((operation_node, 0, is_last))
 
-        for predecessor_id in eligible_operation_ids:
-            for operation_id in eligible_operation_ids:
-                if predecessor_id == operation_id:
+        # Unlike fixed JSON job precedence, these arcs enumerate every possible
+        # immediate adjacency on this machine. Selecting one fixes the successor's
+        # setup duration and places it after the selected machine predecessor.
+        # The resulting circuit order prevents machine work from overlapping.
+        for candidate_machine_predecessor_id in eligible_operation_ids:
+            for candidate_machine_successor_id in eligible_operation_ids:
+                if candidate_machine_predecessor_id == candidate_machine_successor_id:
                     continue
-                is_transition: CpsatIntVar = model.new_bool_var(
-                    f"arc_{machine_index}_{node_index[predecessor_id]}_{node_index[operation_id]}"
+                is_machine_transition: CpsatIntVar = model.new_bool_var(
+                    f"arc_{machine_index}_{node_index[candidate_machine_predecessor_id]}_"
+                    f"{node_index[candidate_machine_successor_id]}"
                 )
                 sequence_arcs.append(
-                    (node_index[predecessor_id], node_index[operation_id], is_transition)
+                    (
+                        node_index[candidate_machine_predecessor_id],
+                        node_index[candidate_machine_successor_id],
+                        is_machine_transition,
+                    )
                 )
-                # what does this incoming arc do? not for CSP modeling?
-                incoming_arcs[operation_id, machine_id].append((predecessor_id, is_transition))
-                transition: int = machine.setup_times.transitions[predecessor_id][operation_id]
-                model.add(setup_durations[operation_id] == transition).only_enforce_if(
-                    is_transition
+                # Keep the incoming arc and its predecessor for solution extraction.
+                # The arc literal itself also drives the constraints below.
+                machine_incoming_arcs[candidate_machine_successor_id, machine_id].append(
+                    (candidate_machine_predecessor_id, is_machine_transition)
                 )
+                machine_transition_setup_duration: int = machine.setup_times.transitions[
+                    candidate_machine_predecessor_id
+                ][candidate_machine_successor_id]
                 model.add(
-                    setup_starts[operation_id] + transition == processing_starts[operation_id]
-                ).only_enforce_if(is_transition)
+                    setup_durations[candidate_machine_successor_id]
+                    == machine_transition_setup_duration
+                ).only_enforce_if(is_machine_transition)
                 model.add(
-                    processing_ends[predecessor_id] <= setup_starts[operation_id]
-                ).only_enforce_if(is_transition)
+                    setup_starts[candidate_machine_successor_id] + machine_transition_setup_duration
+                    == processing_starts[candidate_machine_successor_id]
+                ).only_enforce_if(is_machine_transition)
+                model.add(
+                    processing_ends[candidate_machine_predecessor_id]
+                    <= setup_starts[candidate_machine_successor_id]
+                ).only_enforce_if(is_machine_transition)
 
         model.add_circuit(sequence_arcs)
+        # Circuit transitions already serialize assigned operations. NoOverlap
+        # additionally keeps each non-resumable setup outside machine outages.
+        # These fixed intervals are the machine's unavailable calendar blocks.
         outage_intervals: list[CpsatIntervalVar] = [
             model.new_fixed_size_interval_var(
                 gap.start,
@@ -463,6 +534,7 @@ def solve(instance: OPSInstance) -> Solution:
         ]
         model.add_no_overlap(machine_setup_intervals[machine_id] + outage_intervals)
 
+    # Minimize the latest processing completion across all operations.
     makespan: CpsatIntVar = model.new_int_var(0, horizon, "makespan")
     model.add_max_equality(makespan, list(processing_ends.values()))
     model.minimize(makespan)
@@ -470,6 +542,8 @@ def solve(instance: OPSInstance) -> Solution:
     def extract_schedule(
         reader: cp_model.CpSolver | cp_model.CpSolverSolutionCallback,
     ) -> list[ScheduledOperation]:
+        """Translate selected assignment and sequence arcs into output records."""
+
         schedule: list[ScheduledOperation] = []
         for operation_id, operation in instance.operations.items():
             machine_id: str = next(
@@ -477,17 +551,19 @@ def solve(instance: OPSInstance) -> Solution:
                 for machine_id in operation.machine_options
                 if reader.boolean_value(assignments[operation_id, machine_id])
             )
-            predecessor: str | None = next(
-                predecessor
-                for predecessor, is_transition in incoming_arcs[operation_id, machine_id]
-                if reader.boolean_value(is_transition)
+            machine_predecessor: str | None = next(
+                candidate_machine_predecessor
+                for candidate_machine_predecessor, is_machine_transition in machine_incoming_arcs[
+                    operation_id, machine_id
+                ]
+                if reader.boolean_value(is_machine_transition)
             )
             schedule.append(
                 ScheduledOperation(
                     operation=operation_id,
                     job=operation.job,
                     machine=machine_id,
-                    predecessor=predecessor,
+                    predecessor=machine_predecessor,
                     setup_start=reader.value(setup_starts[operation_id]),
                     setup_duration=reader.value(setup_durations[operation_id]),
                     start=reader.value(processing_starts[operation_id]),
@@ -500,6 +576,8 @@ def solve(instance: OPSInstance) -> Solution:
 
     class _BestSolution(cp_model.CpSolverSolutionCallback):
         def on_solution_callback(self) -> None:
+            # Stream each improving incumbent; the final return below repeats the
+            # terminal solution as the script's last stdout envelope.
             write_output(
                 serialize_solution(
                     Solution(
