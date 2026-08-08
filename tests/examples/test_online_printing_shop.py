@@ -1,4 +1,5 @@
 import json
+from decimal import Decimal
 from pathlib import Path
 from typing import Any
 
@@ -6,7 +7,12 @@ import pytest
 from pydantic import ValidationError
 
 from examples.online_printing_shop.audit_instance import audit_instance
-from examples.online_printing_shop.models import parse_input, read_input, solve
+from examples.online_printing_shop.models import (
+    _required_processing,
+    parse_input,
+    read_input,
+    solve,
+)
 from openconstraint_mcp.server import create_mcp_server
 
 ROOT = Path(__file__).parents[2]
@@ -23,7 +29,9 @@ def test_sops1_instance_passes_semantic_validation_without_normalization() -> No
 
     validated = parse_input(raw)
 
-    assert validated.model_dump(mode="json", exclude_none=True) == raw
+    # Python mode, not JSON mode: theta is a Decimal, and JSON mode would render
+    # it as a string, which is itself a normalization this test rules out.
+    assert validated.model_dump(mode="python", exclude_none=True) == raw
 
 
 def test_sops1_model_proves_the_known_optimum() -> None:
@@ -77,6 +85,78 @@ def test_incomplete_setup_matrix_is_rejected() -> None:
     del raw["machines"]["1"]["setup_times"]["transitions"]["1"]["4"]
 
     with pytest.raises(ValidationError, match="must cover every other eligible operation"):
+        parse_input(raw)
+
+
+def _write_instance_with_theta(tmp_path: Path, theta_literal: str) -> Path:
+    """Write a one-operation instance whose theta appears verbatim in the JSON."""
+
+    path = tmp_path / "instance.json"
+    path.write_text(
+        f"""{{
+          "format": "openconstraint.ops.instance",
+          "format_version": "1.0",
+          "provenance": {{"source": "test", "license": "test"}},
+          "machines": {{
+            "1": {{
+              "unavailability": [],
+              "setup_times": {{"first": {{"1": 0}}, "transitions": {{}}}}
+            }}
+          }},
+          "operations": {{
+            "1": {{
+              "job": "1",
+              "successors": [],
+              "machine_options": {{"1": {{"processing_time": 2}}}},
+              "release_time": 0,
+              "theta": {theta_literal}
+            }}
+          }}
+        }}""",
+        encoding="utf-8",
+    )
+    return path
+
+
+def test_theta_beyond_float_precision_survives_reading(tmp_path: Path) -> None:
+    path = _write_instance_with_theta(tmp_path, "0.50000000000000000001")
+
+    theta = parse_input(read_input(path)).operations["1"].theta
+
+    assert theta == Decimal("0.50000000000000000001")
+
+
+def test_theta_beyond_float_precision_keeps_the_checker_ceiling(tmp_path: Path) -> None:
+    # A float round-trip would collapse this theta to 0.5 and require only 1
+    # tick, while checker.py parses the literal as a Decimal and requires 2.
+    path = _write_instance_with_theta(tmp_path, "0.50000000000000000001")
+
+    operation = parse_input(read_input(path)).operations["1"]
+
+    assert _required_processing(operation.theta, 2) == 2
+
+
+def test_float_theta_is_rejected_rather_than_silently_rounded() -> None:
+    raw = load_instance()
+    raw["operations"]["1"]["theta"] = 0.58
+
+    with pytest.raises(ValidationError, match="Decimal"):
+        parse_input(raw)
+
+
+def test_integer_theta_is_accepted_as_an_exact_decimal(tmp_path: Path) -> None:
+    path = _write_instance_with_theta(tmp_path, "1")
+
+    theta = parse_input(read_input(path)).operations["1"].theta
+
+    assert theta == Decimal(1)
+
+
+def test_boolean_theta_is_rejected() -> None:
+    raw = load_instance()
+    raw["operations"]["1"]["theta"] = True
+
+    with pytest.raises(ValidationError, match="Decimal"):
         parse_input(raw)
 
 

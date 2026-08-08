@@ -12,11 +12,32 @@ from pathlib import Path
 from typing import Annotated, Any, Literal, Self
 
 from ortools.sat.python import cp_model
-from pydantic import BaseModel, ConfigDict, Field, StringConstraints, model_validator
+from pydantic import (
+    BaseModel,
+    BeforeValidator,
+    ConfigDict,
+    Field,
+    StringConstraints,
+    model_validator,
+)
+
+
+def _exact_theta(value: Any) -> Any:
+    """Widen a JSON integer literal to Decimal, leaving every other type to fail.
+
+    ``read_input`` parses JSON fractions with ``parse_float=Decimal``, so a float
+    here means the value already lost precision somewhere else; strict validation
+    rejects it rather than silently accepting the rounded number.
+    """
+
+    if isinstance(value, int) and not isinstance(value, bool):
+        return Decimal(value)
+    return value
+
 
 Identifier = Annotated[str, StringConstraints(min_length=1)]
 TimeTick = Annotated[int, Field(ge=0)]
-Theta = Annotated[float, Field(gt=0, le=1)]
+Theta = Annotated[Decimal, BeforeValidator(_exact_theta), Field(gt=0, le=1)]
 CpsatIntVar = cp_model.IntVar
 CpsatIntervalVar = cp_model.IntervalVar
 CpsatLiteral = cp_model.LiteralT
@@ -226,7 +247,9 @@ class Solution(ClosedModel):
 def read_input(data_path: Path) -> dict[str, Any]:
     """Read one raw OPS instance object from a JSON file."""
 
-    raw: dict[str, Any] = json.loads(data_path.read_text(encoding="utf-8"))
+    # parse_float matches checker.py, so theta keeps every digit the file states
+    # and both sides derive the same ceil(theta * processing_time).
+    raw: dict[str, Any] = json.loads(data_path.read_text(encoding="utf-8"), parse_float=Decimal)
     return raw
 
 
@@ -273,8 +296,8 @@ def _horizon(instance: OPSInstance) -> int:
     return anchor + work
 
 
-def _required_processing(theta: float, processing_time: int) -> int:
-    return int((Decimal(str(theta)) * processing_time).to_integral_value(rounding=ROUND_CEILING))
+def _required_processing(theta: Decimal, processing_time: int) -> int:
+    return int((theta * processing_time).to_integral_value(rounding=ROUND_CEILING))
 
 
 def _add_resumable_duration(

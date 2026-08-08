@@ -63,6 +63,7 @@ import sys
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Any, cast
 
 from ortools.sat.python import cp_model
 
@@ -122,11 +123,11 @@ def _results_dir() -> Path | None:
     return (Path(__file__).parent / sys.argv[3]) if len(sys.argv) > 3 else None
 
 
-def read_input(data_path: Path) -> dict:
-    return json.loads(data_path.read_text())
+def read_input(data_path: Path) -> dict[str, Any]:
+    return cast(dict[str, Any], json.loads(data_path.read_text()))
 
 
-def parse_input(raw: dict) -> ProblemInstance:
+def parse_input(raw: dict[str, Any]) -> ProblemInstance:
     jobs = [
         [
             TaskSpec(
@@ -331,7 +332,7 @@ def solve(instance: ProblemInstance, time_limit_seconds: float, instance_name: s
     )
 
 
-def serialize_solution(solution: Solution) -> dict:
+def serialize_solution(solution: Solution) -> dict[str, Any]:
     # The printed `solution` must CONTAIN the schedule, not describe it: the
     # checked MCP tools build the checker's payload from this stdout object, so a
     # summary that merely points at a saved file leaves the checker with nothing
@@ -341,7 +342,7 @@ def serialize_solution(solution: Solution) -> dict:
     # either: the name is derivable from the formulation and instance already in
     # `stats`, and an absolute path would bake this machine's filesystem into
     # every committed artifact under results/.
-    payload_solution: dict = {}
+    payload_solution: dict[str, Any] = {}
     if solution.schedule is not None:
         payload_solution = {
             "makespan": solution.objective,
@@ -369,7 +370,7 @@ def serialize_solution(solution: Solution) -> dict:
 
 
 def write_output(
-    payload: dict,
+    payload: dict[str, Any],
     results_dir: Path | None,
     data_path: Path,
     formulation: str = "direct_optional_intervals",
