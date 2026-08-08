@@ -409,7 +409,7 @@ def solve(instance: OPSInstance) -> Solution:
         machine_unused: CpsatIntVar = model.new_bool_var(f"machine_unused_{machine_index}")
         model.add(sum(machine_assignments) == 0).only_enforce_if(machine_unused)
         model.add(sum(machine_assignments) >= 1).only_enforce_if(machine_unused.Not())
-        # explain the first two elements in the tuple    
+        # explain the first two elements in the tuple
         sequence_arcs: list[tuple[int, int, CpsatLiteral]] = [(0, 0, machine_unused)]
 
         for operation_id in eligible_operation_ids:
@@ -442,9 +442,11 @@ def solve(instance: OPSInstance) -> Solution:
                 # what does this incoming arc do? not for CSP modeling?
                 incoming_arcs[operation_id, machine_id].append((predecessor_id, is_transition))
                 transition: int = machine.setup_times.transitions[predecessor_id][operation_id]
-                model.add(setup_durations[operation_id] == transition).only_enforce_if(is_transition)
+                model.add(setup_durations[operation_id] == transition).only_enforce_if(
+                    is_transition
+                )
                 model.add(
-                    setup_starts[operation_id] +  transition == processing_starts[operation_id]
+                    setup_starts[operation_id] + transition == processing_starts[operation_id]
                 ).only_enforce_if(is_transition)
                 model.add(
                     processing_ends[predecessor_id] <= setup_starts[operation_id]
