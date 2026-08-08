@@ -18,6 +18,7 @@ Identifier = Annotated[str, StringConstraints(min_length=1)]
 TimeTick = Annotated[int, Field(ge=0)]
 Theta = Annotated[float, Field(gt=0, le=1)]
 CpsatIntVar = cp_model.IntVar
+CpsatLiteral = cp_model.LiteralT
 
 
 class ClosedModel(BaseModel):
@@ -385,7 +386,7 @@ def solve(instance: OPSInstance) -> Solution:
         for successor_id in operation.successors:
             model.add(processing_starts[successor_id] >= theta_completion_times[operation_id])
             model.add(processing_ends[successor_id] >= processing_ends[operation_id])
-
+    # add a comment here
     for machine_index, (machine_id, machine) in enumerate(instance.machines.items()):
         # filter operations that are eligible to run on this machine
         eligible_operation_ids: list[str] = [
@@ -393,19 +394,21 @@ def solve(instance: OPSInstance) -> Solution:
             for operation_id in operation_ids
             if machine_id in instance.operations[operation_id].machine_options
         ]
-        # create a node index dictinary for the circuit constraint,
+        # create a node index dictionary for the circuit constraint,
         # key is operation_id, value is index in eligible_operation_ids
         node_index: dict[str, int] = {
             operation_id: eligible_operation_index
             for eligible_operation_index, operation_id in enumerate(eligible_operation_ids, start=1)
         }
+        # Assignment flags used to determine whether this machine remains unused.
         machine_assignments: list[CpsatIntVar] = [
             assignments[operation_id, machine_id] for operation_id in eligible_operation_ids
         ]
         machine_unused: CpsatIntVar = model.new_bool_var(f"machine_unused_{machine_index}")
         model.add(sum(machine_assignments) == 0).only_enforce_if(machine_unused)
         model.add(sum(machine_assignments) >= 1).only_enforce_if(machine_unused.Not())
-        sequence_arcs: list[tuple[int, int, cp_model.LiteralT]] = [(0, 0, machine_unused)]
+        # explain the first two elements in the tuple    
+        sequence_arcs: list[tuple[int, int, CpsatLiteral]] = [(0, 0, machine_unused)]
 
         for operation_id in eligible_operation_ids:
             is_assigned = assignments[operation_id, machine_id]
@@ -428,19 +431,22 @@ def solve(instance: OPSInstance) -> Solution:
             for operation_id in eligible_operation_ids:
                 if predecessor_id == operation_id:
                     continue
-                arc: CpsatIntVar = model.new_bool_var(
+                is_transition: CpsatIntVar = model.new_bool_var(
                     f"arc_{machine_index}_{node_index[predecessor_id]}_{node_index[operation_id]}"
                 )
-                sequence_arcs.append((node_index[predecessor_id], node_index[operation_id], arc))
-                incoming_arcs[operation_id, machine_id].append((predecessor_id, arc))
+                sequence_arcs.append(
+                    (node_index[predecessor_id], node_index[operation_id], is_transition)
+                )
+                # what does this incoming arc do?
+                incoming_arcs[operation_id, machine_id].append((predecessor_id, is_transition))
                 transition: int = machine.setup_times.transitions[predecessor_id][operation_id]
-                model.add(setup_durations[operation_id] == transition).only_enforce_if(arc)
+                model.add(setup_durations[operation_id] == transition).only_enforce_if(is_transition)
                 model.add(
                     setup_starts[operation_id] == processing_starts[operation_id] - transition
-                ).only_enforce_if(arc)
+                ).only_enforce_if(is_transition)
                 model.add(
                     processing_ends[predecessor_id] <= setup_starts[operation_id]
-                ).only_enforce_if(arc)
+                ).only_enforce_if(is_transition)
 
         model.add_circuit(sequence_arcs)
         outage_intervals: list[cp_model.IntervalVar] = [
@@ -469,8 +475,8 @@ def solve(instance: OPSInstance) -> Solution:
             )
             predecessor: str | None = next(
                 predecessor
-                for predecessor, arc in incoming_arcs[operation_id, machine_id]
-                if reader.boolean_value(arc)
+                for predecessor, is_transition in incoming_arcs[operation_id, machine_id]
+                if reader.boolean_value(is_transition)
             )
             schedule.append(
                 ScheduledOperation(
