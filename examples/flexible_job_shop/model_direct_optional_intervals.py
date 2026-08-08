@@ -156,9 +156,9 @@ def solve(instance: ProblemInstance, time_limit_seconds: float, instance_name: s
 
     Task = collections.namedtuple("Task", "start end")
     tasks: dict[tuple[int, int], Task] = {}
-    machine_to_intervals: dict[int, list] = collections.defaultdict(list)
-    presences: dict[tuple[int, int], list] = {}
-    machine_load_terms: dict[int, list] = collections.defaultdict(list)
+    machine_to_intervals: dict[int, list[cp_model.IntervalVar]] = collections.defaultdict(list)
+    presences: dict[tuple[int, int], list[cp_model.IntVar]] = {}
+    machine_load_terms: dict[int, list[cp_model.LinearExprT]] = collections.defaultdict(list)
 
     for job_id, job in enumerate(jobs):
         for task_id, task_spec in enumerate(job):
