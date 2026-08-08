@@ -34,9 +34,8 @@ def _checker_violation(messages: list[Any]) -> bool:
 def _section_default(obj: Any) -> str | None:
     # A rendered `output.default` section, when present as a string.
     output = obj.get("output") if isinstance(obj, dict) else None
-    if isinstance(output, dict) and isinstance(output.get("default"), str):
-        return output["default"]
-    return None
+    default = output.get("default") if isinstance(output, dict) else None
+    return default if isinstance(default, str) else None
 
 
 def _checker_output(obj: dict[str, Any], messages: list[Any]) -> str:

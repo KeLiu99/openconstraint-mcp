@@ -1,0 +1,316 @@
+Online printing shop scheduling (OPS).
+
+Problem
+-------
+
+The OPS problem defined by Lunardi et al. is a real industrial extension of
+flexible job shop scheduling. Here, "online" describes orders placed through an
+online print shop. It does not mean dynamic or online scheduling in which a
+solver must commit to decisions before future jobs are known.
+
+Before scheduling, a cutting-stock decision may gang printing operations from
+several customer orders onto one sheet. The orders joined by that ganging
+operation then form one scheduling job. The OPS scheduling model receives this
+job structure as input; it does not decide which orders to gang.
+
+A job contains mandatory operations linked by an arbitrary directed acyclic
+graph (DAG). Different jobs have no precedence edges between them. Once all job
+DAGs have been combined, jobs are only a grouping concept and their number does
+not otherwise enter the paper's formulation. The DAG gives sequence
+flexibility: unrelated branches may run in parallel when machine capacity
+permits, and branches may split or join. It does not provide alternative
+process plans or make operations optional.
+
+For every operation i, the input gives:
+
+- a non-empty set F(i) of eligible machines and a processing time p(i,k) for
+  every k in F(i);
+- an operation-level release time r(i);
+- a fraction theta(i) in (0, 1] that controls partial overlap with every direct
+  successor; and
+- for a fixed operation, a preassigned machine and starting time. In the
+  paper, the machine assignment is represented by making F(i) a singleton.
+
+For every machine, the input also gives planned unavailability periods, the
+setup time for each possible first operation, and directional setup times
+between consecutive operations. Processing and setup times may therefore
+depend on the selected machine and, for setup, on the machine sequence.
+
+A feasible schedule must:
+
+- assign every operation to exactly one eligible machine;
+- start every operation no earlier than its release time and preserve every
+  fixed machine and starting-time assignment;
+- let each machine handle at most one operation or setup at a time;
+- for every precedence edge (i,j), start j only after i has completed
+  ceil(theta(i) * p(i,k)) units of actual processing on its selected machine k,
+  and also ensure that j does not complete before i;
+- under the paper's endpoint convention, never start an operation at the
+  beginning or in the interior of an unavailability period, and never complete
+  it in the interior or at the end of one. Completion at the beginning and
+  starting at the end of an unavailability period are allowed;
+- allow processing to stop only during a planned unavailability of its assigned
+  machine, keep the operation on that machine, and resume it as soon as the
+  machine is available again; and
+- keep every setup wholly outside machine-unavailability periods, run it without
+  interruption, and finish it exactly when its associated operation starts,
+  with no idle time between them.
+
+Thus "resumable" is not general preemption: the scheduler cannot pause an
+operation voluntarily, move it to another machine, or insert another operation
+before it resumes. The paper assumes rational time data and scales it to
+integers in the formulations.
+
+Objective
+---------
+
+The paper minimizes makespan, the latest operation completion time:
+
+    minimize  Cmax = max over operations i of completion(i)
+
+Due dates, priorities, and total weighted tardiness are not part of this OPS
+formulation. Workers, tools, materials, transport, and process-plan alternatives
+are also outside its formal resource model.
+
+Where the optimization comes from
+---------------------------------
+
+The instance data are fixed, but the schedule is not. The main optimization
+choices are:
+
+- machine assignment: an operation with several eligible machines may have a
+  different processing time, setup, and calendar on each one;
+- machine sequence: operations assigned to the same machine must be ordered,
+  and different orders can change directional setup times and delay different
+  downstream branches; and
+- timing: the solver chooses feasible start times around release times, fixed
+  operations, precedence, partial overlap, setup, and machine unavailability.
+
+A fixed operation removes only its own machine and start-time choices. Other
+operations may still choose machines, compete for capacity, and be sequenced.
+Even if every eligible-machine set is a singleton, machine-order choices can
+still make this a scheduling optimization problem. Conversely, if every machine
+assignment, machine sequence, and start time is predetermined, there is no
+remaining optimization: one only checks feasibility and computes the makespan.
+With assignments and sequences fixed but start times open, most of the remaining
+work is deriving an earliest feasible schedule.
+
+Examples in the paper
+---------------------
+
+Figure 1a shows a ganged printing operation followed by cutting and a split
+into three independent product routes. Figure 1b shows a simplified book: one
+branch produces the cover (operations 1 and 3), another produces the pages
+(operations 2 and 4), and both join at binding (operation 5), followed by two
+unnamed downstream operations:
+
+    cover:  O1 -> O3 --+
+                       +--> O5 -> O6 -> O7
+    pages:  O2 -> O4 --+
+
+Figure 2 shows a toy Gantt chart with 7 jobs and 9 machines and visually marks
+release times, a fixed operation, partial overlap, setup, and machine
+unavailability. The paper does not give a compact table containing all input
+values for that chart, so it cannot be reconstructed as a complete numerical
+teaching instance from the article alone.
+
+Sourcing and provenance
+-----------------------
+
+- Lunardi, Birgin, Laborie, Ronconi, and Voos, "Mixed Integer Linear
+  Programming and Constraint Programming Models for the Online Printing Shop
+  Scheduling Problem," Computers & Operations Research 123 (2020), 105020:
+  https://doi.org/10.1016/j.cor.2020.105020
+  Open preprint (v2):
+  https://arxiv.org/abs/2006.13064
+
+- Authors' model and instance repository:
+  https://github.com/Willtl/online-printing-shop
+
+The repository homepage does not state a license for its benchmark data. Until
+a license is confirmed, do not copy those instances into this directory. Any
+future benchmark data file here must carry a confirmed license and attribution,
+matching the provenance practice for ../flexible_job_shop and
+../../LICENSES/fjsp-instances.txt.
+
+Canonical data contract and solver
+----------------------------------
+
+models.py is the canonical Pydantic v2 contract, semantic validator, and CP-SAT
+solver. It follows the read_input/parse_input/solve/serialize_solution/
+write_output spine, reads a sibling JSON filename from argv (defaulting to
+data_sops1.json), and prints the complete solution in-band on stdout. checker.py
+generically verifies those emitted schedules against the supplied OPS instance.
+The data file contains no schedule, known optimum, or configurable objective:
+OPS always minimizes makespan, and solver results remain separate from the
+input.
+
+Run the default instance from the repository root with:
+
+    uv run python examples/online_printing_shop/models.py
+
+Pass another sibling instance as argv, for example:
+
+    uv run python examples/online_printing_shop/models.py data_mops1.json
+
+All identifiers are nonempty strings. JSON object keys provide machine and
+operation identity, so their order has no scheduling meaning. All time values
+are nonnegative integer ticks. Unknown fields are rejected.
+
+Solver configuration
+~~~~~~~~~~~~~~~~~~~~
+
+run_cpsat_python_file and run_cpsat_python_file_checked both accept seed and
+config arguments. The server never edits the script: it writes config to a
+temporary JSON file and hands the child two environment variables,
+OPENCONSTRAINT_MCP_CPSAT_SEED and OPENCONSTRAINT_MCP_CPSAT_CONFIG (that file's
+path). Honouring them is the script's job, so only the keys models.py actually
+reads take effect; every other key is silently ignored. The same variables work
+from a shell, which is how the uv commands above can be configured too.
+
+models.py reads three settings:
+
+random seed
+    OPENCONSTRAINT_MCP_CPSAT_SEED, default 42.
+
+max_time_in_seconds
+    The CP-SAT wall-clock limit. Without it the solve runs unbounded, and a run
+    started through an MCP tool is killed at timeout_ms instead of stopping on
+    its own. Set it below timeout_ms.
+
+num_workers
+    The CP-SAT worker count, default 1. One worker keeps a seeded run
+    reproducible and still proves the small instances optimal. The parallel
+    portfolio is nondeterministic in wall-clock terms, so its incumbent differs
+    between otherwise identical runs.
+
+What each instance needs:
+
+data_sops1.json
+    Nothing. It proves optimality in well under a second on one worker.
+
+data_mops1.json
+    max_time_in_seconds, so CP-SAT stops itself and returns an incumbent the
+    checker can verify.
+
+data_lops.json
+    Both, for example {"max_time_in_seconds": 150, "num_workers": 8}. On one
+    worker it spends the whole limit and still reports status "unknown" with no
+    incumbent, which the checker refuses.
+
+Streaming follows the same switch. With no max_time_in_seconds the solution
+callback prints a complete envelope for every improving solution, so a child
+killed at timeout_ms still leaves a recoverable incumbent on stdout. With a
+limit set the solve returns on its own and only the final envelope is printed,
+which is what keeps a long parallel run inside the executor's 1 MiB output cap
+— crossing that cap discards the whole result, incumbent included.
+
+Top-level fields
+~~~~~~~~~~~~~~~~
+
+format
+    The constant "openconstraint.ops.instance". It distinguishes this contract
+    from other problem formats.
+
+format_version
+    The contract version, currently "1.0".
+
+provenance
+    Human-readable source and license status. In data_sops1.json, source pins
+    upstream instances/small/sops1.json to commit
+    31918bc04e4ad93c2106168d6cf0b393271799e7. NOASSERTION means that no license
+    has been established; it is not a license grant.
+
+machines
+    A map from machine ID to its calendar and explicit setup-time data.
+
+operations
+    A map from globally unique operation ID to the operation's job membership,
+    precedence successors, machine choices, timing data, and optional fixed
+    assignment.
+
+There is no separate jobs map. The job field on each operation is the single
+source of job membership, and successors are required to stay within that job.
+The job labels group operations; they do not impose an array order.
+
+Machine objects
+~~~~~~~~~~~~~~~
+
+unavailability
+    An ordered list of nonoverlapping {start, end} machine outages. For example,
+    machine "1" is unavailable from tick 176 until tick 221. Processing may
+    finish at 176 or start at 221, but may not start at 176 or finish at 221.
+    Processing pauses across an outage and resumes on the same machine; setup
+    may not overlap an outage.
+
+setup_times.first
+    A complete map from every operation eligible for this machine to the setup
+    duration required when that operation is first in the machine sequence.
+    For example, machines "1", "2", and "3" have first-operation setup
+    durations 15, 9, and 16 respectively in data_sops1.json.
+
+setup_times.transitions
+    A complete directional matrix for distinct eligible operations. Entry
+    transitions["1"]["4"] is the setup duration when operation "1" is followed
+    immediately by operation "4" on this machine. The reverse entry is separate
+    and may differ. A setup occupies the machine, runs without interruption,
+    and ends exactly when the target operation begins. Self-transitions are
+    omitted because an operation executes only once.
+
+The setup durations are already materialized. A solver does not need the
+upstream size, color, varnish, or machine setup coefficients used to derive
+them.
+
+Operation objects
+~~~~~~~~~~~~~~~~~
+
+job
+    The operation's job ID. For example, operations "1" through "5" carry job
+    "1". This membership does not order them.
+
+successors
+    The IDs of direct successors in the job DAG. Array order is irrelevant.
+    Operation "1" has successors "4" and "5", which means edges 1 -> 4 and
+    1 -> 5; it does not mean that operation "4" precedes operation "5".
+
+machine_options
+    A nonempty map from each eligible machine ID to its machine-dependent
+    processing_time. Exactly one option must be selected. For operation "1",
+    machine "2" takes 50 ticks, machine "1" takes 49, and machine "3" takes 22.
+    Processing time is active work only; setup and outage delays are separate.
+
+release_time
+    The earliest tick at which processing may start. Setup may occur before the
+    release time as long as processing itself does not start early.
+
+theta
+    A number in (0, 1]. A direct successor may start after the operation has
+    completed ceil(theta * processing_time) ticks of actual processing on its
+    selected machine. The successor also may not finish before this operation.
+
+fixed
+    Optional {machine, start}. When present, the operation must use that eligible
+    machine and start processing at that tick. Its start must not precede its
+    release time. Absence means that machine and start are solver decisions.
+
+Semantic validation
+~~~~~~~~~~~~~~~~~~~
+
+parse_input() rejects an instance when:
+
+- a successor or machine reference is missing;
+- a successor belongs to another job;
+- the precedence graph contains a cycle;
+- a fixed machine is not one of the operation's machine_options;
+- a fixed start precedes release_time;
+- an unavailability interval is empty, reversed, out of order, or overlapping;
+  or
+- a machine's first or directional setup entries do not exactly cover the
+  operations eligible for that machine.
+
+data_sops1.json converts the user-provided contents of the pinned upstream
+sops1 instance. Machine and operation IDs are the upstream numeric IDs written
+as JSON strings. Resource/time pairings, job membership, precedence, release
+times, overlaps, the fixed start, availability gaps, and calculated setup times
+are preserved. The legacy Willtl structure and a converter for it are outside
+this example's contract.

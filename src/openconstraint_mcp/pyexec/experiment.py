@@ -38,7 +38,7 @@ import time
 from collections.abc import Sequence
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
-from typing import NamedTuple, cast
+from typing import NamedTuple
 
 from ..schemas.cpsat import (
     CpsatExperimentSelectionPolicy,
@@ -196,7 +196,7 @@ def _validate_objective_sense(objective_sense: object) -> CpsatObjectiveSense | 
         return None
     if objective_sense not in ("maximize", "minimize"):
         raise ValueError("objective_sense must be 'maximize', 'minimize', or None")
-    return cast("CpsatObjectiveSense", objective_sense)
+    return objective_sense
 
 
 def _selection_policy(

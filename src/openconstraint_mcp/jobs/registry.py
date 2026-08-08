@@ -25,7 +25,6 @@ from collections.abc import Sequence
 from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass
 from subprocess import Popen
-from typing import cast
 from uuid import uuid4
 
 # jobs reuses core's solve helpers (validation, arg-building, process teardown)
@@ -304,7 +303,7 @@ class JobRegistry:
             # A terminal record can still own a leader that termination could not
             # reap. Its None returncode is the teardown-retry signal.
             handles = [
-                cast("Popen[str]", r.handle)
+                r.handle
                 for r in self._records.values()
                 if r.handle is not None
                 and (r.state not in TERMINAL_STATES or getattr(r.handle, "returncode", 0) is None)

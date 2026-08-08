@@ -387,7 +387,7 @@ def normalize_objective(raw: object) -> float | int | None:
     return raw
 
 
-def parse_last_json(text: str) -> dict | None:
+def parse_last_json(text: str) -> dict[str, Any] | None:
     """Return the last top-level JSON object found in ``text``, or ``None``.
 
     Scans forward, decoding each top-level object with ``raw_decode`` so trailing
@@ -396,7 +396,7 @@ def parse_last_json(text: str) -> dict | None:
     is never mistaken for the result. The last object that decodes wins.
     """
     decoder = json.JSONDecoder()
-    found: dict | None = None
+    found: dict[str, Any] | None = None
     index = text.find("{")
     while index >= 0:
         try:
@@ -418,7 +418,7 @@ def _elide_key_path(path: str) -> str:
     return f"{path[:keep]}…{path[-keep:]}"
 
 
-def _nonfinite_violation(solution: dict) -> tuple[str, str] | None:
+def _nonfinite_violation(solution: dict[str, Any]) -> tuple[str, str] | None:
     """Return the FIRST ``(key path, reason)`` non-finite float in ``solution``.
 
     Walks every ``dict`` value and ``list`` element at any depth: a
@@ -460,7 +460,7 @@ def _nonfinite_violation(solution: dict) -> tuple[str, str] | None:
     return None
 
 
-def _envelope_violation(parsed: dict) -> tuple[str, str] | None:
+def _envelope_violation(parsed: dict[str, Any]) -> tuple[str, str] | None:
     """Return the first ``(field, reason)`` stdout-envelope violation, or ``None``.
 
     The required-key/type gate for a parsed result block: ``status`` in the
@@ -494,8 +494,8 @@ def _envelope_violation(parsed: dict) -> tuple[str, str] | None:
 
 
 def _extract_solution_objective(
-    parsed: dict,
-) -> tuple[dict, float | int | None, float | int | None]:
+    parsed: dict[str, Any],
+) -> tuple[dict[str, Any], float | int | None, float | int | None]:
     """Pull the solution dict, objective, and best_objective_bound out of a result block.
 
     Called only for a block that already cleared ``_envelope_violation`` — both
@@ -506,7 +506,7 @@ def _extract_solution_objective(
     gate, so it keeps its permissive normalization here: a non-numeric or
     non-finite bound becomes ``None`` rather than failing the whole result.
     """
-    solution: dict = parsed["solution"]
+    solution: dict[str, Any] = parsed["solution"]
     objective: float | int | None = parsed["objective"]
     best_objective_bound = normalize_objective(parsed.get("best_objective_bound"))
     return solution, objective, best_objective_bound

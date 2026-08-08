@@ -190,7 +190,7 @@ def _homepage_url() -> str | None:
     must not crash boot).
     """
     try:
-        entries = metadata.metadata(_PACKAGE_NAME).get_all("Project-URL") or []
+        entries: list[str] = metadata.metadata(_PACKAGE_NAME).get_all("Project-URL") or []
     except metadata.PackageNotFoundError:
         return None
     for entry in entries:

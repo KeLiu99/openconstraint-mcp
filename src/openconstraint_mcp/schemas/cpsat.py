@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import math
-from typing import Literal
+from typing import Any, Literal
 
 from pydantic import (
     BaseModel,
@@ -40,7 +40,7 @@ CPSAT_MUTATION_NAMES: tuple[CpsatMutationName, ...] = (
 
 class CpsatPythonResult(BaseModel):
     status: CpsatStatus
-    solution: dict | None
+    solution: dict[str, Any] | None
     objective: float | int | None
     # OR-Tools' solver.best_objective_bound — a diagnostic bound, not a proven
     # objective. Useful even when status="unknown" and no incumbent was found,
@@ -93,7 +93,7 @@ class CpsatCheckerReport(BaseModel):
 
     status: Literal["accepted", "rejected", "error", "timeout"]
     errors: list[str]
-    details: dict | None = None
+    details: dict[str, Any] | None = None
     stdout: str
     stderr: str
     duration_ms: int
@@ -409,7 +409,7 @@ class SaveVerifiedPythonResult(BaseModel):
     status: CpsatStatus
     target_dir: str | None
     reason: str | None
-    solution: dict | None
+    solution: dict[str, Any] | None
     objective: float | int | None
     stdout: str
     stderr: str
