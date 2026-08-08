@@ -122,15 +122,15 @@ class OPSInstance(ClosedModel):
 
     @model_validator(mode="after")
     def validate_semantics(self) -> Self:
-        operation_ids = set(self.operations)
-        machine_ids = set(self.machines)
+        operation_ids: set[str] = set(self.operations)
+        machine_ids: set[str] = set(self.machines)
 
-        indegree = dict.fromkeys(operation_ids, 0)
+        indegree: dict[str, int] = dict.fromkeys(operation_ids, 0)
         for operation_id, operation in self.operations.items():
             if len(operation.successors) != len(set(operation.successors)):
                 raise ValueError(f"operation {operation_id!r} contains duplicate successors")
             for successor_id in operation.successors:
-                successor = self.operations.get(successor_id)
+                successor: Operation | None = self.operations.get(successor_id)
                 if successor is None:
                     raise ValueError(
                         f"operation {operation_id!r} references unknown successor {successor_id!r}"
@@ -141,7 +141,7 @@ class OPSInstance(ClosedModel):
                     )
                 indegree[successor_id] += 1
 
-            unknown_machines = set(operation.machine_options) - machine_ids
+            unknown_machines: set[str] = set(operation.machine_options) - machine_ids
             if unknown_machines:
                 raise ValueError(
                     f"operation {operation_id!r} references unknown machines: "
@@ -155,8 +155,10 @@ class OPSInstance(ClosedModel):
                         f"operation {operation_id!r} fixed start precedes its release time"
                     )
 
-        ready = [operation_id for operation_id, degree in indegree.items() if degree == 0]
-        visited = 0
+        ready: list[str] = [
+            operation_id for operation_id, degree in indegree.items() if degree == 0
+        ]
+        visited: int = 0
         while ready:
             operation_id = ready.pop()
             visited += 1
@@ -168,7 +170,7 @@ class OPSInstance(ClosedModel):
             raise ValueError("operation precedence graph must be acyclic")
 
         for machine_id, machine in self.machines.items():
-            eligible_operation_ids = {
+            eligible_operation_ids: set[str] = {
                 operation_id
                 for operation_id, operation in self.operations.items()
                 if machine_id in operation.machine_options
@@ -177,7 +179,9 @@ class OPSInstance(ClosedModel):
                 raise ValueError(
                     f"machine {machine_id!r} first setup entries must match eligible operations"
                 )
-            expected_sources = eligible_operation_ids if len(eligible_operation_ids) > 1 else set()
+            expected_sources: set[str] = (
+                eligible_operation_ids if len(eligible_operation_ids) > 1 else set()
+            )
             if set(machine.setup_times.transitions) != expected_sources:
                 raise ValueError(
                     f"machine {machine_id!r} transition sources must match eligible operations"
@@ -229,12 +233,12 @@ def parse_input(raw: dict[str, Any]) -> OPSInstance:
 
 
 def _data_path() -> Path:
-    filename = sys.argv[1] if len(sys.argv) > 1 else "data_sops1.json"
+    filename: str = sys.argv[1] if len(sys.argv) > 1 else "data_sops1.json"
     return Path(__file__).parent / filename
 
 
 def _horizon(instance: OPSInstance) -> int:
-    anchor = max(
+    anchor: int = max(
         [operation.release_time for operation in instance.operations.values()]
         + [
             operation.fixed.start
@@ -244,10 +248,12 @@ def _horizon(instance: OPSInstance) -> int:
         + [gap.end for machine in instance.machines.values() for gap in machine.unavailability]
         + [0]
     )
-    work = 0
+    work: int = 0
     for operation_id, operation in instance.operations.items():
-        processing = max(option.processing_time for option in operation.machine_options.values())
-        setup = max(
+        processing: int = max(
+            option.processing_time for option in operation.machine_options.values()
+        )
+        setup: int = max(
             duration
             for machine_id in operation.machine_options
             for duration in (
@@ -278,10 +284,10 @@ def _add_resumable_duration(
 ) -> None:
     """Bind elapsed work to a calendar-aware finish when ``presence`` is true."""
 
-    skipped_time = []
+    skipped_time: list[cp_model.LinearExpr] = []
     for gap_index, gap in enumerate(unavailability):
-        start_after = model.new_bool_var(f"{name}_start_after_{gap_index}")
-        finish_after = model.new_bool_var(f"{name}_finish_after_{gap_index}")
+        start_after: CpsatIntVar = model.new_bool_var(f"{name}_start_after_{gap_index}")
+        finish_after: CpsatIntVar = model.new_bool_var(f"{name}_finish_after_{gap_index}")
 
         model.add(start >= gap.end).only_enforce_if(presence, start_after)
         model.add(start < gap.start).only_enforce_if(presence, start_after.Not())
@@ -295,13 +301,13 @@ def _add_resumable_duration(
 def solve(instance: OPSInstance) -> Solution:
     """Build and solve the main CP-SAT model for OPS makespan minimization."""
 
-    model = cp_model.CpModel()
-    horizon = _horizon(instance)
-    operation_ids = list(instance.operations)
+    model: cp_model.CpModel = cp_model.CpModel()
+    horizon: int = _horizon(instance)
+    operation_ids: list[str] = list(instance.operations)
 
-    starts: dict[str, CpsatIntVar] = {}
+    processing_starts: dict[str, CpsatIntVar] = {}
     theta_completion_times: dict[str, CpsatIntVar] = {}
-    ends: dict[str, CpsatIntVar] = {}
+    processing_ends: dict[str, CpsatIntVar] = {}
     setup_starts: dict[str, CpsatIntVar] = {}
     setup_durations: dict[str, CpsatIntVar] = {}
     assignments: dict[tuple[str, str], CpsatIntVar] = {}
@@ -310,22 +316,27 @@ def solve(instance: OPSInstance) -> Solution:
         machine_id: [] for machine_id in instance.machines
     }
 
+    # declare variables and enforce processing order for each operation
     for operation_index, (operation_id, operation) in enumerate(instance.operations.items()):
-        suffix = str(operation_index)
-        start: CpsatIntVar = model.new_int_var(operation.release_time, horizon, f"start_{suffix}")
+        suffix: str = str(operation_index)
+        processing_start: CpsatIntVar = model.new_int_var(
+            operation.release_time, horizon, f"processing_start_{suffix}"
+        )
         theta_completion_time: CpsatIntVar = model.new_int_var(
             operation.release_time, horizon, f"theta_completion_time_{suffix}"
         )
-        end: CpsatIntVar = model.new_int_var(operation.release_time, horizon, f"end_{suffix}")
+        processing_end: CpsatIntVar = model.new_int_var(
+            operation.release_time, horizon, f"processing_end_{suffix}"
+        )
         setup_start: CpsatIntVar = model.new_int_var(0, horizon, f"setup_start_{suffix}")
         setup_duration: CpsatIntVar = model.new_int_var(0, horizon, f"setup_duration_{suffix}")
-        starts[operation_id] = start
+        processing_starts[operation_id] = processing_start
         theta_completion_times[operation_id] = theta_completion_time
-        ends[operation_id] = end
+        processing_ends[operation_id] = processing_end
         setup_starts[operation_id] = setup_start
         setup_durations[operation_id] = setup_duration
-        model.add(start <= theta_completion_time)
-        model.add(theta_completion_time <= end)
+        model.add(processing_start <= theta_completion_time)
+        model.add(theta_completion_time <= processing_end)
 
         alternatives: list[CpsatIntVar] = []
         for machine_index, (machine_id, option) in enumerate(operation.machine_options.items()):
@@ -334,10 +345,10 @@ def solve(instance: OPSInstance) -> Solution:
             incoming_arcs[operation_id, machine_id] = []
             alternatives.append(is_assigned)
 
-            machine = instance.machines[machine_id]
+            machine: Machine = instance.machines[machine_id]
             _add_resumable_duration(
                 model,
-                start,
+                processing_start,
                 theta_completion_time,
                 _required_processing(operation.theta, option.processing_time),
                 machine.unavailability,
@@ -346,44 +357,49 @@ def solve(instance: OPSInstance) -> Solution:
             )
             _add_resumable_duration(
                 model,
-                start,
-                end,
+                processing_start,
+                processing_end,
                 option.processing_time,
                 machine.unavailability,
                 is_assigned,
-                f"end_{suffix}_{machine_index}",
+                f"processing_end_{suffix}_{machine_index}",
             )
             machine_setup_intervals[machine_id].append(
                 model.new_optional_interval_var(
                     setup_start,
                     setup_duration,
-                    start,
+                    processing_start,
                     is_assigned,
                     f"setup_{suffix}_{machine_index}",
                 )
             )
-
+        # make sure one and only one machine is assigned to each operation
         model.add_exactly_one(alternatives)
         if operation.fixed is not None:
+            # enforce the fixed machine and start time
             model.add(assignments[operation_id, operation.fixed.machine] == 1)
-            model.add(start == operation.fixed.start)
+            model.add(processing_start == operation.fixed.start)
 
+    # enforce precedence constraints between operations
     for operation_id, operation in instance.operations.items():
         for successor_id in operation.successors:
-            model.add(starts[successor_id] >= theta_completion_times[operation_id])
-            model.add(ends[successor_id] >= ends[operation_id])
+            model.add(processing_starts[successor_id] >= theta_completion_times[operation_id])
+            model.add(processing_ends[successor_id] >= processing_ends[operation_id])
 
     for machine_index, (machine_id, machine) in enumerate(instance.machines.items()):
-        eligible_operation_ids = [
+        # filter operations that are eligible to run on this machine
+        eligible_operation_ids: list[str] = [
             operation_id
             for operation_id in operation_ids
             if machine_id in instance.operations[operation_id].machine_options
         ]
-        node_index = {
-            operation_id: index
-            for index, operation_id in enumerate(eligible_operation_ids, start=1)
+        # create a node index dictinary for the circuit constraint,
+        # key is operation_id, value is index in eligible_operation_ids
+        node_index: dict[str, int] = {
+            operation_id: eligible_operation_index
+            for eligible_operation_index, operation_id in enumerate(eligible_operation_ids, start=1)
         }
-        machine_assignments = [
+        machine_assignments: list[CpsatIntVar] = [
             assignments[operation_id, machine_id] for operation_id in eligible_operation_ids
         ]
         machine_unused: CpsatIntVar = model.new_bool_var(f"machine_unused_{machine_index}")
@@ -393,16 +409,16 @@ def solve(instance: OPSInstance) -> Solution:
 
         for operation_id in eligible_operation_ids:
             is_assigned = assignments[operation_id, machine_id]
-            operation_node = node_index[operation_id]
+            operation_node: int = node_index[operation_id]
             sequence_arcs.append((operation_node, operation_node, is_assigned.Not()))
 
             is_first: CpsatIntVar = model.new_bool_var(f"is_first_{machine_index}_{operation_node}")
             sequence_arcs.append((0, operation_node, is_first))
             incoming_arcs[operation_id, machine_id].append((None, is_first))
-            first_setup = machine.setup_times.first[operation_id]
+            first_setup: int = machine.setup_times.first[operation_id]
             model.add(setup_durations[operation_id] == first_setup).only_enforce_if(is_first)
             model.add(
-                setup_starts[operation_id] == starts[operation_id] - first_setup
+                setup_starts[operation_id] == processing_starts[operation_id] - first_setup
             ).only_enforce_if(is_first)
 
             is_last: CpsatIntVar = model.new_bool_var(f"is_last_{machine_index}_{operation_node}")
@@ -417,15 +433,17 @@ def solve(instance: OPSInstance) -> Solution:
                 )
                 sequence_arcs.append((node_index[predecessor_id], node_index[operation_id], arc))
                 incoming_arcs[operation_id, machine_id].append((predecessor_id, arc))
-                transition = machine.setup_times.transitions[predecessor_id][operation_id]
+                transition: int = machine.setup_times.transitions[predecessor_id][operation_id]
                 model.add(setup_durations[operation_id] == transition).only_enforce_if(arc)
                 model.add(
-                    setup_starts[operation_id] == starts[operation_id] - transition
+                    setup_starts[operation_id] == processing_starts[operation_id] - transition
                 ).only_enforce_if(arc)
-                model.add(ends[predecessor_id] <= setup_starts[operation_id]).only_enforce_if(arc)
+                model.add(
+                    processing_ends[predecessor_id] <= setup_starts[operation_id]
+                ).only_enforce_if(arc)
 
         model.add_circuit(sequence_arcs)
-        outage_intervals = [
+        outage_intervals: list[cp_model.IntervalVar] = [
             model.new_fixed_size_interval_var(
                 gap.start,
                 gap.end - gap.start,
@@ -435,21 +453,21 @@ def solve(instance: OPSInstance) -> Solution:
         ]
         model.add_no_overlap(machine_setup_intervals[machine_id] + outage_intervals)
 
-    makespan = model.new_int_var(0, horizon, "makespan")
-    model.add_max_equality(makespan, list(ends.values()))
+    makespan: CpsatIntVar = model.new_int_var(0, horizon, "makespan")
+    model.add_max_equality(makespan, list(processing_ends.values()))
     model.minimize(makespan)
 
     def extract_schedule(
         reader: cp_model.CpSolver | cp_model.CpSolverSolutionCallback,
     ) -> list[ScheduledOperation]:
-        schedule = []
+        schedule: list[ScheduledOperation] = []
         for operation_id, operation in instance.operations.items():
-            machine_id = next(
+            machine_id: str = next(
                 machine_id
                 for machine_id in operation.machine_options
                 if reader.boolean_value(assignments[operation_id, machine_id])
             )
-            predecessor = next(
+            predecessor: str | None = next(
                 predecessor
                 for predecessor, arc in incoming_arcs[operation_id, machine_id]
                 if reader.boolean_value(arc)
@@ -462,10 +480,10 @@ def solve(instance: OPSInstance) -> Solution:
                     predecessor=predecessor,
                     setup_start=reader.value(setup_starts[operation_id]),
                     setup_duration=reader.value(setup_durations[operation_id]),
-                    start=reader.value(starts[operation_id]),
+                    start=reader.value(processing_starts[operation_id]),
                     processing_time=operation.machine_options[machine_id].processing_time,
                     theta_completion_time=reader.value(theta_completion_times[operation_id]),
-                    end=reader.value(ends[operation_id]),
+                    end=reader.value(processing_ends[operation_id]),
                 )
             )
         return schedule
@@ -483,10 +501,10 @@ def solve(instance: OPSInstance) -> Solution:
                 )
             )
 
-    solver = cp_model.CpSolver()
+    solver: cp_model.CpSolver = cp_model.CpSolver()
     solver.parameters.random_seed = int(os.environ.get("OPENCONSTRAINT_MCP_CPSAT_SEED", "42"))
     solver.parameters.num_workers = 1
-    status_code = solver.solve(model, _BestSolution())
+    status_code: cp_model.CpSolverStatus = solver.solve(model, _BestSolution())
     status_map: dict[
         cp_model.CpSolverStatus, Literal["optimal", "feasible", "infeasible", "unknown", "error"]
     ] = {
@@ -495,8 +513,12 @@ def solve(instance: OPSInstance) -> Solution:
         cp_model.INFEASIBLE: "infeasible",
         cp_model.UNKNOWN: "unknown",
     }
-    has_solution = status_code in (cp_model.OPTIMAL, cp_model.FEASIBLE)
-    bound_states = (cp_model.OPTIMAL, cp_model.FEASIBLE, cp_model.UNKNOWN)
+    has_solution: bool = status_code in (cp_model.OPTIMAL, cp_model.FEASIBLE)
+    bound_states: tuple[cp_model.CpSolverStatus, ...] = (
+        cp_model.OPTIMAL,
+        cp_model.FEASIBLE,
+        cp_model.UNKNOWN,
+    )
     return Solution(
         status=status_map.get(status_code, "error"),
         schedule=extract_schedule(solver) if has_solution else None,

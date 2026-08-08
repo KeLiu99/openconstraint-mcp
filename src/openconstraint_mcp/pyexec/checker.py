@@ -36,7 +36,7 @@ import tempfile
 from collections.abc import Callable
 from pathlib import Path
 from subprocess import Popen
-from typing import TypedDict
+from typing import Any, TypedDict
 
 from ..schemas.cpsat import CpsatCheckerReport, CpsatPythonResult
 from ..shared.childproc import ChildProcessTracker
@@ -105,7 +105,7 @@ def checker_infrastructure_report(exc: Exception) -> CpsatCheckerReport:
     )
 
 
-def _parse_final_line_json(text: str) -> dict | None:
+def _parse_final_line_json(text: str) -> dict[str, Any] | None:
     """Return the JSON object on the final non-empty stdout line, or ``None``.
 
     The checker protocol requires the verdict JSON to be the *final* stdout line.

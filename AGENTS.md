@@ -80,6 +80,7 @@ If `just` is unavailable in your environment, fall back to the underlying `uv ru
 
 - **Target Python 3.12** (development happens on 3.14). Avoid 3.13+ syntax and stdlib.
 - **Type hints everywhere.** Public functions get full annotations. `mypy src` must pass.
+- **Annotate local-name bindings.** Give every variable declared with a simple name assignment an explicit type. Assignments to existing attributes or container elements rely on the owning object's annotation; Python cannot annotate `for`/comprehension targets or subscript assignments.
 - **Pydantic v2 models** for any structured input or output (MCP tool results, CLI structured output, config). Plain dicts are for ephemeral internal use only.
 - **`pathlib.Path`** for filesystem work; do not pass raw strings around as paths.
 - **One responsibility per file.** Files that change together live; split by responsibility, not by technical layer.

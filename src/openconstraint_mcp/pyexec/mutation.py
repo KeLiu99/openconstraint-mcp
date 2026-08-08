@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import copy
 from dataclasses import dataclass
-from typing import TypeGuard
+from typing import Any, TypeGuard
 
 from ..schemas.cpsat import CpsatMutationName
 
@@ -25,7 +25,7 @@ class SolutionMutation:
     """
 
     name: CpsatMutationName
-    solution: dict | None = None
+    solution: dict[str, Any] | None = None
     objective: float | int | None = None
     skipped_reason: str | None = None
 
@@ -39,7 +39,7 @@ def _is_plain_int(value: object) -> TypeGuard[int]:
     return isinstance(value, int) and not isinstance(value, bool)
 
 
-def _select_list_key(solution: dict) -> str | None:
+def _select_list_key(solution: dict[str, Any]) -> str | None:
     """Return the longest non-empty top-level list; ties break by sorted key."""
     best_key: str | None = None
     best_len = 0
@@ -53,7 +53,7 @@ def _select_list_key(solution: dict) -> str | None:
 
 
 def generate_mutations(
-    solution: dict | None, objective: float | int | None
+    solution: dict[str, Any] | None, objective: float | int | None
 ) -> list[SolutionMutation]:
     """Return four fixed-order mutations without mutating ``solution``.
 
@@ -69,7 +69,9 @@ def generate_mutations(
     ]
 
 
-def _objective_perturbed(solution: dict, objective: float | int | None) -> SolutionMutation:
+def _objective_perturbed(
+    solution: dict[str, Any], objective: float | int | None
+) -> SolutionMutation:
     # Core already normalizes this to ``None`` or a finite numeric objective.
     if objective is None:
         return SolutionMutation(
@@ -94,7 +96,7 @@ def _objective_perturbed(solution: dict, objective: float | int | None) -> Solut
 
 
 def _element_dropped(
-    solution: dict, objective: float | int | None, list_key: str | None
+    solution: dict[str, Any], objective: float | int | None, list_key: str | None
 ) -> SolutionMutation:
     if list_key is None:
         return SolutionMutation(name=ELEMENT_DROPPED, skipped_reason=_NO_LIST_REASON)
@@ -104,7 +106,7 @@ def _element_dropped(
 
 
 def _element_duplicated(
-    solution: dict, objective: float | int | None, list_key: str | None
+    solution: dict[str, Any], objective: float | int | None, list_key: str | None
 ) -> SolutionMutation:
     if list_key is None:
         return SolutionMutation(name=ELEMENT_DUPLICATED, skipped_reason=_NO_LIST_REASON)
@@ -130,7 +132,7 @@ class _NumericTarget:
 
 
 def _find_numeric_target(
-    solution: dict, list_key: str | None, *, want_bool: bool
+    solution: dict[str, Any], list_key: str | None, *, want_bool: bool
 ) -> _NumericTarget | None:
     """Search the list head before the top level for a matching field.
 
@@ -152,7 +154,9 @@ def _find_numeric_target(
     return None
 
 
-def _apply_numeric_target(solution: dict, target: _NumericTarget, *, flip: bool) -> dict:
+def _apply_numeric_target(
+    solution: dict[str, Any], target: _NumericTarget, *, flip: bool
+) -> dict[str, Any]:
     """Deep-copy ``solution`` and bump (or, if ``flip``, negate) the targeted field.
 
     Re-resolves ``target`` against the fresh copy rather than mutating through
@@ -160,6 +164,7 @@ def _apply_numeric_target(solution: dict, target: _NumericTarget, *, flip: bool)
     never touched.
     """
     mutated = copy.deepcopy(solution)
+    container: Any
     if target.list_key is None:
         container = mutated
     elif isinstance(solution[target.list_key][0], dict):
@@ -171,7 +176,7 @@ def _apply_numeric_target(solution: dict, target: _NumericTarget, *, flip: bool)
 
 
 def _numeric_field_perturbed(
-    solution: dict, objective: float | int | None, list_key: str | None
+    solution: dict[str, Any], objective: float | int | None, list_key: str | None
 ) -> SolutionMutation:
     for want_bool in (False, True):
         target = _find_numeric_target(solution, list_key, want_bool=want_bool)
