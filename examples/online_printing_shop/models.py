@@ -7,7 +7,7 @@ makespan, and emits the openconstraint-mcp CP-SAT JSON envelope.
 import json
 import os
 import sys
-from decimal import ROUND_CEILING, Decimal
+from decimal import Decimal
 from pathlib import Path
 from typing import Annotated, Any, Literal, Self
 
@@ -297,7 +297,16 @@ def _horizon(instance: OPSInstance) -> int:
 
 
 def _required_processing(theta: Decimal, processing_time: int) -> int:
-    return int((theta * processing_time).to_integral_value(rounding=ROUND_CEILING))
+    """Return ceil(theta * processing_time) exactly, whatever the decimal context.
+
+    Decimal *stores* every digit but *multiplies* at the active context precision
+    (28 significant digits by default), which rounds a product just above an
+    integer down onto it. Reading theta as a coefficient/exponent ratio keeps the
+    ceiling exact for any theta an instance file states, and matches checker.py.
+    """
+
+    numerator, denominator = theta.as_integer_ratio()
+    return -(-numerator * processing_time // denominator)
 
 
 def _add_resumable_duration(

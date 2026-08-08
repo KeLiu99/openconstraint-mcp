@@ -11,7 +11,7 @@ import json
 import math
 import sys
 from dataclasses import dataclass
-from decimal import ROUND_CEILING, Decimal, InvalidOperation
+from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Any, TypeGuard
 
@@ -354,6 +354,19 @@ def _advance_active(start: int, duration: int, outages: tuple[tuple[int, int], .
     return current + remaining
 
 
+def _required_processing(theta: Decimal, processing_time: int) -> int:
+    """Return ceil(theta * processing_time) exactly, whatever the decimal context.
+
+    Decimal *stores* every digit but *multiplies* at the active context precision
+    (28 significant digits by default), which rounds a product just above an
+    integer down onto it. Reading theta as a coefficient/exponent ratio keeps the
+    ceiling exact for any theta an instance file states, and matches models.py.
+    """
+
+    numerator, denominator = theta.as_integer_ratio()
+    return -(-numerator * processing_time // denominator)
+
+
 def _overlap(start_a: int, end_a: int, start_b: int, end_b: int) -> bool:
     return start_a < end_b and start_b < end_a
 
@@ -504,11 +517,7 @@ def check_payload(payload: dict[str, Any]) -> dict[str, Any]:
                 errors.append(f"operation {entry.operation!r} setup overlaps an outage")
 
         end = _advance_active(entry.start, expected_processing, machine.outages)
-        theta_completion_work = int(
-            (operation.theta * Decimal(expected_processing)).to_integral_value(
-                rounding=ROUND_CEILING
-            )
-        )
+        theta_completion_work = _required_processing(operation.theta, expected_processing)
         theta_completion_time = _advance_active(entry.start, theta_completion_work, machine.outages)
         expected_end[entry.operation] = end
         expected_theta_completion_time[entry.operation] = theta_completion_time

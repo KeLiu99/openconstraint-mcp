@@ -1,5 +1,5 @@
 import json
-from decimal import Decimal
+from decimal import Decimal, localcontext
 from pathlib import Path
 from typing import Any
 
@@ -7,6 +7,9 @@ import pytest
 from pydantic import ValidationError
 
 from examples.online_printing_shop.audit_instance import audit_instance
+from examples.online_printing_shop.checker import (
+    _required_processing as _checker_required_processing,
+)
 from examples.online_printing_shop.models import (
     _required_processing,
     parse_input,
@@ -134,6 +137,36 @@ def test_theta_beyond_float_precision_keeps_the_checker_ceiling(tmp_path: Path) 
     operation = parse_input(read_input(path)).operations["1"]
 
     assert _required_processing(operation.theta, 2) == 2
+
+
+def test_theta_beyond_context_precision_keeps_the_model_ceiling(tmp_path: Path) -> None:
+    # 29 significant digits: Decimal multiplication at the default 28-digit
+    # context precision rounds the product down onto 1, but the exact ceiling is 2.
+    path = _write_instance_with_theta(tmp_path, "0.50000000000000000000000000001")
+
+    operation = parse_input(read_input(path)).operations["1"]
+
+    assert _required_processing(operation.theta, 2) == 2
+
+
+def test_checker_ceiling_matches_the_model_beyond_context_precision() -> None:
+    # The checker is an independent re-derivation; it must not repeat a rounding
+    # the model avoids, or it would accept a schedule that violates precedence.
+    theta = Decimal("0.50000000000000000000000000001")
+
+    assert _checker_required_processing(theta, 2) == _required_processing(theta, 2)
+
+
+def test_required_processing_ignores_the_active_decimal_context() -> None:
+    # Context precision is process-global mutable state that neither call site
+    # sets, so the ceiling must not depend on it.
+    theta = Decimal("0.50000000000000000000000000001")
+
+    with localcontext() as context:
+        context.prec = 6
+        result = _required_processing(theta, 2)
+
+    assert result == 2
 
 
 def test_float_theta_is_rejected_rather_than_silently_rounded() -> None:
