@@ -12,6 +12,7 @@ from examples.online_printing_shop.checker import (
 )
 from examples.online_printing_shop.models import (
     _required_processing,
+    _time_limit_seconds,
     parse_input,
     read_input,
     solve,
@@ -167,6 +168,32 @@ def test_required_processing_ignores_the_active_decimal_context() -> None:
         result = _required_processing(theta, 2)
 
     assert result == 2
+
+
+def test_no_config_file_leaves_the_solve_unbounded(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("OPENCONSTRAINT_MCP_CPSAT_CONFIG", raising=False)
+
+    assert _time_limit_seconds() is None
+
+
+def test_config_without_a_time_limit_leaves_the_solve_unbounded(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    config = tmp_path / "config.json"
+    config.write_text(json.dumps({"num_workers": 4}), encoding="utf-8")
+    monkeypatch.setenv("OPENCONSTRAINT_MCP_CPSAT_CONFIG", str(config))
+
+    assert _time_limit_seconds() is None
+
+
+def test_config_time_limit_is_read_as_seconds(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    config = tmp_path / "config.json"
+    config.write_text(json.dumps({"max_time_in_seconds": 20}), encoding="utf-8")
+    monkeypatch.setenv("OPENCONSTRAINT_MCP_CPSAT_CONFIG", str(config))
+
+    assert _time_limit_seconds() == 20.0
 
 
 def test_float_theta_is_rejected_rather_than_silently_rounded() -> None:

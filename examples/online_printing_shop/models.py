@@ -264,6 +264,24 @@ def _data_path() -> Path:
     return Path(__file__).parent / filename
 
 
+def _time_limit_seconds() -> float | None:
+    """Return the caller's CP-SAT wall-clock limit, or None to solve unbounded.
+
+    ``run_cpsat_python_*`` writes its ``config`` argument to a JSON file and
+    points ``OPENCONSTRAINT_MCP_CPSAT_CONFIG`` at it. Without a
+    ``max_time_in_seconds`` entry the solve stays unbounded — the small
+    instances prove optimality in well under a second, while a larger one needs
+    a limit to return an incumbent instead of being killed at the tool timeout.
+    """
+
+    config_path: str | None = os.environ.get("OPENCONSTRAINT_MCP_CPSAT_CONFIG")
+    if not config_path:
+        return None
+    config: dict[str, Any] = json.loads(Path(config_path).read_text(encoding="utf-8"))
+    limit: Any = config.get("max_time_in_seconds")
+    return None if limit is None else float(limit)
+
+
 def _horizon(instance: OPSInstance) -> int:
     anchor: int = max(
         [operation.release_time for operation in instance.operations.values()]
@@ -624,6 +642,9 @@ def solve(instance: OPSInstance) -> Solution:
     solver: cp_model.CpSolver = cp_model.CpSolver()
     solver.parameters.random_seed = int(os.environ.get("OPENCONSTRAINT_MCP_CPSAT_SEED", "42"))
     solver.parameters.num_workers = 1
+    time_limit_seconds: float | None = _time_limit_seconds()
+    if time_limit_seconds is not None:
+        solver.parameters.max_time_in_seconds = time_limit_seconds
     status_code: cp_model.CpSolverStatus = solver.solve(model, _BestSolution())
     status_map: dict[
         cp_model.CpSolverStatus, Literal["optimal", "feasible", "infeasible", "unknown", "error"]
