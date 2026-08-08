@@ -157,6 +157,54 @@ All identifiers are nonempty strings. JSON object keys provide machine and
 operation identity, so their order has no scheduling meaning. All time values
 are nonnegative integer ticks. Unknown fields are rejected.
 
+Solver configuration
+~~~~~~~~~~~~~~~~~~~~
+
+run_cpsat_python_file and run_cpsat_python_file_checked both accept seed and
+config arguments. The server never edits the script: it writes config to a
+temporary JSON file and hands the child two environment variables,
+OPENCONSTRAINT_MCP_CPSAT_SEED and OPENCONSTRAINT_MCP_CPSAT_CONFIG (that file's
+path). Honouring them is the script's job, so only the keys models.py actually
+reads take effect; every other key is silently ignored. The same variables work
+from a shell, which is how the uv commands above can be configured too.
+
+models.py reads three settings:
+
+random seed
+    OPENCONSTRAINT_MCP_CPSAT_SEED, default 42.
+
+max_time_in_seconds
+    The CP-SAT wall-clock limit. Without it the solve runs unbounded, and a run
+    started through an MCP tool is killed at timeout_ms instead of stopping on
+    its own. Set it below timeout_ms.
+
+num_workers
+    The CP-SAT worker count, default 1. One worker keeps a seeded run
+    reproducible and still proves the small instances optimal. The parallel
+    portfolio is nondeterministic in wall-clock terms, so its incumbent differs
+    between otherwise identical runs.
+
+What each instance needs:
+
+data_sops1.json
+    Nothing. It proves optimality in well under a second on one worker.
+
+data_mops1.json
+    max_time_in_seconds, so CP-SAT stops itself and returns an incumbent the
+    checker can verify.
+
+data_lops.json
+    Both, for example {"max_time_in_seconds": 150, "num_workers": 8}. On one
+    worker it spends the whole limit and still reports status "unknown" with no
+    incumbent, which the checker refuses.
+
+Streaming follows the same switch. With no max_time_in_seconds the solution
+callback prints a complete envelope for every improving solution, so a child
+killed at timeout_ms still leaves a recoverable incumbent on stdout. With a
+limit set the solve returns on its own and only the final envelope is printed,
+which is what keeps a long parallel run inside the executor's 1 MiB output cap
+— crossing that cap discards the whole result, incumbent included.
+
 Top-level fields
 ~~~~~~~~~~~~~~~~
 

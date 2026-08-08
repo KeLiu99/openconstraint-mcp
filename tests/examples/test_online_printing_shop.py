@@ -11,7 +11,9 @@ from examples.online_printing_shop.checker import (
     _required_processing as _checker_required_processing,
 )
 from examples.online_printing_shop.models import (
+    _num_workers,
     _required_processing,
+    _solver_config,
     _time_limit_seconds,
     parse_input,
     read_input,
@@ -170,30 +172,90 @@ def test_required_processing_ignores_the_active_decimal_context() -> None:
     assert result == 2
 
 
+def _write_config(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, config: dict[str, Any]) -> None:
+    """Point the config env var at a JSON file, the way run_cpsat_python_* does."""
+
+    path = tmp_path / "config.json"
+    path.write_text(json.dumps(config), encoding="utf-8")
+    monkeypatch.setenv("OPENCONSTRAINT_MCP_CPSAT_CONFIG", str(path))
+
+
+def test_no_config_file_yields_an_empty_config(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("OPENCONSTRAINT_MCP_CPSAT_CONFIG", raising=False)
+
+    assert _solver_config() == {}
+
+
 def test_no_config_file_leaves_the_solve_unbounded(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("OPENCONSTRAINT_MCP_CPSAT_CONFIG", raising=False)
 
-    assert _time_limit_seconds() is None
+    assert _time_limit_seconds(_solver_config()) is None
 
 
 def test_config_without_a_time_limit_leaves_the_solve_unbounded(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    config = tmp_path / "config.json"
-    config.write_text(json.dumps({"num_workers": 4}), encoding="utf-8")
-    monkeypatch.setenv("OPENCONSTRAINT_MCP_CPSAT_CONFIG", str(config))
+    _write_config(tmp_path, monkeypatch, {"num_workers": 4})
 
-    assert _time_limit_seconds() is None
+    assert _time_limit_seconds(_solver_config()) is None
 
 
 def test_config_time_limit_is_read_as_seconds(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    config = tmp_path / "config.json"
-    config.write_text(json.dumps({"max_time_in_seconds": 20}), encoding="utf-8")
-    monkeypatch.setenv("OPENCONSTRAINT_MCP_CPSAT_CONFIG", str(config))
+    _write_config(tmp_path, monkeypatch, {"max_time_in_seconds": 20})
 
-    assert _time_limit_seconds() == 20.0
+    assert _time_limit_seconds(_solver_config()) == 20.0
+
+
+def test_no_config_file_keeps_the_single_reproducible_worker(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("OPENCONSTRAINT_MCP_CPSAT_CONFIG", raising=False)
+
+    assert _num_workers(_solver_config()) == 1
+
+
+def test_config_without_workers_keeps_the_single_reproducible_worker(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _write_config(tmp_path, monkeypatch, {"max_time_in_seconds": 20})
+
+    assert _num_workers(_solver_config()) == 1
+
+
+def test_unbounded_solve_streams_recoverable_incumbents(
+    capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Without a self-imposed limit the child can only be stopped by a timeout
+    # kill, and these intermediate blocks are all the executor can recover.
+    monkeypatch.delenv("OPENCONSTRAINT_MCP_CPSAT_CONFIG", raising=False)
+
+    solve(parse_input(load_instance()))
+
+    assert capsys.readouterr().out.strip() != ""
+
+
+def test_time_limited_solve_streams_nothing(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # A self-imposed limit returns normally and main() prints the final envelope,
+    # so streaming would only spend the executor's 1 MiB stdout budget.
+    _write_config(tmp_path, monkeypatch, {"max_time_in_seconds": 30})
+
+    solve(parse_input(load_instance()))
+
+    assert capsys.readouterr().out == ""
+
+
+def test_config_workers_raise_the_cpsat_portfolio(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # data_lops.json finds no incumbent on one worker; the caller needs this key
+    # to reach a checkable solution at all.
+    _write_config(tmp_path, monkeypatch, {"max_time_in_seconds": 20, "num_workers": 8})
+
+    assert _num_workers(_solver_config()) == 8
 
 
 def test_float_theta_is_rejected_rather_than_silently_rounded() -> None:
