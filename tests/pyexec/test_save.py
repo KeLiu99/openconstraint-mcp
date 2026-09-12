@@ -9,6 +9,7 @@ from pathlib import Path
 import pytest
 
 from openconstraint_mcp.pyexec.core import VERIFIED_STATUSES, config_sha256
+from openconstraint_mcp.pyexec.diagnostics import save_failure_diagnostic
 from openconstraint_mcp.pyexec.save import (
     CHECKER_FILENAME,
     SOLUTION_FILENAME,
@@ -20,6 +21,7 @@ from openconstraint_mcp.schemas.cpsat import (
     CpsatPythonExperimentAttemptResult,
     CpsatPythonExperimentResult,
     CpsatPythonResult,
+    SaveVerifiedPythonResult,
 )
 from openconstraint_mcp.shared.save_target import (
     EXPERIMENT_LOG_FILENAME,
@@ -1599,3 +1601,76 @@ def test_missing_target_dir_is_checked_after_experiment_consistency(
 
     with pytest.raises(ValueError, match="status must be 'winner'"):
         save_verified_cpsat_python(_SCRIPT, experiment_result=experiment_result)
+
+
+# --- result mirrors the run -----------------------------------------------------
+
+
+# Every non-boolean run field the save result copies carries a distinct, non-default
+# value, so a swapped or dropped copy changes the mirrored dict. Two booleans cannot be
+# both non-default and distinct, so the two paths' runs set `timed_out`/`truncated` to
+# complementary values: the flags differ within each run and each flag takes both values
+# across the pair, so a swapped or hard-coded flag fails at least one test. The reported
+# gate reads only status and solution, so a `feasible` status with a non-empty solution
+# keeps it passing on both paths.
+_MIRROR_SAVED_RUN_RESULT: CpsatPythonResult = CpsatPythonResult(
+    status="feasible",
+    solution={"x": 7},
+    objective=17.5,
+    stdout="child stdout",
+    stderr="child stderr",
+    return_code=0,
+    timed_out=True,
+    truncated=False,
+    duration_ms=1234,
+)
+_MIRROR_FAILED_RUN_RESULT: CpsatPythonResult = _MIRROR_SAVED_RUN_RESULT.model_copy(
+    update={"timed_out": False, "truncated": True}
+)
+_MIRRORED_RUN_FIELDS: tuple[str, ...] = (
+    "solution",
+    "objective",
+    "stdout",
+    "stderr",
+    "timed_out",
+    "truncated",
+    "duration_ms",
+    "status",
+)
+
+
+def _mirrored_fields(result: CpsatPythonResult | SaveVerifiedPythonResult) -> dict[str, object]:
+    return {field: getattr(result, field) for field in _MIRRORED_RUN_FIELDS}
+
+
+def test_saved_result_mirrors_the_run(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _patch_executor(monkeypatch, _MIRROR_SAVED_RUN_RESULT)
+
+    result: SaveVerifiedPythonResult = save_verified_cpsat_python(
+        _SCRIPT, target_dir=tmp_path / "mirror"
+    )
+
+    assert result.saved is True
+    assert _mirrored_fields(result) == _mirrored_fields(_MIRROR_SAVED_RUN_RESULT)
+    assert result.diagnostic is None
+
+
+def test_gate_failure_result_mirrors_the_run(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _patch_executor(monkeypatch, _MIRROR_FAILED_RUN_RESULT)
+    exp: CpsatExpectation = CpsatExpectation(objective_sense="maximize", objective_threshold=100.0)
+
+    result: SaveVerifiedPythonResult = save_verified_cpsat_python(
+        _SCRIPT, target_dir=tmp_path / "mirror", expectation=exp
+    )
+
+    assert result.expectation_passed is False
+    assert _mirrored_fields(result) == _mirrored_fields(_MIRROR_FAILED_RUN_RESULT)
+    assert result.target_dir is None
+    assert result.files == []
+    assert result.diagnostic == save_failure_diagnostic(_MIRROR_FAILED_RUN_RESULT, None)

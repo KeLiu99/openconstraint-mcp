@@ -21,6 +21,7 @@ from ..schemas.cpsat import (
     CpsatVerificationLevel,
     SaveVerifiedPythonResult,
 )
+from ..schemas.diagnostics import Diagnostic
 from ..shared.childproc import ChildProcessTracker
 from ..shared.hashing import path_sha256
 from ..shared.save_target import (
@@ -71,6 +72,40 @@ def _expectation_passes(
         return False, f"objective {obj} > threshold {threshold} (minimize)"
 
 
+def _save_result(
+    *,
+    run_result: CpsatPythonResult,
+    target_dir: str | None,
+    reason: str | None,
+    files: list[SavedModelArtifact],
+    verification_level: CpsatVerificationLevel,
+    reported_passed: bool,
+    expectation: CpsatExpectation | None,
+    expectation_passed: bool | None,
+    checker: CpsatCheckerReport | None,
+    diagnostic: Diagnostic | None,
+) -> SaveVerifiedPythonResult:
+    return SaveVerifiedPythonResult(
+        status=run_result.status,
+        target_dir=target_dir,
+        reason=reason,
+        solution=run_result.solution,
+        objective=run_result.objective,
+        stdout=run_result.stdout,
+        stderr=run_result.stderr,
+        timed_out=run_result.timed_out,
+        truncated=run_result.truncated,
+        duration_ms=run_result.duration_ms,
+        files=files,
+        verification_level=verification_level,
+        reported_passed=reported_passed,
+        expectation=expectation,
+        expectation_passed=expectation_passed,
+        checker=checker,
+        diagnostic=diagnostic,
+    )
+
+
 def _failure(
     run_result: CpsatPythonResult,
     *,
@@ -81,17 +116,11 @@ def _failure(
     expectation_passed: bool | None,
     checker: CpsatCheckerReport | None,
 ) -> SaveVerifiedPythonResult:
-    return SaveVerifiedPythonResult(
-        status=run_result.status,
+    return _save_result(
+        run_result=run_result,
         target_dir=None,
         reason=reason,
-        solution=run_result.solution,
-        objective=run_result.objective,
-        stdout=run_result.stdout,
-        stderr=run_result.stderr,
-        timed_out=run_result.timed_out,
-        truncated=run_result.truncated,
-        duration_ms=run_result.duration_ms,
+        files=[],
         verification_level=verification_level,
         reported_passed=reported_passed,
         expectation=expectation,
@@ -543,21 +572,15 @@ def save_verified_cpsat_python(
             )
 
         files, _ = commit_staged_dir(target, overwrite=overwrite, write_files=_writer)
-    return SaveVerifiedPythonResult(
-        status=run_result.status,
+    return _save_result(
+        run_result=run_result,
         target_dir=str(target) if target is not None else None,
         reason=None,
-        solution=run_result.solution,
-        objective=run_result.objective,
-        stdout=run_result.stdout,
-        stderr=run_result.stderr,
-        timed_out=run_result.timed_out,
-        truncated=run_result.truncated,
-        duration_ms=run_result.duration_ms,
         files=files,
         verification_level=final_level,
         reported_passed=True,
         expectation=expectation,
         expectation_passed=exp_passed,
         checker=checker_report,
+        diagnostic=None,
     )
