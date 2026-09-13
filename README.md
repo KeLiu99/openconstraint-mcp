@@ -39,42 +39,8 @@ package is the runtime download you trigger explicitly with `install-runtime`.
 
 ## Stage 2 readiness
 
-The intended LLM-verification loop —
-`inspect/check -> solve or submit job -> check/verify -> repair if needed ->
-save -> rerun from saved files` — is complete for both backends:
-
-- **Background jobs.** MiniZinc: `submit_solve_job`/`get_solve_job` and
-  `submit_portfolio_job`/`get_portfolio_job`. CP-SAT: `submit_cpsat_python_job`/
-  `submit_cpsat_python_file_job` with `get_cpsat_python_job`. See
-  [Background solve jobs](https://github.com/Openconstraint/openconstraint-mcp/blob/master/docs/mcp-tools.md#background-solve-jobs),
-  [Background portfolio jobs](https://github.com/Openconstraint/openconstraint-mcp/blob/master/docs/mcp-tools.md#background-portfolio-jobs), and
-  [Background CP-SAT jobs](https://github.com/Openconstraint/openconstraint-mcp/blob/master/docs/cpsat-python.md#background-cp-sat-jobs).
-- **Structured diagnostics.** A stable `diagnostic.category` enum on every
-  solve/check/inspect/unsat-core/save/job/portfolio/checker/experiment result —
-  see [Structured diagnostics](#structured-diagnostics).
-- **Checker-backed workflows.** `solve_minizinc_model`/`solve_minizinc_files`
-  accept an inline/path checker; `save_verified_cpsat_python` and the CP-SAT
-  job tools accept a Python checker gate. The [Example
-  inventory](#example-inventory) below links a real checker-rejects-a-wrong-answer
-  demonstration.
-- **Infeasibility repair.** `find_unsat_core`/`find_unsat_core_files` diagnose
-  an unsatisfiable MiniZinc model; see [Diagnosing and repairing
-  infeasibility](#diagnosing-and-repairing-infeasibility) for an end-to-end,
-  test-backed walkthrough, including the honest no-core/inconclusive case.
-- **Inspection.** `inspect_minizinc_model`/`inspect_minizinc_files` report a
-  model's required parameters and output variables before spending a solve.
-- **Reproducible artifacts.** `save_verified_minizinc_model` and
-  `save_verified_cpsat_python` re-verify before writing, record a durable
-  experiment log when portfolio/experiment provenance is attached, and are
-  rerunnable via `solve_minizinc_files` / `run_cpsat_python_file` — see
-  [Reproducing a saved CP-SAT artifact](https://github.com/Openconstraint/openconstraint-mcp/blob/master/docs/cpsat-python.md#reproducing-a-saved-cp-sat-artifact)
-  for the CP-SAT replay caveat (`run_cpsat_python_file` re-verifies at the
-  `reported` level only; `run_cpsat_python_file_checked` re-runs the saved
-  checker too, and full gate replay — including the objective `expectation` —
-  re-runs `save_verified_cpsat_python`).
-- **Examples.** The [Example inventory](#example-inventory) maps every
-  retained example to the workflow(s) it demonstrates, its test coverage, and
-  any known gap, rather than leaving coverage implicit.
+The LLM-verification loop is complete for both backends. See
+[Workflow coverage](https://github.com/Openconstraint/openconstraint-mcp/blob/master/docs/mcp-tools.md#workflow-coverage).
 
 ## Installation
 
@@ -282,47 +248,9 @@ The package exposes five commands:
 ## Structured diagnostics
 
 Every solve, check, inspect, unsat-core, save, job, portfolio, checker, and
-experiment result carries an optional `diagnostic` field so a client can branch
-on a **stable category** before scraping raw `stdout`/`stderr`/transcripts:
-
-- `diagnostic: null` is the clean-success signal — a diagnostic is present only
-  when there is something actionable or noteworthy.
-- `diagnostic.category` is a stable enum (below); `diagnostic.message` is a
-  concise human summary; `diagnostic.details` is an optional compact dict of
-  machine-readable facts (`return_code`, `timed_out`, `truncated`, `solver`,
-  `checker_status`, …). Raw streams remain available and unchanged.
-
-Existing `status`/`state` fields are unchanged and remain the primary
-success/failure outcome; `diagnostic` is additive. Pre-result MCP errors (raised
-before any result model exists) expose the same contract through a documented
-first line, `Diagnostic: <category> — <message>`, in the error text.
-
-| category | what happened | typical client action |
-| --- | --- | --- |
-| `syntax_or_compile_error` | the model did not compile | fix the model syntax and re-check |
-| `missing_data` | a required parameter/data value is missing | supply the missing data (`.dzn` or inline) |
-| `type_error` | a type/type-inst error | fix the offending declaration/expression |
-| `solver_unavailable` | the requested solver id is unknown/unusable | pick an available solver (`list_available_solvers`) |
-| `infeasible` | the model is unsatisfiable | relax constraints; try `find_unsat_core` |
-| `unbounded` | the objective is unbounded | add a bound to the objective |
-| `infeasible_or_unbounded` | unsat or unbounded, solver can't tell | add bounds and re-solve to disambiguate |
-| `timeout_no_incumbent` | hit the time limit, no solution found | raise the run's timeout or simplify the model |
-| `timeout_with_incumbent` | hit the time limit, best-so-far returned | accept the incumbent or raise the run's timeout for a proof |
-| `cancelled` | a job was cancelled | resubmit if still needed |
-| `job_failed` | a background job failed with no result | read `message`; fix inputs and resubmit |
-| `child_process_error` | the CP-SAT child failed or broke its output contract | fix the script; check `stderr`/`return_code` |
-| `output_truncated` | the child's output exceeded the 1 MiB cap (CP-SAT or MiniZinc) and was truncated | reduce printed output, or page a MiniZinc enumeration with `num_solutions` |
-| `invalid_save_target` | the save `target_dir` is invalid/occupied | pick an absolute, empty/owned dir; pass `overwrite=true` |
-| `not_verified` | a save/verification gate rejected the result | address the gate (objective/checker) and retry |
-| `checker_failed` | the solution checker rejected/errored/timed out | inspect `checker`; fix the solution or checker |
-| `runtime_missing` | the managed MiniZinc runtime is not installed | run `openconstraint-mcp install-runtime` |
-| `unsupported_feature` | a requested control/feature is unsupported | drop it or choose a supporting solver |
-| `invalid_request` | malformed/invalid input rejected pre-result | fix the argument/path; retry |
-| `no_winner` | a portfolio/experiment accepted no attempt | broaden attempts or relax the gate |
-| `unknown` | no safe classification | read the raw `status`/`stderr` |
-
-The server never performs LLM repair and does not sandbox CP-SAT children; a
-diagnostic describes only what the local wrapper observed.
+experiment result carries an optional `diagnostic` field with a stable `category`
+a client can branch on; `diagnostic: null` is the clean-success signal. See
+[docs/mcp-tools.md](https://github.com/Openconstraint/openconstraint-mcp/blob/master/docs/mcp-tools.md#structured-diagnostics).
 
 ## MCP tools
 
@@ -652,66 +580,5 @@ authoritative document, the MiniZincIDE release page is the recommended source.
 
 ## Releasing (maintainers)
 
-`.github/workflows/release.yml` uses PyPI Trusted Publishing, so no PyPI token is
-stored in GitHub. A manual workflow run publishes only to TestPyPI; publishing to
-PyPI requires a version tag and approval of the protected `pypi` environment.
-
-A Trusted Publisher is bound to an exact owner, repository, workflow filename, and
-environment — here `Openconstraint`, `openconstraint-mcp`, `release.yml`, and
-`pypi`/`testpypi`. Changing any of them requires re-registering the publisher.
-
-### One-time setup
-
-1. Create the GitHub environments `testpypi` and `pypi`. Require the maintainer as a
-   reviewer for `pypi`. A solo maintainer must leave **Prevent self-review**
-   disabled, and should uncheck **Allow administrators to bypass** so the approval
-   applies to admins too. Restrict `pypi` deployments to tags matching `v*`, and
-   `testpypi` deployments to the `master` branch — the TestPyPI job runs from a
-   manual dispatch, so a tag rule there would reject every rehearsal.
-2. Create and verify separate accounts on [TestPyPI](https://test.pypi.org/) and
-   [PyPI](https://pypi.org/), enable 2FA, and store recovery codes safely.
-3. On each account's **Publishing** page, add a pending GitHub Trusted Publisher with:
-   project `openconstraint-mcp`, owner `Openconstraint`, repository
-   `openconstraint-mcp`, workflow `release.yml`, and environment `testpypi` or `pypi`
-   respectively. Do not create an API token.
-
-### TestPyPI rehearsal
-
-1. Run `just check` and `just build` locally.
-2. After the release workflow is on the default branch, open GitHub **Actions →
-   Release → Run workflow** and run it from that branch. This path can publish only
-   to TestPyPI.
-3. Approve the `testpypi` deployment if that environment has a required reviewer.
-4. Smoke-test the uploaded package (replace the version after the first rehearsal):
-
-   ```bash
-   uv run --isolated --no-project \
-     --with "openconstraint-mcp==0.1.0" \
-     --index https://pypi.org/simple/ \
-     --default-index https://test.pypi.org/simple/ \
-     openconstraint-mcp --help
-   ```
-
-   `--index` outranks `--default-index`, so dependencies (pydantic, httpx, ...)
-   resolve from PyPI; only the unreleased `openconstraint-mcp` version — absent
-   from PyPI — falls through to TestPyPI. A bare `--index test.pypi.org` would
-   make TestPyPI's stale/alpha releases of common dependency names (e.g.
-   `pydantic` only goes up to `1.5a1` there) win resolution and break the smoke
-   test.
-
-TestPyPI never overwrites a release. Increment the version before repeating a
-rehearsal whose version is already present there. TestPyPI and PyPI are separate, so
-using `0.1.0` on TestPyPI does not prevent publishing `0.1.0` to PyPI.
-
-### PyPI release
-
-After the rehearsal and default-branch CI are green, verify that the version in
-`pyproject.toml` is the intended release, then create and push only that tag:
-
-```bash
-git tag -a v0.1.0 -m "v0.1.0"
-git push origin v0.1.0
-```
-
-Approve the waiting `pypi` deployment in GitHub Actions. Without both the tag push
-and that approval, the workflow cannot publish to PyPI.
+Trusted Publishing setup, TestPyPI rehearsal, and the tagged PyPI release. See
+[docs/releasing.md](https://github.com/Openconstraint/openconstraint-mcp/blob/master/docs/releasing.md).

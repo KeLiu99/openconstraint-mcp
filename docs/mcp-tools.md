@@ -787,3 +787,87 @@ to other requests during long runs. Both channels are local protocol messages
 to the connected client; nothing changes in any tool's input schema, output
 schema, or result semantics, and a client that supports neither channel simply
 sees the final result as before.
+
+## Workflow coverage
+
+The intended LLM-verification loop —
+`inspect/check -> solve or submit job -> check/verify -> repair if needed ->
+save -> rerun from saved files` — is complete for both backends:
+
+- **Background jobs.** MiniZinc: `submit_solve_job`/`get_solve_job` and
+  `submit_portfolio_job`/`get_portfolio_job`. CP-SAT: `submit_cpsat_python_job`/
+  `submit_cpsat_python_file_job` with `get_cpsat_python_job`. See
+  [Background solve jobs](#background-solve-jobs),
+  [Background portfolio jobs](#background-portfolio-jobs), and
+  [Background CP-SAT jobs](cpsat-python.md#background-cp-sat-jobs).
+- **Structured diagnostics.** A stable `diagnostic.category` enum on every
+  solve/check/inspect/unsat-core/save/job/portfolio/checker/experiment result —
+  see [Structured diagnostics](#structured-diagnostics).
+- **Checker-backed workflows.** `solve_minizinc_model`/`solve_minizinc_files`
+  accept an inline/path checker; `save_verified_cpsat_python` and the CP-SAT
+  job tools accept a Python checker gate. The [Example
+  inventory](https://github.com/Openconstraint/openconstraint-mcp/blob/master/README.md#example-inventory) links a real checker-rejects-a-wrong-answer
+  demonstration.
+- **Infeasibility repair.** `find_unsat_core`/`find_unsat_core_files` diagnose
+  an unsatisfiable MiniZinc model; see [Diagnosing and repairing
+  infeasibility](https://github.com/Openconstraint/openconstraint-mcp/blob/master/README.md#diagnosing-and-repairing-infeasibility) for an end-to-end,
+  test-backed walkthrough, including the honest no-core/inconclusive case.
+- **Inspection.** `inspect_minizinc_model`/`inspect_minizinc_files` report a
+  model's required parameters and output variables before spending a solve.
+- **Reproducible artifacts.** `save_verified_minizinc_model` and
+  `save_verified_cpsat_python` re-verify before writing, record a durable
+  experiment log when portfolio/experiment provenance is attached, and are
+  rerunnable via `solve_minizinc_files` / `run_cpsat_python_file` — see
+  [Reproducing a saved CP-SAT artifact](cpsat-python.md#reproducing-a-saved-cp-sat-artifact)
+  for the CP-SAT replay caveat (`run_cpsat_python_file` re-verifies at the
+  `reported` level only; `run_cpsat_python_file_checked` re-runs the saved
+  checker too, and full gate replay — including the objective `expectation` —
+  re-runs `save_verified_cpsat_python`).
+- **Examples.** The [Example inventory](https://github.com/Openconstraint/openconstraint-mcp/blob/master/README.md#example-inventory) maps every
+  retained example to the workflow(s) it demonstrates, its test coverage, and
+  any known gap, rather than leaving coverage implicit.
+
+## Structured diagnostics
+
+Every solve, check, inspect, unsat-core, save, job, portfolio, checker, and
+experiment result carries an optional `diagnostic` field so a client can branch
+on a **stable category** before scraping raw `stdout`/`stderr`/transcripts:
+
+- `diagnostic: null` is the clean-success signal — a diagnostic is present only
+  when there is something actionable or noteworthy.
+- `diagnostic.category` is a stable enum (below); `diagnostic.message` is a
+  concise human summary; `diagnostic.details` is an optional compact dict of
+  machine-readable facts (`return_code`, `timed_out`, `truncated`, `solver`,
+  `checker_status`, …). Raw streams remain available and unchanged.
+
+Existing `status`/`state` fields are unchanged and remain the primary
+success/failure outcome; `diagnostic` is additive. Pre-result MCP errors (raised
+before any result model exists) expose the same contract through a documented
+first line, `Diagnostic: <category> — <message>`, in the error text.
+
+| category | what happened | typical client action |
+| --- | --- | --- |
+| `syntax_or_compile_error` | the model did not compile | fix the model syntax and re-check |
+| `missing_data` | a required parameter/data value is missing | supply the missing data (`.dzn` or inline) |
+| `type_error` | a type/type-inst error | fix the offending declaration/expression |
+| `solver_unavailable` | the requested solver id is unknown/unusable | pick an available solver (`list_available_solvers`) |
+| `infeasible` | the model is unsatisfiable | relax constraints; try `find_unsat_core` |
+| `unbounded` | the objective is unbounded | add a bound to the objective |
+| `infeasible_or_unbounded` | unsat or unbounded, solver can't tell | add bounds and re-solve to disambiguate |
+| `timeout_no_incumbent` | hit the time limit, no solution found | raise the run's timeout or simplify the model |
+| `timeout_with_incumbent` | hit the time limit, best-so-far returned | accept the incumbent or raise the run's timeout for a proof |
+| `cancelled` | a job was cancelled | resubmit if still needed |
+| `job_failed` | a background job failed with no result | read `message`; fix inputs and resubmit |
+| `child_process_error` | the CP-SAT child failed or broke its output contract | fix the script; check `stderr`/`return_code` |
+| `output_truncated` | the child's output exceeded the 1 MiB cap (CP-SAT or MiniZinc) and was truncated | reduce printed output, or page a MiniZinc enumeration with `num_solutions` |
+| `invalid_save_target` | the save `target_dir` is invalid/occupied | pick an absolute, empty/owned dir; pass `overwrite=true` |
+| `not_verified` | a save/verification gate rejected the result | address the gate (objective/checker) and retry |
+| `checker_failed` | the solution checker rejected/errored/timed out | inspect `checker`; fix the solution or checker |
+| `runtime_missing` | the managed MiniZinc runtime is not installed | run `openconstraint-mcp install-runtime` |
+| `unsupported_feature` | a requested control/feature is unsupported | drop it or choose a supporting solver |
+| `invalid_request` | malformed/invalid input rejected pre-result | fix the argument/path; retry |
+| `no_winner` | a portfolio/experiment accepted no attempt | broaden attempts or relax the gate |
+| `unknown` | no safe classification | read the raw `status`/`stderr` |
+
+The server never performs LLM repair and does not sandbox CP-SAT children; a
+diagnostic describes only what the local wrapper observed.
